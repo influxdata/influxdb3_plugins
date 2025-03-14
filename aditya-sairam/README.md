@@ -102,3 +102,24 @@ influxdb3 create trigger \
 | 7455935.0    | 6644.0  | total_yield | 7846821.0    | 7087724.960398853     | 7256784.4465       | 6407683.0    | 7281035.0 | 2025-02-27T14:44:40.758843047 | 2020-06-15T00:00:00 |
 +--------------+---------+-------------+--------------+-----------------------+--------------------+--------------+-----------+-------------------------------+---------------------+
 ```
+## **Column Based Downsampling** 
+
+The column based downsampling feature gives the user the ability to downsample based on a particular categorical column. 
+```bash
+influxdb3 create trigger \
+  --database <database-name> \
+  --trigger-spec 'table:<table-name>' \
+  --trigger-arguments 'table_name:<table-name>,column_sampling:<column_name>' \
+  --plugin-filename <path-to-file>/stats_metrics.py stats_metrics_trigger
+```
+
+```bash
+| 95th_percentile | count | field_name   | max     | mean   | median | min | mode | source_key        | time                 |
+|----------------|-------|-------------|---------|--------|--------|-----|------|-------------------|----------------------|
+| 1034.71       | 3154  | ac_power    | 1300.17 | 281.12 | 29.26  | 0   | 0    | 1BY6WEcLGh8j5v7  | 2025-03-11 2:05:36  |
+| 1128.15       | 3119  | ac_power    | 1394.51 | 315.49 | 43.69  | 0   | 0    | 1IF53ai7Xc0U56Y  | 2025-03-11 2:05:36  |
+| 1303.91       | 3155  | dc_power    | 1384.23 | 310.45 | 45.12  | 0   | 0    | 1BY6WEcLGh8j5v7  | 2025-03-11 2:05:36  |
+| 1222.56       | 3140  | dc_power    | 1400.72 | 320.22 | 48.11  | 0   | 0    | 1IF53ai7Xc0U56Y  | 2025-03-11 2:05:36  |
+| 1298.23       | 3139  | daily_yield | 1450.62 | 325.88 | 48.34  | 0   | 0    | 1BY6WEcLGh8j5v7  | 2025-03-11 2:05:36  |
+| 1189.92       | 3142  | daily_yield | 1390.23 | 317.1  | 47.3   | 0   | 0    | 1IF53ai7Xc0U56Y  | 2025-03-11 2:05:36  |
+```

@@ -7,6 +7,8 @@ This plugin enables the transformation of time series data stored in InfluxDB 3 
 
 ## Files
 - `basic_transformation.py`: The main plugin code containing handlers for scheduled tasks.
+- `basic_transformation_config_data_writes.toml`: Example TOML configuration file for data write triggers.
+- `basic_transformation_config_scheduler.toml`: Example TOML configuration file for scheduled triggers.
 
 ## Features
 - **Scheduler and Data Write Support**: Run periodically or on data writes via InfluxDB triggers.
@@ -46,6 +48,52 @@ influxdb3 query --database _internal "SELECT * FROM system.processing_engine_log
 ```bash
 influxdb3 install package pint
 ```
+
+## Using TOML Configuration Files
+
+This plugin supports using TOML configuration files to specify all plugin arguments. This is useful for complex configurations or when you want to version control your plugin settings.
+
+### Important Requirements
+
+**To use TOML configuration files, you must set the `PLUGIN_DIR` environment variable in the InfluxDB 3 host environment.** This is required in addition to the `--plugin-dir` flag when starting InfluxDB 3:
+
+- `--plugin-dir` tells InfluxDB 3 where to find plugin Python files
+- `PLUGIN_DIR` environment variable tells the plugins where to find TOML configuration files
+
+### Setting Up TOML Configuration
+
+1. **Start InfluxDB 3 with the PLUGIN_DIR environment variable set**:
+   ```bash
+   PLUGIN_DIR=~/.plugins influxdb3 serve --node-id node0 --object-store file --data-dir ~/.influxdb3 --plugin-dir ~/.plugins
+   ```
+
+2. **Copy the example TOML configuration file to your plugin directory**:
+   ```bash
+   cp basic_transformation_config_scheduler.toml ~/.plugins/
+   # or for data writes:
+   cp basic_transformation_config_data_writes.toml ~/.plugins/
+   ```
+
+3. **Edit the TOML file** to match your requirements. The TOML file contains all the arguments defined in the plugin's argument schema (see the JSON schema in the docstring at the top of basic_transformation.py).
+
+4. **Create a trigger using the `config_file_path` argument**:
+   ```bash
+   influxdb3 create trigger \
+     --database mydb \
+     --plugin-filename basic_transformation.py \
+     --trigger-spec "every:1d" \
+     --trigger-arguments config_file_path=basic_transformation_config_scheduler.toml \
+     basic_transform_trigger
+   ```
+
+### Important Notes
+- The `PLUGIN_DIR` environment variable must be set when starting InfluxDB 3 for TOML configuration to work
+- When using `config_file_path`, specify only the filename (not the full path)
+- The TOML file must be located in the directory specified by `PLUGIN_DIR`
+- All parameters in the TOML file will override any command-line arguments
+- Example TOML configuration files are provided:
+  - `basic_transformation_config_scheduler.toml` - for scheduled triggers
+  - `basic_transformation_config_data_writes.toml` - for data write triggers
 
 ## Configure & Create Triggers
 

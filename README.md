@@ -6,7 +6,7 @@ You can install these plugins to your InfluxDB 3 Enterprise or Core instance wit
 ## Description
 
 InfluxDB 3 plugins extend the functionality of your InfluxDB instance with custom data processing, transformation, and notification capabilities.
-The plugin ecosystem supports three main trigger types: scheduled execution, data write events, and HTTP requests.
+Plugins and triggers support three main types: scheduled execution, data write events, and HTTP requests.
 
 For more information about using plugins and triggers, see the InfluxDB 3 Get Started tutorial:
 - [Process data in InfluxDB 3 Core](https://docs.influxdata.com/influxdb3/core/get-started/process/)
@@ -14,7 +14,7 @@ For more information about using plugins and triggers, see the InfluxDB 3 Get St
 
 ## Plugin Organization
 
-Plugins are organized in a structured directory hierarchy that reflects their contributor or organizational grouping:
+Plugins in this repo are organized in a structured directory hierarchy that reflects their contributor or organizational grouping:
 
 ```
 organization/
@@ -39,14 +39,14 @@ suyashcjoshi/data-replicator/data-replicator.py
 - Use snake_case for Python files and directory names
 - Plugin directories may contain additional files such as configuration templates, test data, and documentation
 
-## Plugin Installation
+## Using Plugins 
 
-Install plugins using the InfluxDB 3 CLI:
+To use a plugin, you create a trigger in InfluxDB 3 (via CLI or HTTP API) that specifies the trigger name, database, trigger specification, plugin file, and any additional parameters--for example:
 
 ```bash
 # Create trigger for scheduled plugin
 influxdb3 create trigger \
-  --database DATABASE_NAME \
+  --database mydb \
   --plugin-filename plugin_name.py \
   --trigger-spec "every:1h" \
   --trigger-arguments param1=value1 \
@@ -54,9 +54,32 @@ influxdb3 create trigger \
 ```
 
 Replace the following:
-- `DATABASE_NAME`: the name of the database to use
-- `plugin_name.py`: the path to the plugin file
+- `mydb`: the name of the [database](https://docs.influxdata.com/influxdb3/core/admin/databases/) to use
+- `every:1h`: the [trigger specification](https://docs.influxdata.com/influxdb3/core/get-started/process/#trigger-specifications) (for example, `every:1h`, `on_write`, or `request:notify`)
+- `plugin_name.py`: the path to the plugin file (relative to the plugin directory)
 - `trigger_name`: a unique name for this trigger instance
+- `param1=value1`: any additional `key=value` [arguments](https://docs.influxdata.com/influxdb3/core/plugins/#pass-arguments-to-plugins) to pass to the plugin
+
+## Plugin Metadata
+
+Plugins in this repository require metadata in a JSON-formatted
+docstring at the beginning of the Python file.
+This metadata:
+- Defines the plugin's supported trigger types
+(`scheduled`, `onwrite`, `http`)
+- Specifies configuration parameters for each
+trigger type
+- Enables the InfluxDB 3 Explorer UI to display
+and configure the plugin
+
+To display the plugin metadata in the Explorer UI,
+repository owners generate a `plugin_library.json` registry file
+that contains metadata for all plugins in this repository.
+
+For complete metadata specifications, formatting
+ requirements, and examples, see
+[REQUIRED_PLUGIN_METADATA.md](REQUIRED_PLUGIN_MET
+ADATA.md).
 
 ## Plugin Development
 
@@ -83,7 +106,37 @@ Replace the following:
 - Use type hints where possible
 - Include comprehensive error handling
 - Support both dry-run and live execution modes
-- Follow the [Style Guide](STYLE_GUIDE.md) for documentation standards
+- Follow the [Style Guide](CONTRIBUTING.md) for documentation standards
+
+### Run Tests 
+
+InfluxDB 3 Core and InfluxDB 3 Enterprise provide the `influxdb3 test` CLI command to validate plugins without creating a trigger--for example:
+
+```bash
+influxdb3 test schedule_plugin \
+  --database DATABASE_NAME \
+  --token AUTH_TOKEN \
+  --input-arguments threshold=10,unit=seconds \
+  --schedule "0 0 * * * ?" \
+  PLUGIN_FILENAME.py
+```
+
+The `test-plugins.sh` script in this repository can also be used to run tests for plugins.
+The script starts InfluxDB 3 in a Docker container and runs the `influxdb3 test` command against the specific organization or plugin that you specify.
+
+#### test-plugins.sh usage:
+
+```bash
+# Test all influxdata plugins with InfluxDB 3 Core (default)
+./test-plugins.sh influxdata
+./test-plugins.sh influxdata --core
+
+# Test a specific plugin
+./test-plugins.sh influxdata/basic_transformation --core
+
+# List available plugins
+./test-plugins.sh --list
+```
 
 ## Configuration
 

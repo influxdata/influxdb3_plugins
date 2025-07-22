@@ -277,27 +277,6 @@ You can run tests using either Docker Compose (recommended) or a local Python en
 #### Option 1: Docker Compose Testing (Recommended)
 
 No Python installation required. Uses Docker Compose services for testing:
-
-**Using the docker-test.sh script:**
-```bash
-# Test all influxdata plugins
-./docker-test.sh all
-
-# Test a specific plugin
-./docker-test.sh plugin influxdata/basic_transformation
-
-# Test with TOML configuration
-./docker-test.sh toml influxdata/basic_transformation basic_transformation.py \
-  --toml-config basic_transformation_config_scheduler.toml
-
-# Start an interactive shell for debugging
-./docker-test.sh shell
-
-# Clean up containers
-./docker-test.sh clean
-```
-
-**Using docker compose directly:**
 ```bash
 # Test all plugins with InfluxDB 3 Core
 docker compose --profile test run --rm test-core-all
@@ -371,17 +350,7 @@ For local development without Docker:
 
 ### Available Test Scripts
 
-#### 1. `docker-test.sh` - Docker-based Test Runner
-Wrapper script for Docker Compose testing with simplified commands.
-
-**Commands:**
-- `all` - Test all plugins in influxdata organization
-- `plugin <path>` - Test a specific plugin
-- `toml <path> <file>` - Test with TOML configuration
-- `shell` - Start interactive test container
-- `clean` - Stop and remove test containers
-
-#### 2. `test-plugins.py` - Organization/Plugin Testing
+#### 1. `test-plugins.py` - Organization/Plugin Testing
 Tests all plugins in an organization or specific plugins using the InfluxDB 3 HTTP API.
 
 **Usage:**
@@ -399,7 +368,7 @@ python test-plugins.py influxdata --enterprise --skip-container --host http://lo
 python test-plugins.py --list
 ```
 
-#### 3. `test_plugin_toml.py` - Generic API-based Testing
+#### 2. `test_plugin_toml.py` - Generic API-based Testing
 Reusable script for testing plugins with TOML configuration support using the InfluxDB 3 HTTP API.
 
 **Features:**
@@ -428,7 +397,7 @@ python test_plugin_toml.py influxdata/my_plugin my_plugin.py \
   --test-data "metrics,host=server1 cpu=50.0"
 ```
 
-#### 4. Docker Compose Services
+#### 3. Docker Compose Services
 Direct access to containerized test services:
 
 **Core services:**

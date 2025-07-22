@@ -3,24 +3,21 @@ Official Python plugins for InfluxDB 3, developed by InfluxData.
 
 ## Test the plugins
 
-To test the plugins, run the following command in the root directory of this repository:
+From the root directory, use Docker Compose to test plugins:
 
 ```bash
 # Test all influxdata plugins
-./test-plugins.sh influxdata
-```
+docker compose --profile test run --rm test-core-all
 
-### More test examples
-
-```bash
 # Test specific plugin
-./test-plugins.sh influxdata/basic_transformation
+PLUGIN_PATH="influxdata/basic_transformation" \
+docker compose --profile test run --rm test-core-specific
 
-# List available organizations and plugins
-./test-plugins.sh --list
-
-# Show help
-./test-plugins.sh --help
+# Test with TOML configuration
+PLUGIN_PATH="influxdata/basic_transformation" \
+PLUGIN_FILE="basic_transformation.py" \
+TOML_CONFIG="basic_transformation_config_scheduler.toml" \
+docker compose --profile test run --rm test-core-toml
 ```
 
 ## Support

@@ -121,21 +121,21 @@ influxdb3 test schedule_plugin \
   PLUGIN_FILENAME.py
 ```
 
-The `test-plugins.sh` script in this repository can also be used to run tests for plugins.
-The script starts InfluxDB 3 in a Docker container and runs the `influxdb3 test` command against the specific organization or plugin that you specify.
-
-#### test-plugins.sh usage:
+You can also use Docker Compose to run tests for plugins in a containerized environment:
 
 ```bash
-# Test all influxdata plugins with InfluxDB 3 Core (default)
-./test-plugins.sh influxdata
-./test-plugins.sh influxdata --core
+# Test all influxdata plugins with InfluxDB 3 Core
+docker compose --profile test run --rm test-core-all
 
 # Test a specific plugin
-./test-plugins.sh influxdata/basic_transformation --core
+PLUGIN_PATH="influxdata/basic_transformation" \
+docker compose --profile test run --rm test-core-specific
 
-# List available plugins
-./test-plugins.sh --list
+# Test with TOML configuration
+PLUGIN_PATH="influxdata/basic_transformation" \
+PLUGIN_FILE="basic_transformation.py" \
+TOML_CONFIG="basic_transformation_config_scheduler.toml" \
+docker compose --profile test run --rm test-core-toml
 ```
 
 ## Configuration

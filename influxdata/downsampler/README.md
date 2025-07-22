@@ -1,189 +1,345 @@
-# InfluxDB 3 Downsampling Plugin  
-  
-This plugin enables downsampling of data in an InfluxDB 3 Core/Enterprise instance and writes the results to a target measurement and database. It supports flexible configuration for time intervals, field aggregations, tag filtering, and batch processing, with robust error handling and retry logic. The plugin can be triggered via a scheduler for periodic downsampling or through HTTP requests for on-demand processing.  
-  
-## Prerequisites  
-- **InfluxDB v3 Core/Enterprise**: with the Processing Engine enabled.
-  
-## Files  
-- `downsampler.py`: The main plugin code for downsampling data.  
-- No additional configuration files are provided, as the plugin is configured via trigger arguments or HTTP request bodies.  
-  
-## Features  
-- **Flexible Downsampling**: Aggregate data over specified time intervals (e.g., seconds, minutes, hours, days, weeks, months, quarters, or years) using functions like `avg`, `sum`, `min`, `max`, or `derivative`.  
-- **Field and Tag Filtering**: Select specific fields for aggregation and filter by tag values.  
-- **Scheduler and HTTP Support**: Run periodically via InfluxDB triggers or on-demand via HTTP requests.
-- **Args Overriding**: Allows overriding arguments for scheduler type via TOML file (env var `PLUGIN_DIR` and `config_file_path` parameter should be set, see toml files examples on [Git](https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/downsampler). Override args parameter in handler function). The `config_file_path` must be specified as a path relative to the directory defined by PLUGIN_DIR.
-- **Retry Logic**: Configurable retries for robust write operations.  
-- **Batch Processing**: Process large datasets in configurable time batches for HTTP requests.  
-- **Backfill Support**: Downsample historical data within a specified time window.
-- **Task ID Tracking**: Each execution generates a unique task_id included in logs and error messages for traceability.
-- **Metadata Columns**: Each downsampled record includes three additional columns:  
-  - `record_count` — the number of original points compressed into this single downsampled row,  
-  - `time_from` — the minimum timestamp among the original points in the interval,  
-  - `time_to` — the maximum timestamp among the original points in the interval.  
+# Downsampler Plugin
 
-## Logging
+⚡ scheduled, http
+🏷️ downsampling, aggregation, data-reduction
 
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs, use the following query:
+## Description
 
-```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs"
+The Downsampler Plugin enables time-based data aggregation and downsampling in InfluxDB 3.
+Reduce data volume by aggregating measurements over specified time intervals using functions like avg, sum, min, max, derivative, or median.
+The plugin supports both scheduled batch processing of historical data and on-demand downsampling through HTTP requests.
+Each downsampled record includes metadata about the original data points compressed.
 
-```
+### Plugin metadata
 
-Example output:
+This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the InfluxDB 3 Explorer UI to display and configure the plugin.
 
-```text
-+-------------------------------+-----------------+--------------+----------------------------------------------------------------------------------------------------------+
-| event_time                    | trigger_name    | log_level    | log_text                                                                                                 |
-+-------------------------------+-----------------+--------------+----------------------------------------------------------------------------------------------------------+
-| 2025-05-14T16:31:10.033295886 | my_scheduler    | INFO         | [4726cf36-3b15-442e-bd9d-f9b768ad8781] Finished execution in 31ms 449us 193ns                            |
-| 2025-05-14T16:31:10.033275724 | my_scheduler    | INFO         | [4726cf36-3b15-442e-bd9d-f9b768ad8781] Downsampling job finished in 0.021356821060180664 seconds         |
-| 2025-05-14T16:31:10.033232792 | my_scheduler    | INFO         | [4726cf36-3b15-442e-bd9d-f9b768ad8781] Successful write to home_downsampled                              |
-| 2025-05-14T16:31:10.011881111 | some_scheduler  | INFO         | [528a316e-b28c-4bd2-8c05-07ad50bc1de2] Starting downsampling schedule for call_time: 2025-05-14 16:31:10 |
-| 2025-05-14T16:31:10.001837231 | some_scheduler  | INFO         | [528a316e-b28c-4bd2-8c05-07ad50bc1de2] Starting execution with scheduled time 2025-05-14 16:31:10 UTC    |
-| 2025-05-14T16:31:00.046641074 | my_scheduler    | INFO         | [cd5caa89-47db-443c-9621-5f90a129a0cc] Finished execution in 44ms 724us 139ns                            |
-| 2025-05-14T16:31:00.046623022 | my_scheduler    | INFO         | [cd5caa89-47db-443c-9621-5f90a129a0cc] Downsampling job finished in 0.021102190017700195 seconds         |
-| 2025-05-14T16:31:00.046579787 | some_scheduler  | ERROR        | [528a316e-b28c-4bd2-8c05-07ad50bc1de2] Error during write to home_downsampled                            |
-| 2025-05-14T16:31:00.025482558 | my_scheduler    | INFO         | [cd5caa89-47db-443c-9621-5f90a129a0cc] Starting downsampling schedule for call_time: 2025-05-14 16:31:00 |
-| 2025-05-14T16:31:00.001903138 | my_scheduler    | INFO         | [cd5caa89-47db-443c-9621-5f90a129a0cc] starting execution with scheduled time 2025-05-14 16:31:00 UTC    |
-+-------------------------------+--------------+-----------+----------------------------------------------------------------------------------------------------------------+
+## Configuration
 
-```
+### Required parameters
 
-### Log Columns Description
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `source_measurement` | string | required | Source measurement containing data to downsample |
+| `target_measurement` | string | required | Destination measurement for downsampled data |
+| `window` | string | required (scheduled only) | Time window for each downsampling job. Format: `<number><unit>` (e.g., "1h", "1d") |
 
--   **event_time**: Timestamp of the log event (with nanosecond precision).
--   **trigger_name**: Name of the trigger that generated the log (e.g., `my_scheduler`).
--   **log_level**: Severity level of the log entry (`INFO`, `WARN`, `ERROR`, etc.).
--   **log_text**: Message describing the action, status, or error encountered by the plugin with task_id.
-  
-## Setup, Run & Test  
-  
-### 1. Install & Run InfluxDB v3 Core/Enterprise  
-- Download and install InfluxDB v3 Core/Enterprise from the official site or package manager.  
-- Ensure the `plugins` directory exists; if not, create it:  
-  ```bash  
-  mkdir ~/.plugins 
-  ```
- - Place `downsampler.py` in `~/.plugins/`.
-- Start InfluxDB 3 with the correct paths for plugins and data directories:  
-  ```bash  
-  influxdb3 serve --node-id node0 --object-store file --data-dir ~/.influxdb3 --plugin-dir ~/.plugins 
-  ```  
-  
- 
-### 2. Configure & Create Trigger (Scheduler mode)  
-Create a trigger for the plugin using the `influxdb3 create trigger` command.  
-  
- #### Example
-Example command to create a scheduler trigger for downsampling in the database `mydb`:  
-```bash  
-influxdb3 create trigger \
-  --database mydb \
-  --plugin-filename downsampler.py \
-  --trigger-spec "every:10s" \
-  --trigger-arguments source_measurement=home,target_measurement=home_downsampled,tag_values=room:Kitchen@LivingRoom@Bedroom@"Some value string",specific_fields=hum.co,interval=7min,window=10s \
-  downsampling_trigger  
-```
+### Aggregation parameters
 
-#### Arguments (Scheduler Mode)  
-The following arguments are supported in the `--trigger-arguments` string for scheduler-based triggers:  
-  
-| Argument              | Description                                                                         | Constraints                                                                                                                                                                                              | Default                 |  
-|-----------------------|-------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------|  
-| `source_measurement`  | Name of the source measurement to downsample.                                       | Must be an existing measurement in the database. **Required.**                                                                                                                                           | `None`                  |  
-| `target_measurement`  | Name of the target measurement to write downsampled data.                           | **Required.**                                                                                                                                                                                            | `None`                  |  
-| `interval`            | Time interval for downsampling (e.g., `10min`, `2h`, `1m`, `1y`).                   | Format: `<number><unit>` where unit is `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y`. Number ≥ 1. Months (`m`), quarters (`q`), and years (`y`) are converted to days (30.42, 91.25, 365 days, respectively). | `10min`                 |  
-| `window`              | Time window for each downsampling job (e.g., `1h`, `1d`).                           | Format: `<number><unit>` where unit is `s`, `min`, `h`, `d`, `w`. Number ≥ 1. **Required.**                                                                                                              | `None`                  |  
-| `offset`              | Time offset to apply to the window (e.g., `10min`, `1h`).                           | Format: `<number><unit>` where unit is `s`, `min`, `h`, `d`, `w`. Number ≥ 1.                                                                                                                            | `0`                     |  
-| `calculations`        | Aggregation functions (e.g., `avg` or `field1:avg.field2:sum`).                     | Either a single function (`avg`, `sum`, `min`, `max`, `derivative`, `median`) or a dot-separated list of `field:aggregation` pairs.                                                                      | `avg`                   |  
-| `specific_fields`     | Fields to downsample (e.g., `co.temperature`).                                      | Dot-separated field names matching `^[a-zA-Z]+(\.[a-zA-Z]+)*$`. Optional. Non-existent fields are ignored with a warning.                                                                                | All aggregatable fields |  
-| `excluded_fields`     | Fields to exclude from downsampling (e.g., `field1.field2`).                        | Dot-separated field names matching `^[a-zA-Z]+(\.[a-zA-Z]+)*$`. Optional. Non-existent fields are ignored with a warning.                                                                                | `None`                  |  
-| `tag_values`          | Tag filters (e.g., `room:Kitchen@Bedroom@"My room"`).                               | Dot-separated `tag:value1@value2` pairs matching the required pattern. Optional. Non-existent tags are ignored with a warning.                                                                           | `None`                  |  
-| `max_retries`         | Maximum number of retries for write operations.                                     | Integer ≥ 0.                                                                                                                                                                                             | `5`                     |  
-| `target_database`     | Target database for writing downsampled data.                                       | Optional. If not provided, uses `default` database.                                                                                                                                                      | `None`                  |  
-| `config_file_path`    | Path to the configuration file from `PLUGIN_DIR` env var. Format: `'example.toml'`. | Optional.                                                                                                                                                                                                | `None`                  |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `interval` | string | "10min" | Time interval for downsampling. Format: `<number><unit>` (e.g., "10min", "2h", "1d") |
+| `calculations` | string | "avg" | Aggregation functions. Single function or dot-separated field:aggregation pairs |
+| `specific_fields` | string | all fields | Dot-separated list of fields to downsample (e.g., "co.temperature") |
+| `excluded_fields` | string | none | Dot-separated list of fields to exclude from downsampling |
 
-  
-#### Enable Trigger  
-Enable the trigger to start periodic downsampling:  
-```bash  
-influxdb3 enable trigger --database mydb downsampling_trigger
-```  
-  
-### 3. Configure & Create Trigger (HTTP Request Mode)  
-The plugin also supports on-demand downsampling via HTTP requests. Send a POST request to the InfluxDB 3 HTTP endpoint with a JSON body containing the parameters.  
+### Filtering parameters
 
-Create an HTTP-triggered plugin using the `influxdb3 create trigger` command. This trigger will expose an HTTP endpoint that can be called to execute the plugin manually.
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `tag_values` | string | none | Tag filters. Format: `tag:value1@value2@value3` for multiple values |
+| `offset` | string | "0" | Time offset to apply to the window |
 
-#### Example
-The following command creates an HTTP trigger for downsampling in the database `mydb`:
+### Advanced parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `target_database` | string | "default" | Database for storing downsampled data |
+| `max_retries` | integer | 5 | Maximum number of retries for write operations |
+| `batch_size` | string | "30d" | Time interval for batch processing (HTTP mode only) |
+| `config_file_path` | string | none | Path to TOML config file relative to PLUGIN_DIR |
+
+### Metadata columns
+
+Each downsampled record includes three additional metadata columns:
+- `record_count` — the number of original points compressed into this single downsampled row
+- `time_from` — the minimum timestamp among the original points in the interval  
+- `time_to` — the maximum timestamp among the original points in the interval
+
+## Requirements
+
+### Software requirements
+- InfluxDB 3 Core or Enterprise with Processing Engine enabled
+- Python packages: No additional packages required
+
+### Installation steps
+
+1. Start InfluxDB with plugin support:
+   ```bash
+   influxdb3 serve \
+     --node-id node0 \
+     --object-store file \
+     --data-dir ~/.influxdb3 \
+     --plugin-dir ~/.plugins
+   ```
+
+2. No additional Python packages required for this plugin.
+
+## Trigger setup
+
+### Scheduled downsampling
+
+Run downsampling periodically on historical data:
 
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename downsampler.py \
+  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --trigger-spec "every:1h" \
+  --trigger-arguments 'source_measurement=cpu_metrics,target_measurement=cpu_hourly,interval=1h,window=6h,calculations=avg,specific_fields=usage_user.usage_system' \
+  cpu_hourly_downsample
+```
+
+### On-demand downsampling
+
+Trigger downsampling via HTTP requests:
+
+```bash
+influxdb3 create trigger \
+  --database mydb \
+  --plugin-filename gh:influxdata/downsampler/downsampler.py \
   --trigger-spec "request:downsample" \
-  downsampling_http_trigger
+  downsample_api
 ```
 
-This command registers an HTTP endpoint at:
+## Example usage
 
-```
-/api/v3/engine/downsample
-```
+### Example 1: CPU metrics hourly aggregation
 
-To invoke the plugin, send an HTTP `POST` request to the endpoint. For example:
+Downsample CPU usage data from 1-minute intervals to hourly averages:
 
 ```bash
-curl -X POST http://localhost:8181/api/v3/engine/downsample
+# Create the trigger
+influxdb3 create trigger \
+  --database system_metrics \
+  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --trigger-spec "every:1h" \
+  --trigger-arguments 'source_measurement=cpu,target_measurement=cpu_hourly,interval=1h,window=6h,calculations=avg,specific_fields=usage_user.usage_system.usage_idle' \
+  cpu_hourly_downsample
+
+# Write test data
+influxdb3 write \
+  --database system_metrics \
+  "cpu,host=server1 usage_user=45.2,usage_system=12.1,usage_idle=42.7"
+
+# Query downsampled data (after trigger runs)
+influxdb3 query \
+  --database system_metrics \
+  "SELECT * FROM cpu_hourly WHERE time >= now() - 1d"
 ```
 
-> **Note:**  
-> - Use `--trigger-spec "request:<ENDPOINT_PATH>"` to define the HTTP endpoint path.  
-> - The plugin receives the full HTTP request object, including method, headers, and body.  
+### Expected output
+```
+host    | usage_user | usage_system | usage_idle | record_count | time_from           | time_to             | time
+--------|------------|--------------|------------|--------------|---------------------|---------------------|-----
+server1 | 44.8       | 11.9         | 43.3       | 60           | 2024-01-01T00:00:00Z| 2024-01-01T00:59:59Z| 2024-01-01T01:00:00Z
+```
 
-#### Arguments (HTTP Mode)
+**Aggregation details:**
+- Before: 60 individual CPU measurements over 1 hour
+- After: 1 aggregated measurement with averages and metadata
+- Metadata shows original record count and time range
 
-The JSON body supports the following parameters:
+### Example 2: Multi-field aggregation with different functions
 
-| Argument              | Description                                                                            | Constraints                                                                                                                       | Default                           |
-|-----------------------|----------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------|-----------------------------------|
-| `source_measurement`  | Name of the source measurement to downsample.                                          | Must be an existing measurement in the database. **Required.**                                                                    | `None`                            |
-| `target_measurement`  | Name of the target measurement to write downsampled data.                              | **Required.**                                                                                                                     | `None`                            |
-| `interval`            | Time interval for downsampling (e.g., `10min`, `2h`, `1m`, `1y`).                      | Format: `<number><unit>` where unit is `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y`. Number ≥ 1. `m`, `q`, `y` are converted to days. | `10min`                           |
-| `batch_size`          | Time interval for batch processing (e.g., `1h`, `1d`).                                 | Format: `<number><unit>` where unit is `s`, `min`, `h`, `d`. Number ≥ 1.                                                          | `30d`                             |
-| `calculations`        | Aggregation functions. Either `"avg"` or a list of `['field', 'aggregation']`.         | Valid aggregations: `avg`, `sum`, `min`, `max`, `derivative`, `median`.                                                           | `"avg"`                           |
-| `specific_fields`     | List of fields to downsample (e.g., `["usage_user", "usage_system"]`).                 | Must be valid field names. Non-existent fields are ignored with a warning. Optional.                                              | All aggregatable fields           |
-| `excluded_fields`     | List of fields to exclude (e.g., `["usage_idle"]`).                                    | Must be valid field names. Non-existent fields are ignored with a warning. Optional.                                              | `None`                            |
-| `tag_values`          | Dictionary of tag names to lists of values (e.g., `{"host": ["server1", "server2"]}`). | Non-existent tags are ignored with a warning. Optional.                                                                           | `None`                            |
-| `backfill_start`      | Start time for backfill (e.g., `2025-05-01T00:00:00+03:00`).                           | Format: `YYYY-MM-DDTHH:MM:SS±HH:MM` (ISO 8601). Must be earlier than `backfill_end`. Optional.                                    | Earliest timestamp in measurement |
-| `backfill_end`        | End time for backfill (e.g., `2025-05-02T00:00:00+03:00`).                             | Format: `YYYY-MM-DDTHH:MM:SS±HH:MM` (ISO 8601). Optional.                                                                         | Current time                      |
-| `max_retries`         | Maximum number of retries for write operations.                                        | Integer ≥ 0.                                                                                                                      | `5`                               |
-| `target_database`     | Target database for writing downsampled data.                                          | Optional. If not provided, uses the `default` database.                                                                           | `None`                            |
+Apply different aggregation functions to different fields:
 
+```bash
+# Create trigger with field-specific aggregations
+influxdb3 create trigger \
+  --database sensors \
+  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --trigger-spec "every:10min" \
+  --trigger-arguments 'source_measurement=environment,target_measurement=environment_10min,interval=10min,window=30min,calculations=temperature:avg.humidity:avg.pressure:max' \
+  env_multi_agg
 
-#### Example HTTP Request  
-```bash  
+# Write data with various sensor readings
+influxdb3 write \
+  --database sensors \
+  "environment,location=office temperature=22.5,humidity=45.2,pressure=1013.25"
+
+# Query aggregated data
+influxdb3 query \
+  --database sensors \
+  "SELECT * FROM environment_10min WHERE time >= now() - 1h"
+```
+
+### Expected output
+```
+location | temperature | humidity | pressure | record_count | time
+---------|-------------|----------|----------|--------------|-----
+office   | 22.3        | 44.8     | 1015.1   | 10           | 2024-01-01T00:10:00Z
+```
+
+### Example 3: HTTP API downsampling with backfill
+
+Use HTTP API for on-demand downsampling with historical data:
+
+```bash
+# Send HTTP request for backfill downsampling
 curl -X POST http://localhost:8181/api/v3/engine/downsample \
--H "Authorization: Bearer YOUR_TOKEN" \
--d '{
-    "source_measurement": "home",
-    "target_measurement": "home_downsampled",
-    "target_database": "mydb",
-    "tag_values": {
-      "room": ["Kitchen", "LivingRoom"]
-    },
-    "calculations": [["co", "avg"], ["co", "max"], ["co", "min"]],
-    "specific_fields": ["co"],
-    "interval": "10s",
-    "batch_size": "1h",
-    "max_retries": 5
+  --header "Authorization: Bearer YOUR_TOKEN" \
+  --data '{
+    "source_measurement": "metrics",
+    "target_measurement": "metrics_daily",
+    "target_database": "analytics",
+    "interval": "1d",
+    "batch_size": "7d",
+    "calculations": [["cpu_usage", "avg"], ["memory_usage", "max"], ["disk_usage", "avg"]],
+    "backfill_start": "2024-01-01T00:00:00Z",
+    "backfill_end": "2024-01-31T00:00:00Z",
+    "max_retries": 3
   }'
-```  
- 
-  
-## Questions/Comments  
-Hope this plugin use useful. If any questions/issues, please feel free to open a GitHub issue and find us comments on [Discord](https://discord.com/invite/vZe2w2Ds8B) in the #influxdb3_core channel, [Slack](https://influxcommunity.slack.com/join/shared_invite/zt-2z3n3fs0i-jnF9Ag6NVBO26P98iY_h_g#/shared-invite/email) in the #influxdb3_core channel, or our [Community Forums](https://community.influxdata.com/).
+```
+
+## Using TOML Configuration Files
+
+This plugin supports using TOML configuration files for complex configurations.
+
+### Important Requirements
+
+**To use TOML configuration files, you must set the `PLUGIN_DIR` environment variable in the InfluxDB 3 host environment:**
+
+```bash
+PLUGIN_DIR=~/.plugins influxdb3 serve --node-id node0 --object-store file --data-dir ~/.influxdb3 --plugin-dir ~/.plugins
+```
+
+### Example TOML Configuration
+
+```toml
+# downsampling_config_scheduler.toml
+source_measurement = "cpu"
+target_measurement = "cpu_hourly"
+target_database = "analytics"
+interval = "1h"
+window = "6h"
+calculations = "avg"
+specific_fields = "usage_user.usage_system.usage_idle"
+max_retries = 3
+
+[tag_values]
+host = ["server1", "server2", "server3"]
+```
+
+### Create trigger using TOML config
+
+```bash
+influxdb3 create trigger \
+  --database mydb \
+  --plugin-filename downsampler.py \
+  --trigger-spec "every:1h" \
+  --trigger-arguments config_file_path=downsampling_config_scheduler.toml \
+  downsample_trigger
+```
+
+## Code overview
+
+### Files
+
+- `downsampler.py`: The main plugin code containing handlers for scheduled and HTTP-triggered downsampling
+- `downsampling_config_scheduler.toml`: Example TOML configuration file for scheduled triggers
+
+### Logging
+
+Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+
+```bash
+influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
+```
+
+Log columns:
+- **event_time**: Timestamp of the log event (with nanosecond precision)
+- **trigger_name**: Name of the trigger that generated the log
+- **log_level**: Severity level (INFO, WARN, ERROR)
+- **log_text**: Message describing the action or error with unique task_id for traceability
+
+### Main functions
+
+#### `process_scheduled_call(influxdb3_local, call_time, args)`
+Handles scheduled downsampling tasks.
+Queries historical data within the specified window and applies aggregation functions.
+
+Key operations:
+1. Parses configuration from arguments or TOML file
+2. Queries source measurement with optional tag filters
+3. Applies time-based aggregation with specified functions
+4. Writes downsampled data with metadata columns
+
+#### `process_http_request(influxdb3_local, request_body, args)`
+Handles HTTP-triggered on-demand downsampling.
+Processes batch downsampling with configurable time ranges for backfill scenarios.
+
+Key operations:
+1. Parses JSON request body parameters
+2. Processes data in configurable time batches
+3. Applies aggregation functions to historical data
+4. Returns processing statistics and results
+
+#### `aggregate_data(data, interval, calculations)`
+Core aggregation engine that applies statistical functions to time-series data.
+
+Supported aggregation functions:
+- `avg`: Average value
+- `sum`: Sum of values
+- `min`: Minimum value
+- `max`: Maximum value
+- `derivative`: Rate of change
+- `median`: Median value
+
+## Troubleshooting
+
+### Common issues
+
+#### Issue: No data in target measurement
+**Solution**: Check that source measurement exists and contains data in the specified time window:
+```bash
+influxdb3 query --database mydb "SELECT COUNT(*) FROM source_measurement WHERE time >= now() - 1h"
+```
+
+#### Issue: Aggregation function not working
+**Solution**: Verify field names and aggregation syntax. Use SHOW FIELD KEYS to check available fields:
+```bash
+influxdb3 query --database mydb "SHOW FIELD KEYS FROM source_measurement"
+```
+
+#### Issue: Tag filters not applied
+**Solution**: Check tag value format. Use @ separator for multiple values:
+```bash
+--trigger-arguments 'tag_values=host:server1@server2@server3'
+```
+
+#### Issue: HTTP endpoint not accessible
+**Solution**: Verify the trigger was created with correct request specification:
+```bash
+influxdb3 list triggers --database mydb
+```
+
+### Debugging tips
+
+1. **Check execution logs** with task ID filtering:
+   ```bash
+   influxdb3 query --database _internal \
+     "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%task_id%' ORDER BY event_time DESC LIMIT 10"
+   ```
+
+2. **Test with smaller time windows** for debugging:
+   ```bash
+   --trigger-arguments 'window=5min,interval=1min'
+   ```
+
+3. **Verify field types** before aggregation:
+   ```bash
+   influxdb3 query --database mydb "SELECT * FROM source_measurement LIMIT 1"
+   ```
+
+### Performance considerations
+
+- **Batch processing**: Use appropriate batch_size for HTTP requests to balance memory usage and performance
+- **Field filtering**: Use specific_fields to process only necessary data
+- **Retry logic**: Configure max_retries based on network reliability
+- **Metadata overhead**: Metadata columns add ~20% storage overhead but provide valuable debugging information
+- **Index optimization**: Tag filters are more efficient than field filters for large datasets
+
+## Questions/Comments
+
+For additional support, see the [Support section](../README.md#support).

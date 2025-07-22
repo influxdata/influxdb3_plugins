@@ -1,131 +1,366 @@
-# Forecast Error Evaluator Plugin for InfluxDB 3
+# Forecast Error Evaluator Plugin
 
-This plugin evaluates the accuracy of forecast models in InfluxDB 3 by comparing predicted values with actual observations. It operates as a scheduler plugin, periodically querying specified measurements for forecast and actual data, computing error metrics (MSE, MAE, or RMSE), and detecting anomalies based on elevated errors. When anomalies are detected, it sends notifications via various channels using the **Notification Sender Plugin for InfluxDB 3**.
+⚡ scheduled
+🏷️ forecasting, validation, monitoring, alerting
 
-## Prerequisites
-- **InfluxDB v3 Core/Enterprise**: with the Processing Engine enabled.
-- **Notification Sender Plugin for InfluxDB 3**: Required for sending notifications. [Link to Notification Sender Plugin](https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/notifier).
+## Description
 
-## Files
-- `forecast_error_evaluator.py`: The main plugin code containing the handler for the `scheduler` trigger.
+The Forecast Error Evaluator Plugin validates forecast model accuracy in InfluxDB 3 by comparing predicted values with actual observations.
+The plugin periodically computes error metrics (MSE, MAE, or RMSE), detects anomalies based on error thresholds, and sends notifications when forecast accuracy degrades.
+It includes debounce logic to suppress transient anomalies and supports multi-channel notifications via the Notification Sender Plugin.
 
-## Features
-- **Scheduler Plugin**: Periodically queries forecast and actual measurements within a time window, computes error metrics, and detects anomalies based on error thresholds.
-- **Args Overriding**: Allows overriding arguments for scheduler type via TOML file (env var `PLUGIN_DIR` and `config_file_path` parameter should be set, see toml files example on [Git](https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/forecast_error_evaluator). Override args parameter in handler function). The `config_file_path` must be specified as a path relative to the directory defined by PLUGIN_DIR.
-- **Error Metrics**: Supports MSE, MAE, and RMSE for evaluating forecast accuracy.
-- **Threshold-based Detection**: Flags anomalies when the computed error exceeds a specified threshold.
-- **Debounce Logic**: Optional minimum condition duration to suppress transient anomalies.
-- **Multi-Channel Notifications**: Supports Slack, Discord, HTTP, SMS, and WhatsApp via the Notification Sender Plugin.
-- **Customizable Messages**: Notification templates support dynamic variables (e.g., `$measurement`, `$field`, `$error`, `$metric`, `$tags`).
-- **Retry Logic**: Retries failed notifications with randomized backoff.
-- **Environment Variable Support**: Configurable via environment variables (e.g., `INFLUXDB3_AUTH_TOKEN`).
+### Plugin metadata
 
-## Logging
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs, use the following query:
+This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the InfluxDB 3 Explorer UI to display and configure the plugin.
 
-```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs"
-```
+## Configuration
 
-### Log Columns Description
-- **event_time**: Timestamp of the log event.
-- **trigger_name**: Name of the trigger that generated the log.
-- **log_level**: Severity level (`INFO`, `WARN`, `ERROR`).
-- **log_text**: Message describing the action or error.
+### Required parameters
 
-## Setup & Run
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `forecast_measurement` | string | required | Measurement containing forecasted values |
+| `actual_measurement` | string | required | Measurement containing actual (ground truth) values |
+| `forecast_field` | string | required | Field name for forecasted values |
+| `actual_field` | string | required | Field name for actual values |
+| `error_metric` | string | required | Error metric to compute: "mse", "mae", or "rmse" |
+| `error_thresholds` | string | required | Threshold levels. Format: `INFO-"0.5":WARN-"0.9":ERROR-"1.2":CRITICAL-"1.5"` |
+| `window` | string | required | Time window for data analysis. Format: `<number><unit>` (e.g., "1h") |
+| `senders` | string | required | Dot-separated list of notification channels (e.g., "slack.discord") |
 
-### 1. Install & Run InfluxDB v3 Core/Enterprise
-- Download and install InfluxDB v3 Core/Enterprise.
-- Ensure the `plugins` directory exists; if not, create it:
-  ```bash
-  mkdir ~/.plugins
-  ```
-- Place `forecast_error_evaluator.py` in `~/.plugins/`.
-- Start InfluxDB 3 with the correct paths:
-  ```bash
-  influxdb3 serve --node-id node0 --object-store file --data-dir ~/.influxdb3 --plugin-dir ~/.plugins
-  ```
+### Notification parameters
 
-### 2. Install Required Python Packages
-```bash
-influxdb3 install package pandas
-influxdb3 install package requests
-```
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `notification_text` | string | default template | Template for notification message with variables `$measurement`, `$level`, `$field`, `$error`, `$metric`, `$tags` |
+| `notification_path` | string | "notify" | URL path for the notification sending plugin |
+| `port_override` | integer | 8181 | Port number where InfluxDB accepts requests |
 
-### 3. Install and Configure the Notification Sender Plugin
-- Ensure the [Notification Sender Plugin for InfluxDB 3](https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/notifier) is installed and configured. This plugin is **required** for sending notifications via Slack, Discord, HTTP, SMS, or WhatsApp.
+### Timing parameters
 
-## Configure & Create Triggers
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `min_condition_duration` | string | none | Minimum duration for anomaly condition to persist before triggering notification |
+| `rounding_freq` | string | "1s" | Frequency to round timestamps for alignment |
 
-### Scheduler Plugin
-The Scheduler Plugin periodically queries the specified forecast and actual measurements within a time window, computes the error metric for each timestamp, and sends notifications when the error exceeds the threshold. Optional debounce logic suppresses transient anomalies.
+### Authentication parameters
 
-#### Arguments
-The following arguments are extracted from the `args` dictionary:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `influxdb3_auth_token` | string | env variable | API token for InfluxDB 3. Can be set via `INFLUXDB3_AUTH_TOKEN` |
+| `config_file_path` | string | none | Path to TOML config file relative to PLUGIN_DIR |
 
-| Argument                 | Description                                                                                                                                                                     | Required | Example                                                                               |
-|--------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------------------------------------------------------------------------------------|
-| `forecast_measurement`   | The InfluxDB measurement containing forecasted values.                                                                                                                          | Yes      | `"forecast_data"`                                                                     |
-| `actual_measurement`     | The InfluxDB measurement containing actual (ground truth) values.                                                                                                               | Yes      | `"actual_data"`                                                                       |
-| `forecast_field`         | The field name in `forecast_measurement` for forecasted values.                                                                                                                 | Yes      | `"predicted_temp"`                                                                    |
-| `actual_field`           | The field name in `actual_measurement` for actual values.                                                                                                                       | Yes      | `"temp"`                                                                              |
-| `error_metric`           | The error metric to use (`mse`, `mae`, `rmse`).                                                                                                                                 | Yes      | `"rmse"`                                                                              |
-| `error_thresholds`       | The threshold value for the error metric to trigger an anomaly with levels                                                                                                      | Yes      | `INFO-"0.5":WARN-"0.9":ERROR-"1.2":CRITICAL-"1.5"`                                    |
-| `window`                 | Time window for data analysis (e.g., `1h` for 1 hour). Units: `s`, `min`, `h`, `d`, `w`.                                                                                        | Yes      | `"1h"`                                                                                |
-| `senders`                | Dot-separated list of notification channels (e.g., `slack.discord`).                                                                                                            | Yes      | `"slack"`                                                                             |
-| `influxdb3_auth_token`   | API token for InfluxDB 3. Can be set via `INFLUXDB3_AUTH_TOKEN` environment variable.                                                                                           | No       | `"YOUR_API_TOKEN"`                                                                    |
-| `min_condition_duration` | Minimum duration for an anomaly condition to persist before triggering a notification (e.g., `5m`). Units: `s`, `min`, `h`, `d`, `w`.                                           | No       | `"5min"`                                                                              |
-| `rounding_freq`          | Frequency to round timestamps for alignment (e.g., `1s`). See all supported units here: [pandas doc](https://pandas.pydata.org/docs/reference/api/pandas.Series.dt.round.html). | No       | `"1s"`                                                                                |
-| `notification_text`      | Template for notification message with variables `$measurement`, `$level`, `$field`, `$error`, `$metric`, `$tags`.                                                              | No       | `"[$level] Forecast error alert in $measurement.$field: $metric=$error. Tags: $tags"` |
-| `notification_path`      | URL path for the notification sending plugin.                                                                                                                                   | No       | `"some/path"` (default: `notify`)                                                     |
-| `port_override`          | Port number where InfluxDB accepts requests.                                                                                                                                    | No       | `8182` (default: `8181`)                                                              |
-| `config_file_path`       | Path to the configuration file from `PLUGIN_DIR` env var. Format: `'example.toml'`.                                                                                             | No       | `'example.toml'`                                                                      |
+### Sender-specific parameters
 
+#### Slack notifications
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `slack_webhook_url` | string | required | Webhook URL from Slack |
+| `slack_headers` | string | none | Base64-encoded HTTP headers |
 
-#### Sender-Specific Configurations
-Depending on the channels specified in `senders`, additional arguments are required:
+#### Discord notifications
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `discord_webhook_url` | string | required | Webhook URL from Discord |
+| `discord_headers` | string | none | Base64-encoded HTTP headers |
 
-- **Slack**:
-  - `slack_webhook_url` (string): Webhook URL from Slack (required).
-  - `slack_headers` (string, optional): Base64-encoded HTTP headers.
-  - Example: `"slack_webhook_url=https://hooks.slack.com/services/..."`.
+#### HTTP notifications
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `http_webhook_url` | string | required | Custom webhook URL for POST requests |
+| `http_headers` | string | none | Base64-encoded HTTP headers |
 
-- **Discord**:
-  - `discord_webhook_url` (string): Webhook URL from Discord (required).
-  - `discord_headers` (string, optional): Base64-encoded HTTP headers.
-  - Example: `"discord_webhook_url=https://discord.com/api/webhooks/..."`.
+#### SMS notifications (via Twilio)
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `twilio_sid` | string | env variable | Twilio Account SID (or `TWILIO_SID` env var) |
+| `twilio_token` | string | env variable | Twilio Auth Token (or `TWILIO_TOKEN` env var) |
+| `twilio_from_number` | string | required | Twilio sender number (e.g., "+1234567890") |
+| `twilio_to_number` | string | required | Recipient number (e.g., "+0987654321") |
 
-- **HTTP**:
-  - `http_webhook_url` (string): Custom webhook URL for POST requests (required). 
-  - `http_headers` (string, optional): Base64-encoded HTTP headers.
-  - Example: `"http_webhook_url=https://example.com/webhook"`.
+## Requirements
 
-- **SMS** (via Twilio):
-  - `twilio_sid` (string): Twilio Account SID, or via `TWILIO_SID` env var (required).
-  - `twilio_token` (string): Twilio Auth Token, or via `TWILIO_TOKEN` env var (required).
-  - `twilio_from_number` (string): Twilio sender number (e.g., `+1234567890`) (required).
-  - `twilio_to_number` (string): Recipient number (e.g., `+0987654321`) (required).
-  - Example: `"twilio_sid=ACxxx,twilio_token=xxx,twilio_from_number=+1234567890,twilio_to_number=+0987654321"`.
+### Software requirements
+- InfluxDB 3 Core or Enterprise with Processing Engine enabled
+- Notification Sender Plugin for InfluxDB 3 (required for notifications)
+- Python packages:
+  - `pandas` (for data processing)
+  - `requests` (for HTTP notifications)
 
-- **WhatsApp** (via Twilio):
-  - Same as SMS arguments, with WhatsApp-enabled numbers.
+### Installation steps
 
-#### Example
+1. Start InfluxDB with plugin support:
+   ```bash
+   influxdb3 serve \
+     --node-id node0 \
+     --object-store file \
+     --data-dir ~/.influxdb3 \
+     --plugin-dir ~/.plugins
+   ```
+
+2. Install required Python packages:
+   ```bash
+   influxdb3 install package pandas
+   influxdb3 install package requests
+   ```
+
+3. Install the Notification Sender Plugin (required):
+   ```bash
+   # Ensure notifier plugin is available in ~/.plugins/
+   ```
+
+## Trigger setup
+
+### Scheduled forecast validation
+
+Run forecast error evaluation periodically:
+
 ```bash
 influxdb3 create trigger \
-  --database mydb \
-  --plugin-filename forecast_error_evaluator.py \
-  --trigger-spec "every:10m" \
-  --trigger-arguments forecast_measurement=forecast_data,actual_measurement=actual_data,forecast_field=predicted_temp,actual_field=temp,error_metric=rmse,error_threshold=INFO-"0.5",window=10m,senders=slack,slack_webhook_url="https://hooks.slack.com/services/...",influxdb3_auth_token="YOUR_API_TOKEN",min_condition_duration="5m" \
-  forecast_error_trigger
+  --database weather_forecasts \
+  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --trigger-spec "every:30m" \
+  --trigger-arguments 'forecast_measurement=temperature_forecast,actual_measurement=temperature_actual,forecast_field=predicted_temp,actual_field=temp,error_metric=rmse,error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0",window=1h,senders=slack,slack_webhook_url="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"' \
+  forecast_validation
 ```
 
-## Important Notes
-- **Environment Variables**: Use environment variables for sensitive data (e.g., `INFLUXDB3_AUTH_TOKEN`, `TWILIO_SID`, `TWILIO_TOKEN`).
-- **Retries**: Notifications are retried up to three times with randomized backoff delays.
-- **Data Requirements**: Ensure that the forecast and actual measurements have overlapping timestamps within the specified window.
-- **Timestamp Alignment**: Use `rounding_freq` to align timestamps if there are small differences.
+## Example usage
+
+### Example 1: Temperature forecast validation with Slack alerts
+
+Validate temperature forecast accuracy and send Slack notifications:
+
+```bash
+# Create the trigger
+influxdb3 create trigger \
+  --database weather_db \
+  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --trigger-spec "every:15m" \
+  --trigger-arguments 'forecast_measurement=temp_forecast,actual_measurement=temp_actual,forecast_field=predicted,actual_field=temperature,error_metric=rmse,error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0":CRITICAL-"3.0",window=30m,senders=slack,slack_webhook_url="https://hooks.slack.com/services/YOUR/WEBHOOK/URL",min_condition_duration=10m' \
+  temp_forecast_check
+
+# Write forecast data
+influxdb3 write \
+  --database weather_db \
+  "temp_forecast,location=station1 predicted=22.5"
+
+# Write actual data  
+influxdb3 write \
+  --database weather_db \
+  "temp_actual,location=station1 temperature=21.8"
+
+# Check logs after trigger runs
+influxdb3 query \
+  --database _internal \
+  "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'temp_forecast_check'"
+```
+
+### Expected behavior
+- Plugin computes RMSE between forecast and actual values
+- If RMSE > 0.5, sends INFO-level notification
+- If RMSE > 1.0, sends WARN-level notification
+- Only triggers if condition persists for 10+ minutes (debounce)
+
+**Notification example:**
+```
+[WARN] Forecast error alert in temp_forecast.predicted: rmse=1.2. Tags: location=station1
+```
+
+### Example 2: Multi-metric validation with multiple channels
+
+Monitor multiple forecast metrics with different notification channels:
+
+```bash
+# Create trigger with Discord and HTTP notifications
+influxdb3 create trigger \
+  --database analytics \
+  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --trigger-spec "every:1h" \
+  --trigger-arguments 'forecast_measurement=sales_forecast,actual_measurement=sales_actual,forecast_field=predicted_sales,actual_field=sales_amount,error_metric=mae,error_thresholds=WARN-"1000":ERROR-"5000":CRITICAL-"10000",window=6h,senders=discord.http,discord_webhook_url="https://discord.com/api/webhooks/YOUR/WEBHOOK",http_webhook_url="https://your-api.com/alerts",notification_text="[$$level] Sales forecast error: $$metric=$$error (threshold exceeded)",rounding_freq=5min' \
+  sales_forecast_monitor
+```
+
+### Example 3: SMS alerts for critical forecast failures
+
+Set up SMS notifications for critical forecast accuracy issues:
+
+```bash
+# Set environment variables (recommended for sensitive data)
+export TWILIO_SID="your_twilio_sid"
+export TWILIO_TOKEN="your_twilio_token"
+
+# Create trigger with SMS notifications
+influxdb3 create trigger \
+  --database production_forecasts \
+  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --trigger-spec "every:5m" \
+  --trigger-arguments 'forecast_measurement=demand_forecast,actual_measurement=demand_actual,forecast_field=predicted_demand,actual_field=actual_demand,error_metric=mse,error_thresholds=CRITICAL-"100000",window=15m,senders=sms,twilio_from_number="+1234567890",twilio_to_number="+0987654321",notification_text="CRITICAL: Production demand forecast error exceeded threshold. MSE: $$error",min_condition_duration=2m' \
+  critical_forecast_alert
+```
+
+## Using TOML Configuration Files
+
+This plugin supports using TOML configuration files for complex configurations.
+
+### Important Requirements
+
+**To use TOML configuration files, you must set the `PLUGIN_DIR` environment variable in the InfluxDB 3 host environment:**
+
+```bash
+PLUGIN_DIR=~/.plugins influxdb3 serve --node-id node0 --object-store file --data-dir ~/.influxdb3 --plugin-dir ~/.plugins
+```
+
+### Example TOML Configuration
+
+```toml
+# forecast_error_config_scheduler.toml
+forecast_measurement = "temperature_forecast"
+actual_measurement = "temperature_actual"
+forecast_field = "predicted_temp"
+actual_field = "temperature"
+error_metric = "rmse"
+error_thresholds = 'INFO-"0.5":WARN-"1.0":ERROR-"2.0":CRITICAL-"3.0"'
+window = "1h"
+senders = "slack"
+slack_webhook_url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+min_condition_duration = "10m"
+rounding_freq = "1min"
+notification_text = "[$$level] Forecast validation alert: $$metric=$$error in $$measurement.$$field"
+
+# Authentication (use environment variables instead when possible)
+influxdb3_auth_token = "your_token_here"
+```
+
+### Create trigger using TOML config
+
+```bash
+influxdb3 create trigger \
+  --database weather_db \
+  --plugin-filename forecast_error_evaluator.py \
+  --trigger-spec "every:30m" \
+  --trigger-arguments config_file_path=forecast_error_config_scheduler.toml \
+  forecast_validation_trigger
+```
+
+## Code overview
+
+### Files
+
+- `forecast_error_evaluator.py`: The main plugin code containing scheduler handler for forecast validation
+- `forecast_error_config_scheduler.toml`: Example TOML configuration file
+
+### Logging
+
+Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+
+```bash
+influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
+```
+
+Log columns:
+- **event_time**: Timestamp of the log event
+- **trigger_name**: Name of the trigger that generated the log
+- **log_level**: Severity level (INFO, WARN, ERROR)
+- **log_text**: Message describing validation results or errors
+
+### Main functions
+
+#### `process_scheduled_call(influxdb3_local, call_time, args)`
+Handles scheduled forecast validation tasks.
+Queries forecast and actual measurements, computes error metrics, and triggers notifications.
+
+Key operations:
+1. Parses configuration from arguments or TOML file
+2. Queries forecast and actual measurements within time window
+3. Aligns timestamps using rounding frequency
+4. Computes specified error metric (MSE, MAE, or RMSE)
+5. Evaluates thresholds and applies debounce logic
+6. Sends notifications via configured channels
+
+#### `compute_error_metric(forecast_values, actual_values, metric_type)`
+Core error computation engine that calculates forecast accuracy metrics.
+
+Supported error metrics:
+- `mse`: Mean Squared Error
+- `mae`: Mean Absolute Error  
+- `rmse`: Root Mean Squared Error (square root of MSE)
+
+#### `evaluate_thresholds(error_value, threshold_config)`
+Evaluates computed error against configured thresholds to determine alert level.
+
+Returns alert level based on threshold ranges:
+- `INFO`: Informational threshold exceeded
+- `WARN`: Warning threshold exceeded
+- `ERROR`: Error threshold exceeded
+- `CRITICAL`: Critical threshold exceeded
+
+## Troubleshooting
+
+### Common issues
+
+#### Issue: No overlapping timestamps between forecast and actual data
+**Solution**: Check that both measurements have data in the specified time window and use `rounding_freq` for alignment:
+```bash
+influxdb3 query --database mydb "SELECT time, field_value FROM forecast_measurement WHERE time >= now() - 1h"
+influxdb3 query --database mydb "SELECT time, field_value FROM actual_measurement WHERE time >= now() - 1h"
+```
+
+#### Issue: Notifications not being sent
+**Solution**: Verify the Notification Sender Plugin is installed and webhook URLs are correct:
+```bash
+# Check if notifier plugin exists
+ls ~/.plugins/notifier_plugin.py
+
+# Test webhook URL manually
+curl -X POST "your_webhook_url" -d '{"text": "test message"}'
+```
+
+#### Issue: Error threshold format not recognized
+**Solution**: Use proper threshold format with level prefixes:
+```bash
+--trigger-arguments 'error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0":CRITICAL-"3.0"'
+```
+
+#### Issue: Environment variables not loaded
+**Solution**: Set environment variables before starting InfluxDB:
+```bash
+export INFLUXDB3_AUTH_TOKEN="your_token"
+export TWILIO_SID="your_sid"
+influxdb3 serve --plugin-dir ~/.plugins
+```
+
+### Debugging tips
+
+1. **Check data availability** in both measurements:
+   ```bash
+   influxdb3 query --database mydb \
+     "SELECT COUNT(*) FROM forecast_measurement WHERE time >= now() - window"
+   ```
+
+2. **Verify timestamp alignment** with rounding frequency:
+   ```bash
+   --trigger-arguments 'rounding_freq=5min'
+   ```
+
+3. **Test with shorter windows** for faster debugging:
+   ```bash
+   --trigger-arguments 'window=10m,min_condition_duration=1m'
+   ```
+
+4. **Monitor notification delivery** in logs:
+   ```bash
+   influxdb3 query --database _internal \
+     "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%notification%'"
+   ```
+
+### Performance considerations
+
+- **Data alignment**: Use appropriate `rounding_freq` to balance accuracy and performance
+- **Window size**: Larger windows increase computation time but provide more robust error estimates
+- **Debounce duration**: Balance between noise suppression and alert responsiveness
+- **Notification throttling**: Built-in retry logic prevents notification spam
+- **Memory usage**: Plugin processes data in pandas DataFrames - consider memory for large datasets
 
 ## Questions/Comments
-For support, open a GitHub issue or contact us via [Discord](https://discord.com/invite/vZe2w2Ds8B) in the `#influxdb3_core` channel, [Slack](https://influxcommunity.slack.com/) in the `#influxdb3_core` channel, or the [Community Forums](https://community.influxdata.com/).
+
+For additional support, see the [Support section](../README.md#support).

@@ -2,6 +2,7 @@
 
 ⚡ scheduled  
 🏷️ anomaly-detection, time-series, machine-learning, alerting
+🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
 ## Description
 

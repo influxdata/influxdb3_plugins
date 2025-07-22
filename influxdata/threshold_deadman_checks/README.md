@@ -2,6 +2,7 @@
 
 ⚡ scheduled, data-write  
 🏷️ monitoring, alerting, thresholds, deadman-detection
+🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
 ## Description
 

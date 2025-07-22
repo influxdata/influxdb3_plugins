@@ -2,6 +2,7 @@
 
 ⚡ scheduled, http
 🏷️ downsampling, aggregation, data-reduction
+🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
 ## Description
 
@@ -64,7 +65,7 @@ Each downsampled record includes three additional metadata columns:
 
 ### Installation steps
 
-1. Start InfluxDB with plugin support:
+1. Start InfluxDB 3 with plugin support:
    ```bash
    influxdb3 serve \
      --node-id node0 \

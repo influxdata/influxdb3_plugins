@@ -91,7 +91,7 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Installation steps
 
-1. Start InfluxDB with plugin support:
+1. Start InfluxDB 3 with plugin support:
    ```bash
    influxdb3 serve \
      --node-id node0 \

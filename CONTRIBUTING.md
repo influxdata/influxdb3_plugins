@@ -38,24 +38,13 @@ Each plugin README should include:
 8. **Code Overview** - Walkthrough of key functions
 9. **Troubleshooting** - Common issues and solutions
 
-### Python Metadata Constants
+### Plugin Metadata
 
-Each plugin must define metadata as Python constants at the top of the plugin file:
+Each plugin must include JSON metadata in a docstring at the top of the plugin file. This metadata is required for:
+- InfluxDB 3 Explorer UI integration and configuration
+- Automated testing with the repository test scripts
 
-```python
-# Required metadata constants
-PLUGIN_NAME = "Plugin Name"
-PLUGIN_AUTHOR = "Author Name"
-PLUGIN_VERSION = "1.0.0"
-PLUGIN_DESCRIPTION = "Brief description of plugin 
-functionality"
-PLUGIN_TRIGGER_TYPES = ["scheduler", "http"]  # 
-Supported trigger types
-PLUGIN_REQUIRED_LIBRARIES = []  # Python 
-dependencies
-PLUGIN_REQUIRED_PLUGINS = []    # Plugin 
-dependencies
-```
+For complete metadata specifications, formatting requirements, and examples, see [REQUIRED_PLUGIN_METADATA.md](REQUIRED_PLUGIN_METADATA.md).
 
 
 #### Usage Guidelines
@@ -67,7 +56,7 @@ dependencies
 
 #### Common Trigger Types
 - `scheduled` - Time-based execution
-- `wal` - Write-ahead log events (data writes)
+- `data-write` - Write-ahead log events (data writes)
 - `http` - HTTP request handling
 
 #### Common Tags
@@ -283,12 +272,13 @@ The repository provides comprehensive testing tools for validating plugins with 
 
 ### Testing Methods
 
-You can run tests using either Docker (recommended) or a local Python environment.
+You can run tests using either Docker Compose (recommended) or a local Python environment.
 
-#### Option 1: Docker-based Testing (Recommended)
+#### Option 1: Docker Compose Testing (Recommended)
 
-No Python installation required. The Docker environment handles all dependencies:
+No Python installation required. Uses Docker Compose services for testing:
 
+**Using the docker-test.sh script:**
 ```bash
 # Test all influxdata plugins
 ./docker-test.sh all
@@ -307,9 +297,33 @@ No Python installation required. The Docker environment handles all dependencies
 ./docker-test.sh clean
 ```
 
+**Using docker compose directly:**
+```bash
+# Test all plugins with InfluxDB 3 Core
+docker compose --profile test run --rm test-core-all
+
+# Test all plugins with InfluxDB 3 Enterprise  
+docker compose --profile test run --rm test-enterprise-all
+
+# Test a specific plugin with Core
+PLUGIN_PATH="influxdata/basic_transformation" \
+docker compose --profile test run --rm test-core-specific
+
+# Test with TOML configuration
+PLUGIN_PATH="influxdata/basic_transformation" \
+PLUGIN_FILE="basic_transformation.py" \
+TOML_CONFIG="basic_transformation_config_scheduler.toml" \
+PACKAGES="pint" \
+docker compose --profile test run --rm test-core-toml
+
+# Start services manually for interactive testing
+docker compose up -d influxdb3-core
+docker compose run --rm plugin-tester bash
+```
+
 #### Option 2: Local Python Environment
 
-If you prefer to run tests locally:
+For local development without Docker:
 
 1. **Python environment setup**:
    ```bash
@@ -321,46 +335,72 @@ If you prefer to run tests locally:
    pip install -r requirements.txt
    ```
    
-   Alternatively, use the provided setup script:
+   Or use the setup script:
    ```bash
    ./setup-test-env.sh
    source venv/bin/activate
    ```
 
-2. **Run tests**:
+2. **Start InfluxDB 3 locally**:
    ```bash
-   python test-plugins.py influxdata --core
+   # Core version
+   docker compose up -d influxdb3-core
+   
+   # Or Enterprise version
+   docker compose up -d influxdb3-enterprise
    ```
 
-**Note:** Plugin-specific packages are installed automatically via the InfluxDB API during testing
+3. **Run tests**:
+   ```bash
+   # Test all influxdata plugins with Core
+   python test-plugins.py influxdata --core --skip-container
+
+   # Test specific plugin
+   python test-plugins.py influxdata/basic_transformation --skip-container
+
+   # Test with Enterprise
+   python test-plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
+
+   # Test with TOML configuration
+   python test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
+     --toml-config basic_transformation_config_scheduler.toml \
+     --packages pint
+   ```
+
+**Note:** Use `--skip-container` flag to avoid Docker management when running locally.
 
 ### Available Test Scripts
 
-#### 1. `test-plugins.py` - Organization/Plugin Testing
+#### 1. `docker-test.sh` - Docker-based Test Runner
+Wrapper script for Docker Compose testing with simplified commands.
+
+**Commands:**
+- `all` - Test all plugins in influxdata organization
+- `plugin <path>` - Test a specific plugin
+- `toml <path> <file>` - Test with TOML configuration
+- `shell` - Start interactive test container
+- `clean` - Stop and remove test containers
+
+#### 2. `test-plugins.py` - Organization/Plugin Testing
 Tests all plugins in an organization or specific plugins using the InfluxDB 3 HTTP API.
 
 **Usage:**
 ```bash
 # Test all influxdata plugins with InfluxDB 3 Core (default)
-python test-plugins.py influxdata --core
+python test-plugins.py influxdata --core --skip-container
 
 # Test a specific plugin
-python test-plugins.py influxdata/basic_transformation
+python test-plugins.py influxdata/basic_transformation --skip-container
 
 # Test with InfluxDB 3 Enterprise
-python test-plugins.py influxdata --enterprise
+python test-plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
 
 # List available plugins
 python test-plugins.py --list
-
-# Using the virtual environment directly
-venv/bin/python test-plugins.py influxdata --core
 ```
 
-**Note:** The legacy `test-plugins.sh` bash script is also available but the Python version is recommended for better reliability and cross-platform compatibility.
-
-#### 2. `test_plugin_toml.py` - Generic API-based Testing
-A reusable Python script that uses the InfluxDB 3 HTTP API to test plugins with TOML configuration support.
+#### 3. `test_plugin_toml.py` - Generic API-based Testing
+Reusable script for testing plugins with TOML configuration support using the InfluxDB 3 HTTP API.
 
 **Features:**
 - Automatically parses plugin metadata from JSON schema in docstrings
@@ -372,132 +412,34 @@ A reusable Python script that uses the InfluxDB 3 HTTP API to test plugins with 
 **Usage:**
 ```bash
 # Test basic transformation plugin with TOML config
-./test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
+python test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
   --toml-config basic_transformation_config_scheduler.toml \
   --packages pint
 
 # Test downsampler plugin
-./test_plugin_toml.py influxdata/downsampler downsampler.py \
+python test_plugin_toml.py influxdata/downsampler downsampler.py \
   --toml-config downsampling_config_scheduler.toml
 
 # Test with custom settings
-./test_plugin_toml.py influxdata/my_plugin my_plugin.py \
+python test_plugin_toml.py influxdata/my_plugin my_plugin.py \
   --database custom_testdb \
   --host http://localhost:8282 \
   --packages numpy pandas \
   --test-data "metrics,host=server1 cpu=50.0"
 ```
 
+#### 4. Docker Compose Services
+Direct access to containerized test services:
 
-### TOML Configuration Testing
+**Core services:**
+- `test-core-all` - Test all plugins with InfluxDB 3 Core
+- `test-core-specific` - Test specific plugin with Core
+- `test-core-toml` - Test with TOML configuration and Core
 
-#### Prerequisites
-To test TOML configuration files, you must set the `PLUGIN_DIR` environment variable:
-
-```bash
-# Set PLUGIN_DIR when starting InfluxDB 3
-PLUGIN_DIR=~/.plugins influxdb3 serve --node-id node0 --object-store file --data-dir ~/.influxdb3 --plugin-dir ~/.plugins
-```
-
-#### TOML Configuration Requirements
-- The `PLUGIN_DIR` environment variable must be set in the InfluxDB 3 host environment
-- TOML files must be located in the directory specified by `PLUGIN_DIR`
-- Use `config_file_path` parameter with just the filename (not full path)
-
-#### Example TOML Configuration
-```toml
-# basic_transformation_config_scheduler.toml
-measurement = "temperature"
-target_measurement = "temp_transformed"
-window = "30d"
-
-[names_transformations]
-sensor = ["upper"]
-temp = ["snake"]
-
-[values_transformations]
-temp = ["convert_degC_to_degF"]
-```
-
-### Plugin Metadata for Testing
-
-The generic test script automatically reads plugin capabilities from the JSON schema in the plugin docstring:
-
-```python
-"""
-{
-    "plugin_type": ["scheduled", "onwrite"],
-    "scheduled_args_config": [
-        {
-            "name": "measurement",
-            "example": "temperature",
-            "description": "Source measurement name",
-            "required": true
-        },
-        {
-            "name": "window",
-            "example": "30d",
-            "description": "Time window for data retrieval",
-            "required": true
-        }
-    ],
-    "onwrite_args_config": [
-        {
-            "name": "measurement",
-            "example": "temperature",
-            "description": "Source measurement name",
-            "required": true
-        }
-    ]
-}
-"""
-```
-
-### Test Execution Flow
-
-1. **Environment Setup**: Starts InfluxDB 3 Core container with Docker Compose
-2. **Database Creation**: Creates test databases using `/api/v3/configure/database`
-3. **Dependency Installation**: Installs required Python packages via `/api/v3/configure/plugin_environment/install_packages`
-4. **Environment Validation**: Checks that `PLUGIN_DIR` is properly set
-5. **Trigger Testing**: Creates triggers for each supported plugin type using `/api/v3/configure/processing_engine_trigger`
-6. **TOML Configuration Testing**: Tests TOML file access and parsing
-7. **Cleanup**: Removes test triggers and cleans up resources
-
-### Test Categories
-
-#### 1. Basic Functionality Tests
-- Plugin dependency installation
-- Environment variable validation
-- Inline argument processing
-
-#### 2. TOML Configuration Tests
-- TOML file loading from `PLUGIN_DIR`
-- Configuration parsing and validation
-- Subdirectory config file access
-
-#### 3. Plugin Type Tests
-- **Scheduled plugins**: `every:5m` trigger specification
-- **Onwrite plugins**: `all_tables` trigger specification  
-- **HTTP plugins**: `request:test` trigger specification
-
-### Expected Test Results
-
-```bash
-Starting TOML configuration test for influxdata/basic_transformation
-[INFO] Starting InfluxDB 3 Core container...
-[INFO] InfluxDB 3 Core is ready!
-[INFO] Creating database: testdb
-[INFO] Writing test data...
-[INFO] Test: Installing plugin dependencies
-[INFO] ✓ Plugin dependencies installation works
-[INFO] Test: Checking PLUGIN_DIR environment variable
-[INFO] ✓ PLUGIN_DIR environment variable works
-[INFO] ✓ scheduled inline arguments trigger works
-[INFO] ✓ onwrite inline arguments trigger works
-[INFO] ✓ scheduled TOML config trigger creation works
-[INFO] ✓ onwrite TOML config trigger creation works
-[INFO] Test complete!
-```
+**Enterprise services:**
+- `test-enterprise-all` - Test all plugins with InfluxDB 3 Enterprise  
+- `test-enterprise-specific` - Test specific plugin with Enterprise
+- `test-enterprise-toml` - Test with TOML configuration and Enterprise
 
 ### Common Test Issues and Solutions
 
@@ -512,20 +454,6 @@ PLUGIN_DIR=~/.plugins influxdb3 serve --plugin-dir ~/.plugins
 
 #### Issue: Plugin dependency installation fails
 **Solution**: Check that the package name is correct and available in the Python package index.
-
-### Test Documentation Standards
-- Document what each test validates
-- Include setup and teardown requirements
-- Provide examples of test data
-- Explain expected outcomes and error conditions
-
-### Test Example Format
-```python
-def test_plugin_basic_functionality():
-    """Test basic plugin functionality with mock data."""
-    # Test implementation
-    pass
-```
 
 ## Error Handling
 

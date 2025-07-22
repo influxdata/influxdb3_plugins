@@ -48,9 +48,14 @@ Each argument in the `*_args_config` arrays must include:
 **Important**: The header structure must comply with valid JSON format.
 ## Plugin Library Metadata
 
-The `plugin_library.json` file contains a "plugins" field with a list of plugins. Each plugin entry must include all parameters for correct operation and display in the InfluxDB 3 Explorer.
 
-### Plugin Entry Format
+Generated `plugin_library.json` files contain a "plugins" field with a list of plugins, where each plugin entry includes metadata extracted from the plugin's JSON docstring along with additional repository information.
+
+For example, the `influxdata/plugin_library.json` file is automatically generated from plugin docstring metadata by repository owners to enable plugin discovery in the InfluxDB 3 Explorer UI. This file should not be manually edited.
+
+### Generated Plugin Entry Format
+
+The automatically generated plugin library entries have the following structure:
 
 ```json
 {

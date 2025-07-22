@@ -1,6 +1,6 @@
 # Basic Transformation Plugin
 
-⚡ scheduled, wal
+⚡ scheduled, data-write
 🏷️ transformation, data-cleaning, unit-conversion
 
 ## Description

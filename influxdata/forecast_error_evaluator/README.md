@@ -2,10 +2,12 @@
 
 ⚡ scheduled
 🏷️ forecasting, validation, monitoring, alerting
+🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
 ## Description
 
-The Forecast Error Evaluator Plugin validates forecast model accuracy in InfluxDB 3 by comparing predicted values with actual observations.
+The Forecast Error Evaluator Plugin validates forecast model accuracy for time series data
+in InfluxDB 3 by comparing predicted values with actual observations.
 The plugin periodically computes error metrics (MSE, MAE, or RMSE), detects anomalies based on error thresholds, and sends notifications when forecast accuracy degrades.
 It includes debounce logic to suppress transient anomalies and supports multi-channel notifications via the Notification Sender Plugin.
 

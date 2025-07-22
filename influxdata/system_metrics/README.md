@@ -1,5 +1,9 @@
 # System Metrics Plugin
 
+⚡ scheduled  
+🏷️ monitoring, system-metrics, performance
+🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
+
 A comprehensive system monitoring plugin that collects CPU, memory, disk, and network metrics from the host system. This plugin provides detailed performance insights including per-core CPU statistics, memory usage breakdowns, disk I/O performance, and network interface statistics.
 
 ## Prerequisites

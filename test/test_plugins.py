@@ -523,7 +523,7 @@ class BasePluginTester:
         
         try:
             response = requests.post(
-                f"{self.host_url}/api/v3/write",
+                f"{self.host_url}/api/v3/write_lp",
                 params={"db": self.database_name},
                 data=test_data,
                 headers={"Content-Type": "text/plain"},

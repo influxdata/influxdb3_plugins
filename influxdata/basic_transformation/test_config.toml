@@ -1,0 +1,4 @@
+# Auto-generated test configuration
+
+measurement = "temperature"
+target_measurement = "transformed_temperature"

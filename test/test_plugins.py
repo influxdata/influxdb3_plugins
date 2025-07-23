@@ -774,37 +774,56 @@ class PluginTestRunner(BasePluginTester):
             return False
     
     def _test_plugin_cli_mode(self, config: PluginTestConfig, plugin_path: str, plugin_type: str) -> bool:
-        """Test plugin using CLI mode (influxdb3 test command)"""
+        """Test plugin using API test endpoints"""
         plugin_name = Path(plugin_path).name
         
-        print_status(f"Testing {plugin_name} ({plugin_type}) with CLI mode...")
+        print_status(f"Testing {plugin_name} ({plugin_type}) with test API...")
         
-        if self.skip_container:
-            print_warning(f"CLI mode testing not supported when running inside container")
-            return True  # Skip CLI tests when running inside container
+        # Map plugin types to test endpoints
+        test_endpoints = {
+            "scheduled": "/plugin_test/schedule",
+            "onwrite": "/plugin_test/wal",
+            "http": None  # HTTP plugins need a trigger to test
+        }
+        
+        endpoint = test_endpoints.get(plugin_type)
+        if endpoint is None and plugin_type == "http":
+            # HTTP plugins need a trigger to be tested - test via trigger creation and HTTP call
+            return self._test_http_plugin_via_trigger(config, plugin_path, plugin_type)
+        
+        if endpoint is None:
+            print_warning(f"Unknown plugin type: {plugin_type}")
+            return False
         
         try:
-            # Test with inline arguments
+            # Get test arguments
             test_args = config.get_test_args(plugin_type)
-            args_str = " ".join([f"--{k} '{v}'" for k, v in test_args.items()])
             
-            cmd = [
-                "docker", "compose", "-f", "compose.yml", "exec", "-T", self.container_name,
-                "influxdb3", "test", plugin_name, "--database", self.database_name
-            ]
+            # Construct plugin filename path
+            plugin_filename = f"/host/{plugin_path}/{plugin_name}.py"
             
-            if args_str.strip():
-                cmd.extend(args_str.split())
+            # Prepare test request data
+            test_data = {
+                "database": self.database_name,
+                "filename": plugin_filename,
+                "arguments": test_args
+            }
             
-            result = self.run_command(cmd, capture_output=True)
+            # Add input_lp parameter for onwrite tests
+            if plugin_type == "onwrite":
+                test_data["input_lp"] = config.get_test_data()
             
-            if "✓" in result.stdout or "success" in result.stdout.lower():
-                print_status(f"✓ {plugin_name} ({plugin_type}) CLI test completed successfully")
-                cli_success = True
+            # Test with inline arguments
+            print_status(f"Testing with inline arguments: {test_args}")
+            success, response = self.make_api_request("POST", endpoint, test_data)
+            
+            if success:
+                print_status(f"✓ {plugin_name} ({plugin_type}) inline args test completed successfully")
+                inline_success = True
             else:
-                print_error(f"✗ {plugin_name} ({plugin_type}) CLI test failed")
-                print_error(f"CLI output: {result.stdout}")
-                cli_success = False
+                print_error(f"✗ {plugin_name} ({plugin_type}) inline args test failed")
+                print_error(f"Response: {response}")
+                inline_success = False
             
             # Test with TOML config if supported
             toml_success = True
@@ -813,32 +832,69 @@ class PluginTestRunner(BasePluginTester):
                 if toml_file:
                     print_status(f"Testing {plugin_name} ({plugin_type}) with TOML config...")
                     
-                    cmd_toml = [
-                        "docker", "compose", "-f", "compose.yml", "exec", "-T", self.container_name,
-                        "influxdb3", "test", plugin_name, "--database", self.database_name,
-                        "--config-file", toml_file, "--dry-run", "true"
-                    ]
+                    # For TOML testing, pass config_file_path as argument
+                    toml_args = {"config_file_path": toml_file, "dry_run": "true"}
+                    toml_test_data = {
+                        "database": self.database_name,
+                        "filename": plugin_filename,
+                        "arguments": toml_args
+                    }
                     
-                    result_toml = self.run_command(cmd_toml, capture_output=True)
+                    # Add input_lp parameter for onwrite tests
+                    if plugin_type == "onwrite":
+                        toml_test_data["input_lp"] = config.get_test_data()
                     
-                    if "✓" in result_toml.stdout or "success" in result_toml.stdout.lower():
-                        print_status(f"✓ {plugin_name} ({plugin_type}) CLI TOML test completed successfully")
+                    success, response = self.make_api_request("POST", endpoint, toml_test_data)
+                    
+                    if success:
+                        print_status(f"✓ {plugin_name} ({plugin_type}) TOML config test completed successfully")
                     else:
-                        print_error(f"✗ {plugin_name} ({plugin_type}) CLI TOML test failed")
-                        print_error(f"CLI TOML output: {result_toml.stdout}")
+                        print_error(f"✗ {plugin_name} ({plugin_type}) TOML config test failed")
+                        print_error(f"Response: {response}")
                         toml_success = False
             
-            return cli_success and toml_success
+            return inline_success and toml_success
             
-        except subprocess.CalledProcessError as e:
-            print_error(f"CLI test command failed: {e}")
-            if e.stdout:
-                print_error(f"stdout: {e.stdout}")
-            if e.stderr:
-                print_error(f"stderr: {e.stderr}")
-            return False
         except Exception as e:
-            print_error(f"Error in CLI mode testing: {e}")
+            print_error(f"Error in test API mode: {e}")
+            return False
+    
+    def _test_http_plugin_via_trigger(self, config: PluginTestConfig, plugin_path: str, plugin_type: str) -> bool:
+        """Test HTTP plugin by creating a trigger and making HTTP requests"""
+        plugin_name = Path(plugin_path).name
+        trigger_name = f"test_{plugin_name}_{plugin_type}_http"
+        
+        print_status(f"Testing {plugin_name} ({plugin_type}) via HTTP trigger...")
+        
+        try:
+            # Get test arguments
+            trigger_args = config.get_test_args(plugin_type)
+            
+            # Create trigger for HTTP plugin
+            if not self.create_trigger(trigger_name, plugin_path, plugin_type, trigger_args):
+                print_error(f"Failed to create HTTP trigger for {plugin_name}")
+                return False
+            
+            # Give trigger a moment to start
+            time.sleep(2)
+            
+            # Test the HTTP endpoint (assumed to be at /test based on trigger spec)
+            test_endpoint = "/test"  # This matches the "request:test" trigger spec
+            test_data = {"test": "data"}
+            
+            print_status(f"Making test HTTP request to {test_endpoint}")
+            success, response = self.make_api_request("POST", test_endpoint, test_data)
+            
+            if success:
+                print_status(f"✓ {plugin_name} ({plugin_type}) HTTP test completed successfully")
+                return True
+            else:
+                print_error(f"✗ {plugin_name} ({plugin_type}) HTTP test failed")
+                print_error(f"Response: {response}")
+                return False
+                
+        except Exception as e:
+            print_error(f"Error testing HTTP plugin {plugin_name}: {e}")
             return False
     
     def test_organization_plugins(self, organization: str) -> Tuple[int, int]:

@@ -930,13 +930,13 @@ def list_available_plugins():
 
 def show_usage():
     """Display usage information"""
-    print("Usage: python test-plugins.py [organization[/plugin_name]] [options]")
+    print("Usage: python test/test_plugins.py [organization[/plugin_name]] [options]")
     print("")
     print("Test plugins by organization or specific plugin:")
-    print("  python test-plugins.py influxdata --core                    - Test all influxdata plugins with Core")
-    print("  python test-plugins.py influxdata/basic_transformation      - Test specific plugin (defaults to Core)")
-    print("  python test-plugins.py examples --enterprise                - Test all examples plugins with Enterprise")
-    print("  python test-plugins.py --list                               - List all available organizations and plugins")
+    print("  python test/test_plugins.py influxdata --core                    - Test all influxdata plugins with Core")
+    print("  python test/test_plugins.py influxdata/basic_transformation      - Test specific plugin (defaults to Core)")
+    print("  python test/test_plugins.py examples --enterprise                - Test all examples plugins with Enterprise")
+    print("  python test/test_plugins.py --list                               - List all available organizations and plugins")
     print("")
     print("Options:")
     print("  --core            Start influxdb3 (default)")

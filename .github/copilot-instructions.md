@@ -68,8 +68,8 @@ Follow [CONTRIBUTING.md](../CONTRIBUTING.md) for:
 ## Testing
 
 ### Testing Methods
-1. Docker-based testing (recommended): `./docker-test.sh`
-2. Python environment testing: `python test-plugins.py`
+1. Docker Compose testing (recommended): `docker compose --profile test`
+2. Python environment testing: `python test/test_plugins.py`
 3. TOML configuration testing with `PLUGIN_DIR` environment variable
 
 ### Test Requirements

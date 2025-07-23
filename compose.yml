@@ -75,7 +75,7 @@ services:
         target: /plugins
     networks:
       - default
-    command: ["python", "/plugins/test_plugins.py", "--help"]
+    command: ["python", "/plugins/test/test_plugins.py", "--help"]
 
   # Test services for InfluxDB 3 Core
   test-core-all:
@@ -86,7 +86,7 @@ services:
     environment:
       - INFLUXDB3_HOST_URL=http://influxdb3-core:8181
       - PLUGIN_DIR=/plugins
-    command: ["python", "/plugins/test_plugins.py", "influxdata", "--core", "--skip-container"]
+    command: ["python", "/plugins/test/test_plugins.py", "influxdata", "--core", "--skip-container"]
 
   test-core-specific:
     extends: plugin-tester
@@ -97,7 +97,7 @@ services:
       - INFLUXDB3_HOST_URL=http://influxdb3-core:8181
       - PLUGIN_DIR=/plugins
       - PLUGIN_PATH=${PLUGIN_PATH:-influxdata/basic_transformation}
-    command: ["sh", "-c", "python /plugins/test_plugins.py \"${PLUGIN_PATH}\" --skip-container"]
+    command: ["sh", "-c", "python /plugins/test/test_plugins.py \"${PLUGIN_PATH}\" --skip-container"]
 
   test-core-toml:
     extends: plugin-tester
@@ -110,7 +110,7 @@ services:
       - PLUGIN_FILE=${PLUGIN_FILE:-basic_transformation.py}
       - TOML_CONFIG=${TOML_CONFIG:-}
       - PACKAGES=${PACKAGES:-pint}
-    command: ["sh", "-c", "python /plugins/test_plugin_toml.py \"${PLUGIN_PATH}\" \"${PLUGIN_FILE}\" ${TOML_CONFIG:+--toml-config \"${TOML_CONFIG}\"} --packages ${PACKAGES}"]
+    command: ["sh", "-c", "python /plugins/test/test_plugin_toml.py \"${PLUGIN_PATH}\" \"${PLUGIN_FILE}\" ${TOML_CONFIG:+--toml-config \"${TOML_CONFIG}\"} --packages ${PACKAGES}"]
 
   # Test services for InfluxDB 3 Enterprise
   test-enterprise-all:
@@ -121,7 +121,7 @@ services:
     environment:
       - INFLUXDB3_HOST_URL=http://influxdb3-enterprise:8181
       - PLUGIN_DIR=/plugins
-    command: ["python", "/plugins/test_plugins.py", "influxdata", "--enterprise", "--skip-container"]
+    command: ["python", "/plugins/test/test_plugins.py", "influxdata", "--enterprise", "--skip-container"]
 
   test-enterprise-specific:
     extends: plugin-tester
@@ -132,7 +132,7 @@ services:
       - INFLUXDB3_HOST_URL=http://influxdb3-enterprise:8181
       - PLUGIN_DIR=/plugins
       - PLUGIN_PATH=${PLUGIN_PATH:-influxdata/basic_transformation}
-    command: ["sh", "-c", "python /plugins/test_plugins.py \"${PLUGIN_PATH}\" --skip-container"]
+    command: ["sh", "-c", "python /plugins/test/test_plugins.py \"${PLUGIN_PATH}\" --skip-container"]
 
   test-enterprise-toml:
     extends: plugin-tester
@@ -145,4 +145,4 @@ services:
       - PLUGIN_FILE=${PLUGIN_FILE:-basic_transformation.py}
       - TOML_CONFIG=${TOML_CONFIG:-}
       - PACKAGES=${PACKAGES:-pint}
-    command: ["sh", "-c", "python /plugins/test_plugin_toml.py \"${PLUGIN_PATH}\" \"${PLUGIN_FILE}\" ${TOML_CONFIG:+--toml-config \"${TOML_CONFIG}\"} --packages ${PACKAGES}"]
+    command: ["sh", "-c", "python /plugins/test/test_plugin_toml.py \"${PLUGIN_PATH}\" \"${PLUGIN_FILE}\" ${TOML_CONFIG:+--toml-config \"${TOML_CONFIG}\"} --packages ${PACKAGES}"]

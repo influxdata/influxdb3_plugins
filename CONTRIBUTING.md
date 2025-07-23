@@ -311,12 +311,12 @@ For local development without Docker:
    source venv/bin/activate  # On Windows: venv\Scripts\activate
    
    # Install test dependencies
-   pip install -r requirements.txt
+   pip install -r test/requirements.txt
    ```
    
    Or use the setup script:
    ```bash
-   ./setup-test-env.sh
+   ./test/setup-test-env.sh
    source venv/bin/activate
    ```
 
@@ -332,16 +332,16 @@ For local development without Docker:
 3. **Run tests**:
    ```bash
    # Test all influxdata plugins with Core
-   python test-plugins.py influxdata --core --skip-container
+   python test/test_plugins.py influxdata --core --skip-container
 
    # Test specific plugin
-   python test-plugins.py influxdata/basic_transformation --skip-container
+   python test/test_plugins.py influxdata/basic_transformation --skip-container
 
    # Test with Enterprise
-   python test-plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
+   python test/test_plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
 
    # Test with TOML configuration
-   python test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
+   python test/test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
      --toml-config basic_transformation_config_scheduler.toml \
      --packages pint
    ```
@@ -356,16 +356,16 @@ Tests all plugins in an organization or specific plugins using the InfluxDB 3 HT
 **Usage:**
 ```bash
 # Test all influxdata plugins with InfluxDB 3 Core (default)
-python test-plugins.py influxdata --core --skip-container
+python test/test_plugins.py influxdata --core --skip-container
 
 # Test a specific plugin
-python test-plugins.py influxdata/basic_transformation --skip-container
+python test/test_plugins.py influxdata/basic_transformation --skip-container
 
 # Test with InfluxDB 3 Enterprise
-python test-plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
+python test/test_plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
 
 # List available plugins
-python test-plugins.py --list
+python test/test_plugins.py --list
 ```
 
 #### 2. `test_plugin_toml.py` - Generic API-based Testing
@@ -381,16 +381,16 @@ Reusable script for testing plugins with TOML configuration support using the In
 **Usage:**
 ```bash
 # Test basic transformation plugin with TOML config
-python test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
+python test/test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
   --toml-config basic_transformation_config_scheduler.toml \
   --packages pint
 
 # Test downsampler plugin
-python test_plugin_toml.py influxdata/downsampler downsampler.py \
+python test/test_plugin_toml.py influxdata/downsampler downsampler.py \
   --toml-config downsampling_config_scheduler.toml
 
 # Test with custom settings
-python test_plugin_toml.py influxdata/my_plugin my_plugin.py \
+python test/test_plugin_toml.py influxdata/my_plugin my_plugin.py \
   --database custom_testdb \
   --host http://localhost:8282 \
   --packages numpy pandas \

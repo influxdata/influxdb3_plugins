@@ -1,7 +1,22 @@
-# This is an example WAL plugin that reads through data and writes 
-# a record to another table about the number of rows we see in 
-# each WAL flush for each table. It also shows using arguments 
-# associated with the trigger to drive plugin behavior.
+"""
+{
+    "plugin_type": ["onwrite"],
+    "onwrite_args_config": [
+        {
+            "name": "double_count_table",
+            "example": "temperature",
+            "description": "Table name for which to double the row count in write reports.",
+            "required": false
+        }
+    ]
+}
+"""
+
+# Example WAL plugin that monitors data writes and creates summary reports.
+# For each table batch in a WAL flush, this plugin writes a row count summary
+# to the 'write_reports' table. The plugin accepts an optional argument to
+# double the reported count for a specific table, demonstrating how plugins
+# can use trigger arguments to modify behavior.
 
 def process_writes(influxdb3_local, table_batches, args=None):
     for table_batch in table_batches:

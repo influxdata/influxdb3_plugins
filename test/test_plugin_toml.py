@@ -11,12 +11,18 @@ import shutil
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# Import common functionality from test_plugins.py
-from test_plugins import (
-    BasePluginTester, parse_plugin_metadata, get_trigger_spec_for_type,
-    PluginTestConfig, print_status, print_warning, print_error, 
-    DEFAULT_DATABASE_NAME, DEFAULT_HOST_URL
-)
+# Import shared modules
+try:
+    from .influxdb_api_client import print_status, print_warning, print_error
+    from .plugin_config import PluginConfig, get_trigger_spec_for_type
+    from .trigger_manager import TriggerManager
+    from .test_plugins import BasePluginTester, DEFAULT_DATABASE_NAME, DEFAULT_HOST_URL
+except ImportError:
+    # When running as a script, use absolute imports
+    from influxdb_api_client import print_status, print_warning, print_error
+    from plugin_config import PluginConfig, get_trigger_spec_for_type
+    from trigger_manager import TriggerManager
+    from test_plugins import BasePluginTester, DEFAULT_DATABASE_NAME, DEFAULT_HOST_URL
 
 class PluginTester(BasePluginTester):
     """
@@ -46,7 +52,7 @@ class PluginTester(BasePluginTester):
         self.toml_config = toml_config
         
         # Initialize plugin configuration manager
-        self.plugin_config = PluginTestConfig(plugin_path, plugin_file)
+        self.plugin_config = PluginConfig(plugin_path, plugin_file)
         
         # Use plugin-specific packages if not provided
         self.packages = packages or self.plugin_config.get_required_packages()
@@ -74,24 +80,8 @@ class PluginTester(BasePluginTester):
     
     def create_trigger(self, trigger_name: str, plugin_type: str, config_file_path: Optional[str] = None) -> bool:
         """Create a trigger using the API with TOML-specific logic"""
-        print_status(f"Creating {plugin_type} trigger: {trigger_name}")
-        
-        trigger_spec = get_trigger_spec_for_type(plugin_type)
-        
-        # Use appropriate path prefix based on container context
-        plugin_path_prefix = "/plugins" if self.skip_container else "/host"
-        
-        trigger_data = {
-            "db": self.database_name,
-            "plugin_filename": f"{plugin_path_prefix}/{self.plugin_path}/{self.plugin_file}",
-            "trigger_name": trigger_name,
-            "trigger_specification": trigger_spec
-        }
-        
         if config_file_path:
-            trigger_data["trigger_arguments"] = {
-                "config_file_path": config_file_path
-            }
+            trigger_args = {"config_file_path": config_file_path}
         else:
             # Use plugin configuration to get appropriate arguments
             trigger_args = self.plugin_config.get_test_args(plugin_type)
@@ -99,28 +89,16 @@ class PluginTester(BasePluginTester):
             # Fallback to inline args if no metadata-derived args
             if not trigger_args or trigger_args == {"dry_run": "true"}:
                 trigger_args = self.inline_args
-            
-            trigger_data["trigger_arguments"] = trigger_args
         
-        success, response = self.make_api_request(
-            "POST",
-            "/configure/processing_engine_trigger",
-            trigger_data
+        return self.trigger_manager.create_trigger(
+            trigger_name, self.plugin_path, plugin_type, trigger_args, self.plugin_file
         )
-        
-        if success:
-            print_status(f"Trigger {trigger_name} created successfully")
-            self.created_triggers.append(trigger_name)
-            return True
-        else:
-            print_error(f"Trigger creation failed: {response}")
-            return False
     
     def test_plugin_dependencies(self) -> bool:
         """Test: Install plugin dependencies"""
         print_status("Test: Installing plugin dependencies")
         print_status(f"Packages to install: {self.packages}")
-        return self.install_packages(self.packages)
+        return self.api_client.install_packages(self.packages)
     
     def setup_test_files(self) -> None:
         """Setup test directories and files"""

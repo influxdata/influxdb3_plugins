@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /plugins
 
 # Copy requirements file
-COPY requirements.txt /tmp/requirements.txt
+COPY test/requirements.txt /tmp/requirements.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r /tmp/requirements.txt

@@ -161,9 +161,9 @@ class PluginTestRunner(BasePluginTester):
         """Start InfluxDB 3 container with service-specific logic"""
         self.container_manager.start_influxdb()
     def create_trigger(self, trigger_name: str, plugin_path: str, plugin_type: str, 
-                      trigger_args: Dict) -> bool:
+                      trigger_args: Dict, plugin_file: str = None) -> bool:
         """Create a trigger (delegates to trigger manager)"""
-        return self.trigger_manager.create_trigger(trigger_name, plugin_path, plugin_type, trigger_args)
+        return self.trigger_manager.create_trigger(trigger_name, plugin_path, plugin_type, trigger_args, plugin_file)
     
     def test_plugin(self, plugin_path: str) -> bool:
         """Test a specific plugin with both API and CLI modes"""
@@ -310,10 +310,51 @@ class PluginTestRunner(BasePluginTester):
                         print_error(f"Response: {response}")
                         toml_success = False
             
-            return inline_success and toml_success
+            # If API tests passed and this is an onwrite plugin, also test with actual trigger
+            trigger_success = True
+            if (inline_success and toml_success) and plugin_type == "onwrite":
+                trigger_success = self._test_onwrite_plugin_with_trigger(config, plugin_path, plugin_type)
+            
+            return inline_success and toml_success and trigger_success
             
         except Exception as e:
             print_error(f"Error in test API mode: {e}")
+            return False
+    
+    def _test_onwrite_plugin_with_trigger(self, config: PluginConfig, plugin_path: str, plugin_type: str) -> bool:
+        """Test onwrite plugin by creating a trigger and writing data to trigger it"""
+        plugin_name = Path(plugin_path).name
+        
+        print_status(f"Testing {plugin_name} ({plugin_type}) with actual trigger and data write...")
+        
+        try:
+            # Get test arguments for trigger creation
+            test_args = config.get_test_args(plugin_type)
+            
+            # Create trigger with inline arguments
+            trigger_name = f"test_{plugin_name}_onwrite_trigger"
+            trigger_success = self.create_trigger(trigger_name, plugin_path, plugin_type, test_args, f"{plugin_name}.py")
+            
+            if not trigger_success:
+                print_error(f"✗ Failed to create trigger {trigger_name}")
+                return False
+            
+            print_status(f"✓ Trigger {trigger_name} created successfully")
+            
+            # Write test data to trigger the onwrite plugin
+            # This will expose the bug if the plugin has issues processing actual data
+            test_data = config.get_test_data()
+            write_success = self.api_client.write_test_data(self.database_name, test_data)
+            
+            if write_success:
+                print_status(f"✓ {plugin_name} ({plugin_type}) trigger test completed successfully")
+                return True
+            else:
+                print_error(f"✗ {plugin_name} ({plugin_type}) trigger test failed - data write failed")
+                return False
+                
+        except Exception as e:
+            print_error(f"Error in trigger test for {plugin_name}: {e}")
             return False
     
     def _test_http_plugin_via_trigger(self, config: PluginConfig, plugin_path: str, plugin_type: str) -> bool:

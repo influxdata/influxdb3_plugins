@@ -79,12 +79,12 @@ class PluginConfig:
         """Get test arguments for a specific plugin type from docstring metadata"""
         # Base arguments for different plugin types
         base_args = {
-            "scheduled": {"dry_run": "true"},
-            "onwrite": {"dry_run": "true"},
-            "http": {"dry_run": "true"}
+            "scheduled": {"dry_run": "false"},
+            "onwrite": {"dry_run": "false"},
+            "http": {"dry_run": "false"}
         }
         
-        args = base_args.get(plugin_type, {"dry_run": "true"}).copy()
+        args = base_args.get(plugin_type, {"dry_run": "false"}).copy()
         
         if use_examples:
             # Get arguments from plugin metadata

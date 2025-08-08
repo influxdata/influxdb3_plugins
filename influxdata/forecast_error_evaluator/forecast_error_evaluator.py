@@ -619,6 +619,7 @@ def process_scheduled_call(
         All exceptions are caught and logged via influxdb3_local.error.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Forecast error check started at {call_time} with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -699,6 +700,7 @@ def process_scheduled_call(
         # Determine time window
         end_time: datetime = call_time.replace(tzinfo=timezone.utc)
         start_time: datetime = end_time - window_td
+        influxdb3_local.info(f"[{task_id}] Querying data from {start_time} to {end_time}")
 
         # Execute forecast query
         forecast_query: str = generate_query(
@@ -751,6 +753,7 @@ def process_scheduled_call(
             df_fore["time"] = pd.to_datetime(df_fore["time"], unit="ns")
             df_act["time"] = pd.to_datetime(df_act["time"], unit="ns")
         else:
+            influxdb3_local.info(f"[{task_id}] Converting timestamps with rounding={rounding_freq}")
             try:
                 df_fore["time"] = pd.to_datetime(df_fore["time"], unit="ns").dt.round(
                     rounding_freq
@@ -778,6 +781,7 @@ def process_scheduled_call(
         if merged.empty:
             influxdb3_local.error(f"[{task_id}] No overlapping timestamps after merge")
             return
+        influxdb3_local.info(f"[{task_id}] Merged dataset has {len(merged)} rows")
 
         # Compute error per row
         if error_metric == "mse":

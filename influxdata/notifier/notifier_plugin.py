@@ -252,6 +252,7 @@ def process_request(
     Process an incoming HTTP request to trigger notifications via configured senders.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting request process")
 
     # Process the request body
     if request_body:
@@ -263,6 +264,13 @@ def process_request(
     else:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"status": "failed", "message": "No request body provided."}
+
+    if "senders_config" not in data or "notification_text" not in data:
+        influxdb3_local.error(f"[{task_id}] Missing required fields in request body.")
+        return {
+            "status": "failed",
+            "message": "Missing required fields: 'senders_config' or 'notification_text'."
+        }
 
     senders_functions: dict = {
         "slack": alert_async,
@@ -287,5 +295,5 @@ def process_request(
             result: str = f"Invalid sender"
 
         results[sender] = result
-
+    influxdb3_local.info(f"[{task_id}] Finished processing all senders.")
     return {"status": "success", "message": "Request processed", "results": results}

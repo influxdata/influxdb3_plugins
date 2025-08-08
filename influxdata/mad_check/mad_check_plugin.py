@@ -660,6 +660,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         All exceptions are caught and logged via influxdb3_local.error.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting writes processing with args: {args}")
 
     # Override args with config file if specified
     if args:

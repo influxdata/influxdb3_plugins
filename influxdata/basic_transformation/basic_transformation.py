@@ -807,6 +807,7 @@ def generate_query(
     Args:
         measurement: source measurement name
         tag_names: list of tags
+        filters: list of filters
         field_names: list of field names
         start_time: UTC datetime for WHERE time > ...
         end_time:   UTC datetime for WHERE time < ...
@@ -885,7 +886,7 @@ def write_data(
     task_id: str,
 ):
     """
-    Writes downsampled data to the target measurement with retry logic.
+    Writes data to the target measurement with retry logic.
 
     Args:
         influxdb3_local: InfluxDB client instance.
@@ -1212,6 +1213,7 @@ def process_scheduled_call(
                 - "filters": string defining field filters.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
 
     # Override args with config file
     if args:
@@ -1268,6 +1270,8 @@ def process_scheduled_call(
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
+        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
+        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1278,6 +1282,7 @@ def process_scheduled_call(
         # Query InfluxDB
         end_time: datetime = call_time.replace(tzinfo=timezone.utc)
         start_time: datetime = end_time - window
+        influxdb3_local.info(f"[{task_id}] Query window: {start_time} to {end_time}")
 
         # recognize fields and tags to query
         field_names: list[str] = get_fields_names(influxdb3_local, measurement, task_id)
@@ -1291,14 +1296,17 @@ def process_scheduled_call(
             ]
         else:
             fields_to_query = field_names
+        influxdb3_local.info(f"[{task_id}] Fields to query: {fields_to_query}")
 
         tag_names: list[str] = get_tag_names(influxdb3_local, measurement, task_id)
+        influxdb3_local.info(f"[{task_id}] Retrieved tag names: {tag_names}")
 
         # generate query
         query: str = generate_query(
             measurement, filters, fields_to_query, tag_names, start_time, end_time
         )
         results: list = influxdb3_local.query(query)
+        influxdb3_local.info(f"[{task_id}] Query executed, {len(results)} records returned")
 
         if not results:
             influxdb3_local.error(
@@ -1499,6 +1507,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         - "filters": string defining field filters.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting writes processing")
 
     # Override args with config file
     if args:
@@ -1557,6 +1566,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
+        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
+        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1576,8 +1587,10 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             ]
         else:
             fields_to_transform = field_names
+        influxdb3_local.info(f"[{task_id}] Fields to transform: {fields_to_transform}")
 
         tag_names: list[str] = get_tag_names(influxdb3_local, measurement, task_id)
+        influxdb3_local.info(f"[{task_id}] Tags: {tag_names}")
 
         for table_batch in table_batches:
             table_name: str = table_batch["table_name"]
@@ -1703,7 +1716,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                     new_key = all_fields.get(key, key)
                     new_point[new_key] = value
                 transformed_results.append(new_point)
-            influxdb3_local.info(f"[{task_id}] Data transformation completed")
+            influxdb3_local.info(f"[{task_id}] Data transformation completed. Total transformed rows: {len(transformed_results)}")
 
             if dry_run:
                 influxdb3_local.info(

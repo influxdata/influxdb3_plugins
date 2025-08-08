@@ -70,8 +70,8 @@
         },
         {
             "name": "field_aggregation_values",
-            "example": "temp:avg@>=30-ERROR$field2:min@'<5.0-INFO'",
-            "description": "Aggregation conditions for threshold checks (e.g., field:aggregation@\\\"operator value-level\\\"). Multiple conditions separated by '$'.",
+            "example": "temp:avg@>=30-ERROR field2:min@<5.0-INFO",
+            "description": "Aggregation conditions for threshold checks (e.g., field:aggregation@operator value-level). Multiple conditions separated by spaces.",
             "required": false
         },
         {
@@ -632,6 +632,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict):
     for a specified number of times.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting writes process with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -679,6 +680,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict):
         trigger_count: int = int(args.get("trigger_count", 1))
         senders_config: dict = parse_senders(influxdb3_local, args, task_id)
         field_conditions: list = parse_field_conditions(influxdb3_local, args, task_id)
+        influxdb3_local.info(f"[{task_id}] Field conditions: {field_conditions}")
+
         port_override: int = parse_port_override(args, task_id)
         notification_path: str = args.get("notification_path", "notify")
         influxdb3_auth_token: str = args.get("influxdb3_auth_token") or os.getenv(
@@ -1160,6 +1163,7 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
             "measurement", "senders", "influxdb3_auth_token", "window", and other alert settings.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
 
     # Override args with config file if specified
     if args:
@@ -1210,6 +1214,8 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
         field_aggregation_values: dict = parse_field_aggregation_values(
             influxdb3_local, args, task_id
         )
+        influxdb3_local.info(f"[{task_id}] Field aggregation conditions: {field_aggregation_values}")
+
         deadman_check: bool = True if args.get("deadman_check") else False
         if not field_aggregation_values and not deadman_check:
             influxdb3_local.error(
@@ -1242,11 +1248,11 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
 
         time_to: datetime = call_time.replace(tzinfo=timezone.utc)
         time_from: datetime = time_to - window
+        influxdb3_local.info(f"[{task_id}] Querying data in '{measurement}' from {time_from} to {time_to}")
 
         query: str = build_query(
             field_aggregation_values, measurement, tags, interval, time_from, time_to
         )
-
         results: list = influxdb3_local.query(query)
         if not results and deadman_check:
             cache_value: str | None = influxdb3_local.cache.get(measurement)
@@ -1283,6 +1289,8 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                 influxdb3_local.cache.put(measurement, str(current_count + 1))
         else:
             influxdb3_local.cache.put(measurement, "0")
+
+        influxdb3_local.info(f"[{task_id}] Query executed, {len(results)} records returned")
 
         for row in results:
             for field, aggregation_values in field_aggregation_values.items():

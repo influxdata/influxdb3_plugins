@@ -995,6 +995,7 @@ def process_scheduled_call(
         All exceptions are caught and logged. No exceptions are propagated upward.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting scheduled forecast process at {call_time} with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -1109,6 +1110,7 @@ def process_scheduled_call(
             raise Exception(
                 f"[{task_id}] Time window for data query is zero — no time range specified for data collection."
             )
+        influxdb3_local.info(f"[{task_id}] Fetching data from {start_time} to {end_time}")
         query: str = generate_query(
             measurement, field, tag_values, start_time, end_time
         )
@@ -1119,6 +1121,7 @@ def process_scheduled_call(
                 f"[{task_id}] No data found from {start_time} to {end_time}"
             )
             return
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
 
         df: pd.DataFrame = pd.DataFrame(results)
         df["ds"] = pd.to_datetime(df["ds"], unit="ns", utc=True)
@@ -1194,6 +1197,7 @@ def process_scheduled_call(
                     f"[{task_id}] Unable to infer frequency, please provide it manually with the 'inferred_freq' argument"
                 )
                 return
+        influxdb3_local.info(f"[{task_id}] Inferred frequency: {inferred_freq}")
 
         try:
             freq_timedelta: timedelta = pd.to_timedelta(
@@ -1255,6 +1259,7 @@ def process_scheduled_call(
             builders: list = transform_to_influx_line(
                 forecast_data, output_measurement, fields_list, tag_values
             )
+            influxdb3_local.info(f"[{task_id}] Writing {len(builders)} lines to InfluxDB")
             # Write forecast data to InfluxDB
             max_retries: int = 3
             success, error, retries = write_downsampled_data(
@@ -1451,10 +1456,12 @@ def process_request(
                      }'
         """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Received forecasting request.")
     run_time: datetime = datetime.now(timezone.utc)
 
     if request_body:
         data: dict = json.loads(request_body)
+        influxdb3_local.info(f"[{task_id}] Request body: {data}")
     else:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"message": f"[{task_id}] Error: No request body provided."}
@@ -1508,6 +1515,8 @@ def process_request(
             data, "start_time", "end_time", task_id
         )
         validation_start_time: datetime = end_time - validation_window
+
+        influxdb3_local.info(f"[{task_id}] Fetching historical data from {start_time} to {validation_start_time}.")
         query: str = generate_query(
             measurement, field, tag_values, start_time, validation_start_time
         )
@@ -1520,6 +1529,7 @@ def process_request(
             return {
                 "message": f"[{task_id}] No data found from {start_time} to {end_time}"
             }
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
 
         df: pd.DataFrame = pd.DataFrame(results)
         df["ds"] = pd.to_datetime(df["ds"], unit="ns", utc=True)
@@ -1597,6 +1607,7 @@ def process_request(
                 return {
                     "message": f"[{task_id}] Unable to infer frequency, please provide it manually with the 'inferred_freq' argument"
                 }
+        influxdb3_local.info(f"[{task_id}] Inferred frequency: {inferred_freq}")
 
         try:
             freq_timedelta: timedelta = pd.to_timedelta(
@@ -1660,6 +1671,7 @@ def process_request(
             builders: list = transform_to_influx_line(
                 forecast_data, output_measurement, fields_list, tag_values
             )
+            influxdb3_local.info(f"[{task_id}] Writing {len(builders)} lines to InfluxDB")
 
             # Write forecast data to InfluxDB
             max_retries: int = 3

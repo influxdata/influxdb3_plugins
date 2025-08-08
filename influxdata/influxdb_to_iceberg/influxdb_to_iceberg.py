@@ -346,6 +346,7 @@ def process_scheduled_call(
       - Each append writes a new file in Iceberg (normal behavior).
     """
     task_id = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
 
     # Override args with config file if specified
     if args:
@@ -395,10 +396,12 @@ def process_scheduled_call(
         namespace: str = args.get("namespace", "default")
         table_name: str = args.get("table_name", measurement)
         full_table_name: str = f"{namespace}.{table_name}"
+        influxdb3_local.info(f"[{task_id}] Target Iceberg table: {full_table_name}")
 
         # Determine time window
         end_time: datetime = call_time.replace(tzinfo=timezone.utc)
         start_time: datetime = end_time - window
+        influxdb3_local.info(f"[{task_id}] Querying data from {start_time} to {end_time}")
 
         # Get data
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
@@ -415,6 +418,7 @@ def process_scheduled_call(
             ]
         else:
             fields_to_query = fields
+        influxdb3_local.info(f"[{task_id}] Fields to query: {fields_to_query}")
 
         query: str = generate_query(
             measurement, tags, fields_to_query, start_time, end_time
@@ -425,6 +429,7 @@ def process_scheduled_call(
                 f"[{task_id}] No data returned from {start_time} to {end_time}"
             )
             return
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
 
         # Convert to DataFrame and convert 'time' to datetime
         df: pd.DataFrame = pd.DataFrame.from_records(results)
@@ -446,6 +451,7 @@ def process_scheduled_call(
         )  # Ensure time is microsecond datetime for Iceberg
 
         # Load catalog
+        influxdb3_local.info(f"[{task_id}] Loading Iceberg catalog")
         try:
             catalog = load_catalog("iceberg", **catalog_configs)
             influxdb3_local.info(f"[{task_id}] Catalog loaded successfully.")
@@ -576,6 +582,7 @@ def process_request(
         dict: Result message with success or error information.
     """
     task_id = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Received request for data replication to Iceberg.")
 
     if request_body:
         data: dict = json.loads(request_body)
@@ -608,11 +615,13 @@ def process_request(
         start_process_time: float = time.time()
 
         catalog_configs: dict = data["catalog_configs"]
+        influxdb3_local.info(f"[{task_id}] Catalog configs received: {catalog_configs}")
         included_fields: list | None = data.get("included_fields", None)
         excluded_fields: list = data.get("excluded_fields", [])
         namespace: str = data.get("namespace", "default")
         table_name: str = data.get("table_name", measurement)
         full_table_name: str = f"{namespace}.{table_name}"
+        influxdb3_local.info(f"[{task_id}] Target Iceberg table: {full_table_name}")
 
         # Get data
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
@@ -629,6 +638,7 @@ def process_request(
             ]
         else:
             fields_to_query = fields
+        influxdb3_local.info(f"[{task_id}] Fields to query: {fields_to_query}")
 
         batch_size: timedelta = parse_time_duration(
             data.get("batch_size", "1d"), task_id
@@ -649,6 +659,7 @@ def process_request(
 
         # Load catalog
         try:
+            influxdb3_local.info(f"[{task_id}] Loading Iceberg catalog...")
             catalog = load_catalog("iceberg", **catalog_configs)
             influxdb3_local.info(f"[{task_id}] Catalog loaded successfully.")
         except Exception as e:

@@ -1065,6 +1065,7 @@ def process_scheduled_call(
         Exception: If no args are provided.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Downsampling task started at {call_time} with args: {args}")
 
     if args is None:
         influxdb3_local.error(f"[{task_id}] No args provided for plugin.")
@@ -1127,6 +1128,7 @@ def process_scheduled_call(
 
         real_now: datetime = call_time_ - offset
         real_then: datetime = real_now - window
+        influxdb3_local.info(f"[{task_id}] Querying data from {real_then} to {real_now}")
 
         query: str = build_downsample_query(
             fields,
@@ -1274,6 +1276,7 @@ def process_request(
         Exception: If no request body is provided.)
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Downsampling task started")
 
     if request_body:
         data: dict = json.loads(request_body)
@@ -1283,7 +1286,6 @@ def process_request(
         return {"message": f"[{task_id}] Error: No request body provided."}
 
     try:
-        influxdb3_local.info(f"[{task_id}] Starting downsampling process.")
         start_time: float = time.time()
 
         source_measurement, target_measurement = parse_source_and_target_measurement(

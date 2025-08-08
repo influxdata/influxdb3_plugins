@@ -613,6 +613,7 @@ def process_scheduled_call(
         All exceptions are caught and logged via influxdb3_local.error.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting anomaly detection scheduled call at {call_time} with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -669,6 +670,8 @@ def process_scheduled_call(
         detector_params: dict = parse_detector_params(
             influxdb3_local, args, detectors, task_id
         )
+        influxdb3_local.info(f"[{task_id}] Retrieved detector_params: {detector_params}")
+
         min_consensus: int = parse_min_consensus(args.get("min_consensus", 1), task_id)
         window: timedelta = parse_time_duration(args["window"], task_id)
         senders_config: dict = parse_senders(influxdb3_local, args, task_id)
@@ -693,6 +696,7 @@ def process_scheduled_call(
         tags_clause: str = ", ".join([f'"{tag}"' for tag in tags])
         end_time: datetime = call_time
         start_time: datetime = end_time - window
+        influxdb3_local.info(f"[{task_id}] Querying {measurement}.{field} from {start_time} to {end_time}")
         query: str = f"""
                 SELECT "{field}", "time", {tags_clause}
                 FROM "{measurement}"
@@ -708,6 +712,7 @@ def process_scheduled_call(
                 f"[{task_id}] No data found for {measurement}.{field} from {start_time} to {end_time}"
             )
             return
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(result)} records from {measurement}")
 
         # Convert to pandas Series
         df: pd.DataFrame = pd.DataFrame(result)

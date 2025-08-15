@@ -29,7 +29,7 @@
         {
             "name": "error_metric",
             "example": "rmse",
-            "description": "The error metric to use (mse, mae, rmse).",
+            "description": "The error metric to use (mse, mae, rmse, mape, smape).",
             "required": true
         },
         {
@@ -668,21 +668,30 @@ def process_scheduled_call(
         forecast_field: str = args["forecast_field"]
         actual_field: str = args["actual_field"]
         error_metric: str = args["error_metric"].lower()
-        if error_metric not in ("mse", "mae", "rmse"):
+        influxdb3_local.info(
+            f"[{task_id}] Configuration parsed - Forecast: {forecast_measurement}.{forecast_field}, Actual: {actual_measurement}.{actual_field}, Metric: {error_metric}"
+        )
+        if error_metric not in ("mse", "mae", "rmse", "mape", "smape"):
             influxdb3_local.error(
-                f"[{task_id}] Unsupported error_metric '{error_metric}'; use mse|mae|rmse"
+                f"[{task_id}] Unsupported error_metric '{error_metric}'; use mse|mae|rmse|mape|smape"
             )
             return
 
         error_thresholds: dict = parse_error_thresholds(influxdb3_local, args, task_id)
         window_td: timedelta = parse_time_duration(args["window"], task_id)
         rounding_freq: str | None = args.get("rounding_freq", None)
+        influxdb3_local.info(
+            f"[{task_id}] Thresholds configured: {error_thresholds}, Window: {window_td}, Rounding: {rounding_freq}"
+        )
 
         # Notification & sender config
         senders_config: dict = parse_senders(influxdb3_local, args, task_id)
         tags: list = get_tag_names(influxdb3_local, actual_measurement, task_id)
         port_override: int = parse_port_override(args, task_id)
         notification_path: str = args.get("notification_path", "notify")
+        influxdb3_local.info(
+            f"[{task_id}] Notification setup - Senders: {list(senders_config.keys())}, Tags: {tags}, Path: {notification_path}"
+        )
         notification_tpl: str = args.get(
             "notification_text",
             "[$level] Forecast error alert in $measurement.$field: $metric=$error. Tags: $tags",
@@ -706,7 +715,9 @@ def process_scheduled_call(
         forecast_query: str = generate_query(
             forecast_measurement, forecast_field, tags, start_time, end_time
         )
+        influxdb3_local.info(f"[{task_id}] Executing forecast query: {forecast_query[:100]}...")
         forecast_results: list = influxdb3_local.query(forecast_query)
+        influxdb3_local.info(f"[{task_id}] Forecast query returned {len(forecast_results)} rows")
         if not forecast_results:
             influxdb3_local.info(
                 f"[{task_id}] No forecast data returned from {start_time} to {end_time}"
@@ -717,7 +728,9 @@ def process_scheduled_call(
         actual_query: str = generate_query(
             actual_measurement, actual_field, tags, start_time, end_time
         )
+        influxdb3_local.info(f"[{task_id}] Executing actual query: {actual_query[:100]}...")
         actual_results: list = influxdb3_local.query(actual_query)
+        influxdb3_local.info(f"[{task_id}] Actual query returned {len(actual_results)} rows")
         if not actual_results:
             influxdb3_local.info(
                 f"[{task_id}] No actual data returned from {start_time} to {end_time}"
@@ -784,15 +797,67 @@ def process_scheduled_call(
         influxdb3_local.info(f"[{task_id}] Merged dataset has {len(merged)} rows")
 
         # Compute error per row
+        influxdb3_local.info(f"[{task_id}] Computing {error_metric.upper()} error metric for {len(merged)} data points")
         if error_metric == "mse":
             merged["error"] = (merged["forecast"] - merged["actual"]) ** 2
         elif error_metric == "mae":
             merged["error"] = (merged["forecast"] - merged["actual"]).abs()
-        else:  # rmse
+        elif error_metric == "rmse":
             merged["error"] = ((merged["forecast"] - merged["actual"]) ** 2) ** 0.5
+        elif error_metric == "mape":
+            # Handle division by zero - skip rows where actual is 0
+            zero_mask = merged["actual"] == 0
+            if zero_mask.any():
+                zero_count = zero_mask.sum()
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping {zero_count} rows with actual=0 for MAPE calculation"
+                )
+                merged = merged[~zero_mask]
+                if merged.empty:
+                    influxdb3_local.error(f"[{task_id}] All actual values are 0, cannot compute MAPE")
+                    return
+            merged["error"] = (merged["forecast"] - merged["actual"]).abs() / merged["actual"].abs() * 100
+        else:  # smape
+            # SMAPE: 200 * |forecast - actual| / (|forecast| + |actual|)
+            # Handle division by zero - skip rows where both forecast and actual are 0
+            denominator = merged["forecast"].abs() + merged["actual"].abs()
+            zero_mask = denominator == 0
+            if zero_mask.any():
+                zero_count = zero_mask.sum()
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping {zero_count} rows with both forecast=0 and actual=0 for SMAPE calculation"
+                )
+                merged = merged[~zero_mask]
+                if merged.empty:
+                    influxdb3_local.error(f"[{task_id}] All forecast and actual values are 0, cannot compute SMAPE")
+                    return
+                denominator = merged["forecast"].abs() + merged["actual"].abs()
+            merged["error"] = 200 * (merged["forecast"] - merged["actual"]).abs() / denominator
+
+        # Log error statistics
+        error_stats = {
+            "mean": merged["error"].mean(),
+            "median": merged["error"].median(),
+            "min": merged["error"].min(),
+            "max": merged["error"].max()
+        }
+        influxdb3_local.info(
+            f"[{task_id}] Error statistics - Mean: {error_stats['mean']:.4f}, Median: {error_stats['median']:.4f}, Min: {error_stats['min']:.4f}, Max: {error_stats['max']:.4f}"
+        )
+        influxdb3_local.info(f"[{task_id}] Evaluating thresholds for metric {error_metric.upper()}: {error_thresholds}")
 
         for threshold_level, error_threshold in error_thresholds.items():
             merged["is_outlier"] = merged["error"] >= error_threshold
+            outlier_count: int = merged[merged["is_outlier"] == True].shape[0]
+            if outlier_count > 0:
+                influxdb3_local.info(
+                    f"[{task_id}] {threshold_level}: {error_metric.upper()} threshold ({error_threshold}) exceeded for {outlier_count}/{len(merged)} data points"
+                )
+            else:
+                influxdb3_local.info(
+                    f"[{task_id}] {threshold_level} threshold ({error_threshold}) - no violations detected"
+                )
+
             merged = merged.sort_values("time")  # Sort by time
             for _, row in merged.iterrows():
                 row_time: datetime = row["time"]
@@ -830,7 +895,7 @@ def process_scheduled_call(
                                 "senders_config": senders_config,
                             }
                             influxdb3_local.error(
-                                f"[{task_id}] Error threshold exceeded ({error_metric}: {row['error']}) in {actual_measurement}.{actual_field} for row {cache_key}"
+                                f"[{task_id}] {threshold_level} alert triggered - {error_metric.upper()}: {row['error']:.4f} (threshold: {error_threshold}) for {cache_key}"
                             )
                             send_notification(
                                 influxdb3_local,

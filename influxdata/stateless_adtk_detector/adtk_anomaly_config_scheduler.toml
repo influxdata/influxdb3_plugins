@@ -15,8 +15,9 @@ measurement = "your_measurement"  # e.g., "cpu", "temperature", "home"
 field = "your_field"  # e.g., "usage", "value", "temp"
 
 # ADTK detectors to use
+# Supported detectors: GeneralizedESDTestAD, InterQuartileRangeAD, ThresholdAD, QuantileAD, LevelShiftAD, VolatilityShiftAD, PersistAD, SeasonalAD
 # Specify a list of detector names (strings)
-detectors = ["your_detector"]  # e.g., ["QuantileAD"], ["ThresholdAD", "QuantileAD"]
+detectors = ["your_detector"]  # e.g., ["QuantileAD"], ["GeneralizedESDTestAD", "InterQuartileRangeAD"]
 
 # Time window for analysis
 # Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)

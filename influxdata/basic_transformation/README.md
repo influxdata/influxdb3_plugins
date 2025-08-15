@@ -110,7 +110,7 @@ influxdb3 create trigger \
   --database mydb \
   --plugin-filename gh:influxdata/basic_transformation/basic_transformation.py \
   --trigger-spec "all_tables" \
-  --trigger-arguments 'measurement=sensor_data,target_measurement=sensor_data_clean,names_transformations=.*:"snake alnum_underscore_only"' \
+  --trigger-arguments 'measurement=sensor_data,target_measurement=sensor_data_clean,names_transformations=.*:"snake remove_special_chars normalize_underscores"' \
   realtime_clean
 ```
 
@@ -161,7 +161,7 @@ influxdb3 create trigger \
   --database sensors \
   --plugin-filename gh:influxdata/basic_transformation/basic_transformation.py \
   --trigger-spec "all_tables" \
-  --trigger-arguments 'measurement=raw_sensors,target_measurement=clean_sensors,names_transformations=.*:"snake alnum_underscore_only collapse_underscore trim_underscore"' \
+  --trigger-arguments 'measurement=raw_sensors,target_measurement=clean_sensors,names_transformations=.*:"remove_special_chars snake collapse_underscore trim_underscore"' \
   field_cleaner
 
 # Write data with inconsistent field names
@@ -296,10 +296,35 @@ Core transformation engine that applies a chain of transformations to a value.
 
 Supported transformations:
 
-- String operations: `lower`, `upper`, `snake`
-- Space handling: `space_to_underscore`, `remove_space`
-- Character filtering: `alnum_underscore_only`
-- Underscore management: `collapse_underscore`, `trim_underscore`
+**Case conversions:**
+- `lower` - Convert to lowercase
+- `upper` - Convert to uppercase
+- `snake` - Convert to snake_case
+- `camel` - Convert to camelCase
+- `pascal` - Convert to PascalCase
+- `kebab` - Convert to kebab-case
+- `title` - Convert to Title Case
+- `capitalize_first` - Capitalize first letter only
+- `capitalize_words` - Capitalize each word
+
+**String cleaning and normalization:**
+- `space_to_underscore` - Replace spaces with underscores
+- `remove_space` - Remove all spaces
+- `alnum_underscore_only` - Keep only alphanumeric and underscore characters
+- `collapse_underscore` - Collapse multiple underscores into one
+- `trim_underscore` - Remove leading/trailing underscores
+- `normalize_whitespace` - Normalize whitespace to single spaces
+- `normalize_dashes` - Normalize dashes and underscores to dashes
+- `normalize_underscores` - Normalize dashes and spaces to underscores
+
+**Character filtering:**
+- `remove_digits` - Remove all digits
+- `remove_punctuation` - Remove punctuation marks
+- `keep_alphanumeric` - Keep only letters and numbers
+- `remove_special_chars` - Remove special characters (keep letters, numbers, spaces, _, -)
+
+**Other operations:**
+- `reverse` - Reverse the string
 - Unit conversions: `convert_<from>_to_<to>`
 - Custom replacements: User-defined string substitutions
 

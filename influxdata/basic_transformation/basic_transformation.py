@@ -22,13 +22,13 @@
         },
         {
             "name": "names_transformations",
-            "example": "room:'lower snake'.temp:'upper'.name:'custom_replacement'",
+            "example": "room:'lower snake'.temp:'upper camel'.name:'custom_replacement kebab'",
             "description": "Rules for transforming field and tag names. Format: 'field1:'transform1 transform2'.pattern_name:'transform3 transform4'.",
             "required": false
         },
         {
             "name": "values_transformations",
-            "example": "temp:'convert_degC_to_degF'.hum:'upper'.something:'lower'",
+            "example": "temp:'convert_degC_to_degF'.hum:'upper normalize_whitespace'.something:'lower remove_digits'",
             "description": "Rules for transforming field values. Format: 'field1:'transform1 transform2'.pattern:'transform3'.",
             "required": false
         },
@@ -96,13 +96,13 @@
         },
         {
             "name": "names_transformations",
-            "example": "room:'lower snake'.temp:'upper'.name:'custom_replacement'",
+            "example": "room:'lower snake'.temp:'upper camel'.name:'custom_replacement kebab'",
             "description": "Rules for transforming field and tag names. Format: 'field1:'transform1 transform2'.pattern_name:'transform3 transform4'.",
             "required": false
         },
         {
             "name": "values_transformations",
-            "example": "temp:'convert_degC_to_degF'.hum:'upper'.something:'lower'",
+            "example": "temp:'convert_degC_to_degF'.hum:'upper normalize_whitespace'.something:'lower remove_digits'",
             "description": "Rules for transforming field values. Format: 'field1:'transform1 transform2'.pattern:'transform3'.",
             "required": false
         },
@@ -215,6 +215,71 @@ def to_snake_case(s: str) -> str:
     return s.lower()
 
 
+def to_camel_case(s: str) -> str:
+    s = re.sub(r"[^\w\s]", " ", s)
+    words = s.split()
+    if not words:
+        return s
+    return words[0].lower() + "".join(word.capitalize() for word in words[1:])
+
+
+def to_pascal_case(s: str) -> str:
+    s = re.sub(r"[^\w\s]", " ", s)
+    words = s.split()
+    return "".join(word.capitalize() for word in words)
+
+
+def to_kebab_case(s: str) -> str:
+    s = re.sub(r"(?<!^)(?=[A-Z])", "-", s)
+    s = re.sub(r"[\s_-]+", "-", s)
+    s = re.sub(r"[^\w-]", "", s)
+    return s.lower()
+
+
+def to_title_case(s: str) -> str:
+    return " ".join(word.capitalize() for word in re.split(r"[\s_-]+", s))
+
+
+def reverse_string(s: str) -> str:
+    return s[::-1]
+
+
+def capitalize_first(s: str) -> str:
+    return s[0].upper() + s[1:] if s else s
+
+
+def capitalize_words(s: str) -> str:
+    return " ".join(word.capitalize() for word in re.split(r"[\s_-]+", s))
+
+
+def normalize_whitespace(s: str) -> str:
+    return re.sub(r"\s+", " ", s.strip())
+
+
+def remove_digits(s: str) -> str:
+    return re.sub(r"\d", "", s)
+
+
+def remove_punctuation(s: str) -> str:
+    return re.sub(r"[^\w\s]", "", s)
+
+
+def keep_alphanumeric(s: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "", s)
+
+
+def remove_special_chars(s: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9\s_-]", "", s)
+
+
+def normalize_dashes(s: str) -> str:
+    return re.sub(r"[\-_]+", "-", s)
+
+
+def normalize_underscores(s: str) -> str:
+    return re.sub(r"[\-_\s]+", "_", s)
+
+
 # Transformation functions
 TRANSFORMATIONS = {
     "lower": to_lowercase,
@@ -225,6 +290,20 @@ TRANSFORMATIONS = {
     "collapse_underscore": collapse_underscores,
     "trim_underscore": trim_underscores,
     "snake": to_snake_case,
+    "camel": to_camel_case,
+    "pascal": to_pascal_case,
+    "kebab": to_kebab_case,
+    "title": to_title_case,
+    "reverse": reverse_string,
+    "capitalize_first": capitalize_first,
+    "capitalize_words": capitalize_words,
+    "normalize_whitespace": normalize_whitespace,
+    "remove_digits": remove_digits,
+    "remove_punctuation": remove_punctuation,
+    "keep_alphanumeric": keep_alphanumeric,
+    "remove_special_chars": remove_special_chars,
+    "normalize_dashes": normalize_dashes,
+    "normalize_underscores": normalize_underscores,
 }
 
 
@@ -682,8 +761,10 @@ def get_fields_names(influxdb3_local, measurement: str, task_id: str) -> list[st
     # check cache first
     fields: list = influxdb3_local.cache.get(f"{measurement}_fields")
     if fields:
+        influxdb3_local.info(f"[{task_id}] Using cached field names for '{measurement}' ({len(fields)} fields)")
         return fields
 
+    influxdb3_local.info(f"[{task_id}] Querying database for field names in '{measurement}'")
     # if not in cache, query the database
     query: str = """
         SELECT column_name
@@ -721,8 +802,10 @@ def get_tag_names(influxdb3_local, measurement: str, task_id: str) -> list[str]:
     # check cache first
     tags: list = influxdb3_local.cache.get(f"{measurement}_tags")
     if tags:
+        influxdb3_local.info(f"[{task_id}] Using cached tag names for '{measurement}' ({len(tags)} tags)")
         return tags
 
+    influxdb3_local.info(f"[{task_id}] Querying database for tag names in '{measurement}'")
     # if not in cache, query the database
     query: str = """
         SELECT column_name
@@ -1279,6 +1362,8 @@ def process_scheduled_call(
         custom_regex: dict = parse_custom_regex(influxdb3_local, args, task_id)
         filters: list = parse_field_filters(influxdb3_local, args, "filters", task_id)
 
+        influxdb3_local.info(f"[{task_id}] Configuration parsed - custom_replacements: {len(custom_replacements)}, custom_regex: {len(custom_regex)}, filters: {len(filters)}")
+
         # Query InfluxDB
         end_time: datetime = call_time.replace(tzinfo=timezone.utc)
         start_time: datetime = end_time - window
@@ -1305,6 +1390,7 @@ def process_scheduled_call(
         query: str = generate_query(
             measurement, filters, fields_to_query, tag_names, start_time, end_time
         )
+        influxdb3_local.info(f"[{task_id}] Executing query for {measurement} with {len(filters)} filters")
         results: list = influxdb3_local.query(query)
         influxdb3_local.info(f"[{task_id}] Query executed, {len(results)} records returned")
 
@@ -1316,6 +1402,8 @@ def process_scheduled_call(
 
         ureg: UnitRegistry = UnitRegistry()
         # Apply transformations
+        influxdb3_local.info(f"[{task_id}] Starting value transformations on {len(results)} records")
+        value_transform_count: int = 0
         for raw in results:
             used_fields: list = []
             for field, transforms in values_transformations.items():
@@ -1332,14 +1420,17 @@ def process_scheduled_call(
                             custom_replacements,
                             task_id,
                         )
+                        value_transform_count += 1
                     raw[field] = value
             for regex_name, transforms in values_transformations.items():
                 if regex_name in custom_regex:
+                    matched_fields: list = []
                     for field_name in raw.keys():
                         if (
                             custom_regex[regex_name].search(field_name)
                             and field_name not in used_fields
                         ):
+                            matched_fields.append(field_name)
                             value = raw[field_name]
                             for transform_name in transforms:
                                 value = apply_value_transformation(
@@ -1351,7 +1442,15 @@ def process_scheduled_call(
                                     custom_replacements,
                                     task_id,
                                 )
+                                value_transform_count += 1
                             raw[field_name] = value
+                    if matched_fields:
+                        influxdb3_local.info(f"[{task_id}] Regex '{regex_name}' matched fields: {matched_fields}")
+
+        if value_transform_count > 0:
+            influxdb3_local.info(f"[{task_id}] Applied {value_transform_count} value transformations")
+        influxdb3_local.info(f"[{task_id}] Starting name transformations")
+        name_transform_count: int = 0
         tags_mapping: dict = {}
         used_tags: list = []
         for tag in tag_names:
@@ -1366,14 +1465,18 @@ def process_scheduled_call(
                         custom_replacements,
                         task_id,
                     )
+                    name_transform_count += 1
             tags_mapping[tag] = new_tag
+
         for regex_name, transforms in names_transformations.items():
             if regex_name in custom_regex:
+                matched_tags: list = []
                 for tag_name in tag_names:
                     if (
                         custom_regex[regex_name].search(tag_name)
                         and tag_name not in used_tags
                     ):
+                        matched_tags.append(tag_name)
                         new_tag: str = tag_name
                         for transform_name in transforms:
                             new_tag = apply_name_transformation(
@@ -1383,7 +1486,10 @@ def process_scheduled_call(
                                 custom_replacements,
                                 task_id,
                             )
+                            name_transform_count += 1
                         tags_mapping[tag_name] = new_tag
+                if matched_tags:
+                    influxdb3_local.info(f"[{task_id}] Regex '{regex_name}' matched tags: {matched_tags}")
 
         fields_mapping: dict = {}
         used_fields: list = []
@@ -1399,14 +1505,18 @@ def process_scheduled_call(
                         custom_replacements,
                         task_id,
                     )
+                    name_transform_count += 1
             fields_mapping[field] = new_field
+
         for regex_name, transforms in names_transformations.items():
             if regex_name in custom_regex:
+                matched_fields: list = []
                 for field_name in fields_to_query:
                     if (
                         custom_regex[regex_name].search(field_name)
                         and field_name not in used_fields
                     ):
+                        matched_fields.append(field_name)
                         new_field: str = field_name
                         for transform_name in transforms:
                             new_field = apply_name_transformation(
@@ -1416,7 +1526,13 @@ def process_scheduled_call(
                                 custom_replacements,
                                 task_id,
                             )
+                            name_transform_count += 1
                         fields_mapping[field_name] = new_field
+                if matched_fields:
+                    influxdb3_local.info(f"[{task_id}] Regex '{regex_name}' matched fields: {matched_fields}")
+
+        if name_transform_count > 0:
+            influxdb3_local.info(f"[{task_id}] Applied {name_transform_count} name transformations")
 
         transformed_results: list = []
         all_fields: dict = tags_mapping | fields_mapping
@@ -1575,6 +1691,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         custom_regex: dict = parse_custom_regex(influxdb3_local, args, task_id)
         filters: list = parse_field_filters(influxdb3_local, args, "filters", task_id)
 
+        influxdb3_local.info(f"[{task_id}] Configuration parsed - custom_replacements: {len(custom_replacements)}, custom_regex: {len(custom_regex)}, filters: {len(filters)}")
+
         # recognize fields and tags to transform and save
         field_names: list[str] = get_fields_names(influxdb3_local, measurement, task_id)
         if included_fields:
@@ -1597,15 +1715,19 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             if table_name != measurement:
                 continue
 
+            influxdb3_local.info(f"[{task_id}] Processing table batch for '{table_name}' with {len(table_batch['rows'])} rows")
             rows: list = apply_filters(
                 filters, fields_to_transform, tag_names, table_batch["rows"]
             )
             if not rows:
                 influxdb3_local.warn(f"[{task_id}] No data to process after filtering")
                 return
+            influxdb3_local.info(f"[{task_id}] {len(rows)} rows remaining after filtering")
 
             ureg: UnitRegistry = UnitRegistry()
             # Apply transformations
+            influxdb3_local.info(f"[{task_id}] Starting value transformations on {len(rows)} records")
+            value_transform_count: int = 0
             for raw in rows:
                 used_fields: list = []
                 for field, transforms in values_transformations.items():
@@ -1622,14 +1744,17 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                 custom_replacements,
                                 task_id,
                             )
+                            value_transform_count += 1
                         raw[field] = value
                 for regex_name, transforms in values_transformations.items():
                     if regex_name in custom_regex:
+                        matched_fields: list = []
                         for field_name in raw.keys():
                             if (
                                 custom_regex[regex_name].search(field_name)
                                 and field_name not in used_fields
                             ):
+                                matched_fields.append(field_name)
                                 value = raw[field_name]
                                 for transform_name in transforms:
                                     value = apply_value_transformation(
@@ -1641,7 +1766,15 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                         custom_replacements,
                                         task_id,
                                     )
+                                    value_transform_count += 1
                                 raw[field_name] = value
+                        if matched_fields:
+                            influxdb3_local.info(f"[{task_id}] Regex '{regex_name}' matched fields: {matched_fields}")
+
+            if value_transform_count > 0:
+                influxdb3_local.info(f"[{task_id}] Applied {value_transform_count} value transformations")
+            influxdb3_local.info(f"[{task_id}] Starting name transformations")
+            name_transform_count: int = 0
             tags_mapping: dict = {}
             used_tags: list = []
             for tag in tag_names:
@@ -1656,14 +1789,18 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                             custom_replacements,
                             task_id,
                         )
+                        name_transform_count += 1
                 tags_mapping[tag] = new_tag
+
             for regex_name, transforms in names_transformations.items():
                 if regex_name in custom_regex:
+                    matched_tags: list = []
                     for tag_name in tag_names:
                         if (
                             custom_regex[regex_name].search(tag_name)
                             and tag_name not in used_tags
                         ):
+                            matched_tags.append(tag_name)
                             new_tag: str = tag_name
                             for transform_name in transforms:
                                 new_tag = apply_name_transformation(
@@ -1673,7 +1810,10 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                     custom_replacements,
                                     task_id,
                                 )
+                                name_transform_count += 1
                             tags_mapping[tag_name] = new_tag
+                    if matched_tags:
+                        influxdb3_local.info(f"[{task_id}] Regex '{regex_name}' matched tags: {matched_tags}")
 
             fields_mapping: dict = {}
             used_fields: list = []
@@ -1689,14 +1829,18 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                             custom_replacements,
                             task_id,
                         )
+                        name_transform_count += 1
                 fields_mapping[field] = new_field
+
             for regex_name, transforms in names_transformations.items():
                 if regex_name in custom_regex:
+                    matched_fields: list = []
                     for field_name in fields_to_transform:
                         if (
                             custom_regex[regex_name].search(field_name)
                             and field_name not in used_fields
                         ):
+                            matched_fields.append(field_name)
                             new_field: str = field_name
                             for transform_name in transforms:
                                 new_field = apply_name_transformation(
@@ -1706,7 +1850,13 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                     custom_replacements,
                                     task_id,
                                 )
+                                name_transform_count += 1
                             fields_mapping[field_name] = new_field
+                    if matched_fields:
+                        influxdb3_local.info(f"[{task_id}] Regex '{regex_name}' matched fields: {matched_fields}")
+
+            if name_transform_count > 0:
+                influxdb3_local.info(f"[{task_id}] Applied {name_transform_count} name transformations")
 
             transformed_results: list = []
             all_fields: dict = tags_mapping | fields_mapping

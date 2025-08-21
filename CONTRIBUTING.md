@@ -489,6 +489,51 @@ raise ValueError(
 )
 ```
 
+## Documentation Sync Process
+
+### Syncing Plugin Documentation to docs-v2
+
+When you update plugin READMEs in this repository, they need to be synchronized to the InfluxDB documentation site (docs-v2) to appear on docs.influxdata.com.
+
+#### Automated Sync Workflow
+
+1. **Make your changes** - Update plugin README files following the template structure
+2. **Commit and push** - Push your changes to the master branch
+3. **Check for reminder** - A workflow will automatically detect README changes and create a commit comment with a sync link
+4. **Click sync link** - The comment includes a pre-filled link to create a sync request in docs-v2
+5. **Submit request** - This automatically triggers validation, transformation, and PR creation
+6. **Review PR** - The resulting PR in docs-v2 includes screenshots and change summaries
+
+#### Manual Sync (Alternative)
+
+You can also manually trigger synchronization:
+
+1. **Navigate to sync form**: [Create sync request](https://github.com/influxdata/docs-v2/issues/new?template=sync-plugin-docs.yml)
+2. **Fill in details** - Specify plugin names and source commit
+3. **Submit** - The automation workflow handles the rest
+
+#### Sync Requirements
+
+Before syncing, ensure your README:
+
+- ✅ Follows the [README_TEMPLATE.md](README_TEMPLATE.md) structure
+- ✅ Includes proper emoji metadata (`⚡` triggers, `🏷️` tags, `🔧` compatibility)
+- ✅ Has all required sections with proper formatting
+- ✅ Contains working examples with expected output
+- ✅ Passes validation (`python validate_readme.py`)
+
+#### What Gets Transformed
+
+During sync, your README content is automatically transformed for docs-v2:
+
+- **Emoji metadata removed** (already in plugin JSON metadata)
+- **Relative links converted** to GitHub URLs
+- **Product references enhanced** with Hugo shortcodes (`{{% product-name %}}`)
+- **Logging section added** with standard content
+- **Support sections updated** with docs-v2 format
+
+Your original README remains unchanged - these transformations only apply to the docs-v2 copy.
+
 ## Commit Message Format
 
 ### Use conventional commits
@@ -508,5 +553,18 @@ raise ValueError(
 - `refactor`: Code refactoring
 - `test`: Test changes
 - `chore`: Maintenance tasks
+
+### Documentation Sync Messages
+
+When making documentation-focused commits, use clear messages that describe what changed:
+
+```bash
+# Good commit messages for docs sync
+docs(basic_transformation): update configuration parameters and examples
+feat(downsampler): add support for custom aggregation functions  
+fix(notifier): correct email configuration example
+
+# These will trigger sync reminders automatically
+```
 
 *These standards are extracted from the [InfluxData Documentation guidelines](https://github.com/influxdata/docs-v2/blob/master/CONTRIBUTING.md).*

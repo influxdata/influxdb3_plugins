@@ -520,7 +520,7 @@ Before syncing, ensure your README:
 - ✅ Includes proper emoji metadata (`⚡` triggers, `🏷️` tags, `🔧` compatibility)
 - ✅ Has all required sections with proper formatting
 - ✅ Contains working examples with expected output
-- ✅ Passes validation (`python validate_readme.py`)
+- ✅ Passes validation (`python scripts/validate_readme.py`)
 
 #### What Gets Transformed
 

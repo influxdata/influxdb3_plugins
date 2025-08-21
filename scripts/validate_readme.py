@@ -6,8 +6,23 @@ Ensures consistency across all plugin documentation.
 
 import sys
 import re
+import argparse
 from pathlib import Path
 from typing import List, Tuple
+
+# Validation thresholds and limits
+MINIMUM_BASH_EXAMPLES = 2
+MINIMUM_EXPECTED_OUTPUT_SECTIONS = 1
+MINIMUM_TROUBLESHOOTING_ISSUES = 2
+SUMMARY_SEPARATOR_LENGTH = 60
+
+# Section search offsets
+SECTION_SEARCH_OFFSET = 1
+SECTION_NOT_FOUND = -1
+
+# Exit codes
+EXIT_SUCCESS = 0
+EXIT_ERROR = 1
 
 # Required sections in order
 REQUIRED_SECTIONS = [
@@ -86,11 +101,11 @@ def validate_parameter_tables(content: str) -> List[str]:
     # Check for required parameters section
     if '### Required parameters' in content:
         section_start = content.index('### Required parameters')
-        section_end = content.find('\n###', section_start + 1)
-        if section_end == -1:
-            section_end = content.find('\n##', section_start + 1)
+        section_end = content.find('\n###', section_start + SECTION_SEARCH_OFFSET)
+        if section_end == SECTION_NOT_FOUND:
+            section_end = content.find('\n##', section_start + SECTION_SEARCH_OFFSET)
         
-        section_content = content[section_start:section_end] if section_end != -1 else content[section_start:]
+        section_content = content[section_start:section_end] if section_end != SECTION_NOT_FOUND else content[section_start:]
         
         if 'required' not in section_content.lower():
             errors.append("Required parameters section should indicate which parameters are required")
@@ -103,8 +118,8 @@ def validate_examples(content: str) -> List[str]:
     
     # Check for bash code examples
     bash_examples = re.findall(r'```bash(.*?)```', content, re.DOTALL)
-    if len(bash_examples) < 2:
-        errors.append(f"Should have at least 2 bash code examples (found {len(bash_examples)})")
+    if len(bash_examples) < MINIMUM_BASH_EXAMPLES:
+        errors.append(f"Should have at least {MINIMUM_BASH_EXAMPLES} bash code examples (found {len(bash_examples)})")
     
     # Check for influxdb3 commands in examples
     has_create_trigger = any('influxdb3 create trigger' in ex for ex in bash_examples)
@@ -120,8 +135,8 @@ def validate_examples(content: str) -> List[str]:
     
     # Check for expected output
     expected_output_count = content.count('### Expected output') + content.count('**Expected output')
-    if expected_output_count < 1:
-        errors.append("Should include at least one 'Expected output' section in examples")
+    if expected_output_count < MINIMUM_EXPECTED_OUTPUT_SECTIONS:
+        errors.append(f"Should include at least {MINIMUM_EXPECTED_OUTPUT_SECTIONS} 'Expected output' section in examples")
     
     return errors
 
@@ -153,8 +168,8 @@ def validate_troubleshooting(content: str) -> List[str]:
     
     if '## Troubleshooting' in content:
         section_start = content.index('## Troubleshooting')
-        section_end = content.find('\n##', section_start + 1)
-        section_content = content[section_start:section_end] if section_end != -1 else content[section_start:]
+        section_end = content.find('\n##', section_start + SECTION_SEARCH_OFFSET)
+        section_content = content[section_start:section_end] if section_end != SECTION_NOT_FOUND else content[section_start:]
         
         # Check for common subsections
         if '### Common issues' not in section_content:
@@ -164,8 +179,8 @@ def validate_troubleshooting(content: str) -> List[str]:
         issue_count = section_content.count('#### Issue:') + section_content.count('**Issue:')
         solution_count = section_content.count('**Solution:') + section_content.count('Solution:')
         
-        if issue_count < 2:
-            errors.append("Troubleshooting should include at least 2 documented issues")
+        if issue_count < MINIMUM_TROUBLESHOOTING_ISSUES:
+            errors.append(f"Troubleshooting should include at least {MINIMUM_TROUBLESHOOTING_ISSUES} documented issues")
         if issue_count > solution_count:
             errors.append("Each troubleshooting issue should have a corresponding solution")
     
@@ -177,8 +192,8 @@ def validate_code_overview(content: str) -> List[str]:
     
     if '## Code overview' in content:
         section_start = content.index('## Code overview')
-        section_end = content.find('\n##', section_start + 1)
-        section_content = content[section_start:section_end] if section_end != -1 else content[section_start:]
+        section_end = content.find('\n##', section_start + SECTION_SEARCH_OFFSET)
+        section_content = content[section_start:section_end] if section_end != SECTION_NOT_FOUND else content[section_start:]
         
         # Check for required subsections
         if '### Files' not in section_content:
@@ -249,22 +264,123 @@ def validate_readme(readme_path: Path) -> Tuple[List[str], List[str]]:
     
     return errors, warnings
 
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='Validates plugin README files against the standard template.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python scripts/validate_readme.py                    # Validate all plugins
+  python scripts/validate_readme.py --plugins basic_transformation,downsampler
+  python scripts/validate_readme.py --list            # List available plugins
+  python scripts/validate_readme.py --quiet           # Show only errors
+
+Validation Rules:
+  - Checks for required sections in correct order
+  - Validates emoji metadata format
+  - Ensures parameter tables are properly formatted
+  - Verifies code examples include required commands
+  - Validates troubleshooting content structure
+        '''
+    )
+    
+    parser.add_argument(
+        '--plugins',
+        type=str,
+        help='Comma-separated list of specific plugins to validate (e.g., "basic_transformation,downsampler")'
+    )
+    
+    parser.add_argument(
+        '--list',
+        action='store_true',
+        help='List all available plugins and exit'
+    )
+    
+    parser.add_argument(
+        '--quiet',
+        action='store_true',
+        help='Show only errors, suppress warnings and success messages'
+    )
+    
+    parser.add_argument(
+        '--errors-only',
+        action='store_true',
+        help='Exit with success code even if warnings are found (only fail on errors)'
+    )
+    
+    return parser.parse_args()
+
+def list_available_plugins():
+    """List all available plugins and exit."""
+    influxdata_dir = Path('influxdata')
+    
+    if not influxdata_dir.exists():
+        print("❌ Error: 'influxdata' directory not found. Run this script from the influxdb3_plugins root directory.")
+        sys.exit(EXIT_ERROR)
+    
+    readme_files = list(influxdata_dir.glob('*/README.md'))
+    
+    if not readme_files:
+        print("❌ No plugins found in influxdata/ subdirectories")
+        sys.exit(EXIT_ERROR)
+    
+    print(f"Available plugins ({len(readme_files)} found):")
+    for readme_path in sorted(readme_files):
+        plugin_name = readme_path.parent.name
+        print(f"  - {plugin_name}")
+    
+    sys.exit(EXIT_SUCCESS)
+
+def filter_plugins_by_name(readme_files: List[Path], plugin_names: str) -> List[Path]:
+    """Filter README files by specified plugin names."""
+    requested_plugins = [name.strip() for name in plugin_names.split(',')]
+    filtered_files = []
+    
+    for readme_path in readme_files:
+        plugin_name = readme_path.parent.name
+        if plugin_name in requested_plugins:
+            filtered_files.append(readme_path)
+            requested_plugins.remove(plugin_name)
+    
+    # Report any plugins that weren't found
+    if requested_plugins:
+        print(f"⚠️  Warning: The following plugins were not found: {', '.join(requested_plugins)}")
+        available_plugins = [f.parent.name for f in readme_files]
+        print(f"Available plugins: {', '.join(sorted(available_plugins))}")
+    
+    return filtered_files
+
 def main():
     """Main validation function."""
+    args = parse_arguments()
+    
+    # Handle list option
+    if args.list:
+        list_available_plugins()
+    
     # Find all plugin READMEs
     influxdata_dir = Path('influxdata')
     
     if not influxdata_dir.exists():
         print("❌ Error: 'influxdata' directory not found. Run this script from the influxdb3_plugins root directory.")
-        sys.exit(1)
+        sys.exit(EXIT_ERROR)
     
     readme_files = list(influxdata_dir.glob('*/README.md'))
     
     if not readme_files:
         print("❌ No README files found in influxdata/ subdirectories")
-        sys.exit(1)
+        sys.exit(EXIT_ERROR)
     
-    print(f"Validating {len(readme_files)} plugin README files...\n")
+    # Filter by specific plugins if requested
+    if args.plugins:
+        readme_files = filter_plugins_by_name(readme_files, args.plugins)
+        if not readme_files:
+            print("❌ No matching plugins found")
+            sys.exit(EXIT_ERROR)
+    
+    if not args.quiet:
+        print(f"Validating {len(readme_files)} plugin README files...\n")
     
     all_valid = True
     error_count = 0
@@ -278,24 +394,47 @@ def main():
             error_count += len(errors)
         warning_count += len(warnings)
         
-        print(format_validation_result(readme_path, errors, warnings))
+        result = format_validation_result(readme_path, errors, warnings)
+        
+        # Apply quiet mode filtering
+        if args.quiet:
+            # Only show files with errors in quiet mode
+            if errors:
+                print(result)
+        else:
+            print(result)
     
     # Print summary
-    print("\n" + "=" * 60)
-    print("VALIDATION SUMMARY")
-    print("=" * 60)
-    print(f"Total files validated: {len(readme_files)}")
-    print(f"Errors found: {error_count}")
-    print(f"Warnings found: {warning_count}")
+    if not args.quiet:
+        print("\n" + "=" * SUMMARY_SEPARATOR_LENGTH)
+        print("VALIDATION SUMMARY")
+        print("=" * SUMMARY_SEPARATOR_LENGTH)
+        print(f"Total files validated: {len(readme_files)}")
+        print(f"Errors found: {error_count}")
+        print(f"Warnings found: {warning_count}")
     
-    if all_valid:
-        print("\n✅ All README files are valid!")
-        sys.exit(0)
+    # Determine exit status
+    has_errors = error_count > 0
+    has_warnings = warning_count > 0
+    
+    if not has_errors and not has_warnings:
+        if not args.quiet:
+            print("\n✅ All README files are valid!")
+        sys.exit(EXIT_SUCCESS)
+    elif not has_errors and has_warnings:
+        if not args.quiet:
+            print(f"\n⚠️  Validation completed with {warning_count} warning(s) but no errors")
+        # If --errors-only is specified, exit successfully even with warnings
+        exit_code = EXIT_SUCCESS if args.errors_only else EXIT_ERROR
+        sys.exit(exit_code)
     else:
-        print(f"\n❌ Validation failed with {error_count} error(s)")
-        print("\nPlease fix the errors above and ensure all READMEs follow the template.")
-        print("See README_TEMPLATE.md for the correct structure.")
-        sys.exit(1)
+        if not args.quiet:
+            print(f"\n❌ Validation failed with {error_count} error(s)")
+            if has_warnings:
+                print(f"Also found {warning_count} warning(s)")
+            print("\nPlease fix the errors above and ensure all READMEs follow the template.")
+            print("See README_TEMPLATE.md for the correct structure.")
+        sys.exit(EXIT_ERROR)
 
 if __name__ == "__main__":
     main()

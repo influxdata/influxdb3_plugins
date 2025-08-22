@@ -31,12 +31,12 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Threshold check parameters
 
-| Parameter                  | Type    | Default | Description                                                                                                                                  |
-|----------------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------------------------------|
-| `field_aggregation_values` | string  | none    | Multi-level aggregation conditions with aggregation support for avg, min, max, count, sum, derivative, and median values                 |
-| `deadman_check`            | boolean | false   | Enable deadman detection to monitor for data absence and missing data streams                                                             |
-| `interval`                 | string  | "5min"  | Configurable aggregation time interval for batch processing with performance optimization                                                  |
-| `trigger_count`            | number  | 1       | Configurable triggers requiring multiple consecutive failures before alerting                                                             |
+| Parameter                  | Type    | Default | Description                                                                                                                                                       |
+|----------------------------|---------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `field_aggregation_values` | string  | none    | Multi-level aggregation conditions with aggregation support for avg, min, max, count, sum, median, stddev, first_value, last_value, var, and approx_median values |
+| `deadman_check`            | boolean | false   | Enable deadman detection to monitor for data absence and missing data streams                                                                                     |
+| `interval`                 | string  | "5min"  | Configurable aggregation time interval for batch processing with performance optimization                                                                         |
+| `trigger_count`            | number  | 1       | Configurable triggers requiring multiple consecutive failures before alerting                                                                                     |
 
 ### Notification parameters
 
@@ -235,8 +235,12 @@ influxdb3 create trigger \
 - `max`: Maximum value
 - `count`: Count of records
 - `sum`: Sum of values
-- `derivative`: Rate of change
 - `median`: Median value
+- `stddev`: Standard deviation
+- `first_value`: First value in time interval
+- `last_value`: Last value in time interval
+- `var`: Variance of values
+- `approx_median`: Approximate median (faster than exact median)
 
 ### Message template variables
 

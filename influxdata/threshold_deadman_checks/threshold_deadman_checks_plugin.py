@@ -70,8 +70,8 @@
         },
         {
             "name": "field_aggregation_values",
-            "example": "temp:avg@>=30-ERROR field2:min@<5.0-INFO",
-            "description": "Aggregation conditions for threshold checks (e.g., field:aggregation@operator value-level). Multiple conditions separated by spaces.",
+            "example": "temp:avg@>=30-ERROR field2:min@<5.0-INFO cpu:stddev@>10-WARN",
+            "description": "Aggregation conditions for threshold checks (e.g., field:aggregation@operator value-level). Supported aggregations: avg, count, sum, min, max, median, stddev, first_value, last_value, var, approx_median. Multiple conditions separated by spaces.",
             "required": false
         },
         {
@@ -460,7 +460,7 @@ def parse_field_conditions(influxdb3_local, args: dict, task_id: str) -> list:
             ["count", operator.le, 100, WARN]
         ]
     """
-    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR")
+    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR", "CRITICAL")
     cond_input: str | list = args.get("field_conditions")
     conditions: list = []
 
@@ -1002,11 +1002,15 @@ def parse_field_aggregation_values(
         "sum",
         "min",
         "max",
-        "derivative",
         "median",
+        "stddev",
+        "first_value",
+        "last_value",
+        "var",
+        "approx_median",
     )
     allowed_operators: tuple = (">", "<", ">=", "<=", "==", "!=")
-    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR")
+    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR", "CRITICAL")
     raw_input: str | None = args.get("field_aggregation_values")
     if raw_input is None:
         return {}
@@ -1338,7 +1342,7 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                             }
 
                             influxdb3_local.error(
-                                f"[{task_id}] Condition on {measurement}: {field} {op_sym} {compare_value!r} matched {trigger_count} times in row {cache_key} ({actual!r}), sending alert"
+                                f"[{task_id}] Condition on {measurement}: {aggregation}({field}) {op_sym} {compare_value!r} matched {trigger_count} times in row {cache_key} ({actual!r}), sending alert"
                             )
                             send_notification(
                                 influxdb3_local,
@@ -1351,7 +1355,7 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                             influxdb3_local.cache.put(cache_key, "0")
                         else:
                             influxdb3_local.warn(
-                                f"[{task_id}] Condition for row {cache_key} ({field} {op_sym} {compare_value!r}) matched ({actual!r}) for the {current_count + 1}/{trigger_count} time. Skipping alert."
+                                f"[{task_id}] Condition for row {cache_key} ({aggregation}({field}) {op_sym} {compare_value!r}) matched ({actual!r}) for the {current_count + 1}/{trigger_count} time. Skipping alert."
                             )
                             influxdb3_local.cache.put(cache_key, str(current_count + 1))
                     else:

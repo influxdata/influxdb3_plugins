@@ -37,20 +37,23 @@ def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
     """
 
     # Extract required parameters
-    account_sid: str | None = os.getenv("TWILIO_SID", params.get("twilio_sid"))
-    auth_token: str | None = os.getenv("TWILIO_TOKEN", params.get("twilio_token"))
+    account_sid: str | None = params.get("twilio_sid") or os.getenv("TWILIO_SID")
+    auth_token: str | None = params.get("twilio_token") or os.getenv("TWILIO_TOKEN")
     if not account_sid or not auth_token:
-        influxdb3_local.error(f"[{task_id}] Missing Twilio credentials")
+        influxdb3_local.error(f"[{task_id}] SMS notification failed - Missing Twilio credentials (sid_provided={bool(params.get('twilio_sid'))}, token_provided={bool(params.get('twilio_token'))}, env_sid_set={bool(os.getenv('TWILIO_SID'))}, env_token_set={bool(os.getenv('TWILIO_TOKEN'))})")
         return False
 
     from_number: str | None = params.get("twilio_from_number", None)
     to_number: str | None = params.get("twilio_to_number", None)
     if not from_number or not to_number:
-        influxdb3_local.error(f"[{task_id}] Missing Twilio phone numbers")
+        influxdb3_local.error(f"[{task_id}] SMS notification failed - Missing phone numbers (from_provided={bool(from_number)}, to_provided={bool(to_number)})")
         return False
 
     notification_text: str = params["notification_text"]
+    message_length: int = len(notification_text)
     max_retries: int = 3
+
+    influxdb3_local.info(f"[{task_id}] Starting SMS notification (from={from_number}, to={to_number[:5]}***{to_number[-3:] if len(to_number) > 8 else '***'}, message_length={message_length})")
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -58,7 +61,7 @@ def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
             message = client.messages.create(
                 to=to_number, from_=from_number, body=notification_text
             )
-            influxdb3_local.info(f"[{task_id}] SMS sent! SID: {message.sid}")
+            influxdb3_local.info(f"[{task_id}] SMS notification success (sid={message.sid}, attempt={attempt})")
             return True
         except TwilioRestException as e:
             influxdb3_local.warn(f"[{task_id}] Twilio error (attempt {attempt}): {e}")
@@ -71,9 +74,7 @@ def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
             wait: float = random.uniform(1, 4)
             time.sleep(wait)
 
-    influxdb3_local.error(
-        f"[{task_id}] Failed to send SMS message after {max_retries} attempts."
-    )
+    influxdb3_local.error(f"[{task_id}] SMS notification failed permanently (max_attempts={max_retries}, from={from_number}, to={to_number[:5]}***{to_number[-3:] if len(to_number) > 8 else '***'})")
     return False
 
 
@@ -96,20 +97,23 @@ def send_whatsapp_via_twilio(influxdb3_local, params: dict, task_id: str) -> boo
     """
 
     # Extract required parameters
-    account_sid: str | None = os.getenv("TWILIO_SID", params.get("twilio_sid"))
-    auth_token: str | None = os.getenv("TWILIO_TOKEN", params.get("twilio_token"))
+    account_sid: str | None = params.get("twilio_sid") or os.getenv("TWILIO_SID")
+    auth_token: str | None = params.get("twilio_token") or os.getenv("TWILIO_TOKEN")
     if not account_sid or not auth_token:
-        influxdb3_local.error(f"[{task_id}] Missing Twilio credentials")
+        influxdb3_local.error(f"[{task_id}] WhatsApp notification failed - Missing Twilio credentials (sid_provided={bool(params.get('twilio_sid'))}, token_provided={bool(params.get('twilio_token'))}, env_sid_set={bool(os.getenv('TWILIO_SID'))}, env_token_set={bool(os.getenv('TWILIO_TOKEN'))})")
         return False
 
     from_number: str | None = params.get("twilio_from_number", None)
     to_number: str | None = params.get("twilio_to_number", None)
     if not from_number or not to_number:
-        influxdb3_local.error(f"[{task_id}] Missing Twilio phone numbers")
+        influxdb3_local.error(f"[{task_id}] WhatsApp notification failed - Missing phone numbers (from_provided={bool(from_number)}, to_provided={bool(to_number)})")
         return False
 
     body: str = params["notification_text"]
+    message_length: int = len(body)
     max_retries: int = 3
+
+    influxdb3_local.info(f"[{task_id}] Starting WhatsApp notification (from=whatsapp:{from_number}, to=whatsapp:{to_number[:5]}***{to_number[-3:] if len(to_number) > 8 else '***'}, message_length={message_length})")
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -117,9 +121,7 @@ def send_whatsapp_via_twilio(influxdb3_local, params: dict, task_id: str) -> boo
             message = client.messages.create(
                 to=f"whatsapp:{to_number}", from_=f"whatsapp:{from_number}", body=body
             )
-            influxdb3_local.info(
-                f"[{task_id}] WhatsApp message sent! SID: {message.sid}"
-            )
+            influxdb3_local.info(f"[{task_id}] WhatsApp notification success (sid={message.sid}, attempt={attempt})")
             return True
         except TwilioRestException as e:
             influxdb3_local.warn(f"[{task_id}] Twilio error (attempt {attempt}): {e}")
@@ -132,9 +134,7 @@ def send_whatsapp_via_twilio(influxdb3_local, params: dict, task_id: str) -> boo
             wait: float = random.uniform(1, 4)
             time.sleep(wait)
 
-    influxdb3_local.error(
-        f"[{task_id}] Failed to send WhatsApp message after {max_retries} attempts."
-    )
+    influxdb3_local.error(f"[{task_id}] WhatsApp notification failed permanently (max_attempts={max_retries}, from=whatsapp:{from_number}, to=whatsapp:{to_number[:5]}***{to_number[-3:] if len(to_number) > 8 else '***'})")
     return False
 
 
@@ -234,6 +234,7 @@ def parse_headers(influxdb3_local, args: dict, key: str, task_id: str) -> dict:
         headers_b64: str = args.get(f"{key}_headers", "")
         if not headers_b64:
             return {}
+
         padding = len(headers_b64) % 4
         if padding:
             headers_b64 += "=" * (4 - padding)
@@ -266,7 +267,7 @@ def process_request(
         return {"status": "failed", "message": "No request body provided."}
 
     if "senders_config" not in data or "notification_text" not in data:
-        influxdb3_local.error(f"[{task_id}] Missing required fields in request body.")
+        influxdb3_local.error(f"[{task_id}] Missing required fields in request body: 'senders_config' or 'notification_text'.")
         return {
             "status": "failed",
             "message": "Missing required fields: 'senders_config' or 'notification_text'."

@@ -42,7 +42,7 @@ window = "your_window"  # e.g., "30min", "24h"
 
 # Aggregation functions per field
 # Either a single function (string, e.g., "avg") or a list of [field, function] pairs
-# Supported functions depend on the plugin; common examples: "avg", "min", "max", "sum"
+# Supported functions: "avg", "sum", "min", "max", "median", "count", "stddev", "first_value", "last_value", "var", "approx_median"
 #calculations = "avg"  # Single function applied to all fields
 #calculations = [["field1", "function1"], ["field2", "function2"]]  # e.g., [["temp", "avg"], ["hum", "max"]]
 

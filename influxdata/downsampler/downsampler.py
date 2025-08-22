@@ -35,7 +35,7 @@
         {
             "name": "calculations",
             "example": "avg",
-            "description": "Aggregation functions (e.g., 'avg' or 'field1:avg.field2:sum'). Valid functions: avg, sum, min, max, derivative, median.",
+            "description": "Aggregation functions (e.g., 'avg' or 'field1:avg.field2:sum'). Valid functions: avg, sum, min, max, median, count, stddev, first_value, last_value, var, approx_median.",
             "required": false
         },
         {
@@ -380,7 +380,7 @@ def parse_field_aggregations_for_scheduler(
     Raises:
         Exception: If no aggregatable fields are found, or if the aggregation format or type is invalid.
     """
-    available_calculations: list = ["avg", "sum", "min", "max", "derivative", "median"]
+    available_calculations: list = ["avg", "sum", "min", "max", "median", "count", "stddev", "first_value", "last_value", "var", "approx_median"]
     pattern: str = r"^([^:.]+:[^:.]+)(\.[^:.]+:[^:.]+)*$"
     measurement: str = args["source_measurement"]
     aggregatable_fields: list = get_aggregatable_fields(
@@ -493,7 +493,7 @@ def parse_field_aggregations_for_http(
         aggregatable_fields,
         task_id,
     )
-    available_calculations: list = ["avg", "sum", "min", "max", "derivative", "median"]
+    available_calculations: list = ["avg", "sum", "min", "max", "median", "count", "stddev", "first_value", "last_value", "var", "approx_median"]
 
     if specific_fields:
         fields_to_use: list = []

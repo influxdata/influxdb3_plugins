@@ -369,7 +369,7 @@ def generate_query(
 
     return f"""
         SELECT time AS ds, "{field}" AS y
-        FROM {measurement}
+        FROM '{measurement}'
         WHERE time >= '{start_time.isoformat()}'
           AND time < '{end_time.isoformat()}'
           {tag_filter_clause}

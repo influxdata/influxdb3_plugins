@@ -827,9 +827,9 @@ def generate_group_by_string(tags_list: list):
     Returns:
         str: SQL GROUP BY clause string including '_time' and tags.
     """
-    group_by_clause: str = f"_time"
+    group_by_clause: str = "_time"
     for tag in tags_list:
-        group_by_clause += f", {tag}"
+        group_by_clause += f', "{tag}"'
     return group_by_clause
 
 

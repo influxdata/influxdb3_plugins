@@ -16,13 +16,13 @@ target_measurement = "your_target_measurement"  # e.g., "transformed_temperature
 # Specify the target database name; if omitted, the source database is used
 #target_database = "your_target_database"  # e.g., "transformed_db", "processed_data"
 
-# Include only these fields
-# List fields to include in the transformation; leave empty to include all fields
-#included_fields = ["field1", "field2"]  # e.g., ["temp", "hum"]
+# Include only these fields and tags
+# List fields and tags to include in the transformation; leave empty to include all fields and tags
+#included_fields = ["field1", "field2", "tag1"]  # e.g., ["temp", "hum", "location"]
 
-# Exclude these fields
-# List fields to exclude from the transformation; leave commented or empty to include all fields
-#excluded_fields = ["field1", "field2"]  # e.g., ["co", "hum2"]
+# Exclude these fields and tags
+# List fields and tags to exclude from the transformation; leave commented or empty to include all fields and tags
+#excluded_fields = ["field1", "field2", "tag1"]  # e.g., ["co", "hum2", "device_id"]
 
 # Dry run mode: if true, logs transformed data without writing to the database
 # Set to "true" for testing or "false" to write data

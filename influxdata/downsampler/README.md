@@ -31,7 +31,7 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `interval`        | string | "10min"    | Time interval for downsampling. Format: `<number><unit>` (e.g., "10min", "2h", "1d") |
 | `calculations`    | string | "avg"      | Aggregation functions. Single function or dot-separated field:aggregation pairs      |
 | `specific_fields` | string | all fields | Dot-separated list of fields to downsample (e.g., "co.temperature")                  |
-| `excluded_fields` | string | none       | Dot-separated list of fields to exclude from downsampling                            |
+| `excluded_fields` | string | none       | Dot-separated list of fields and tags to exclude from downsampling results           |
 
 ### Filtering parameters
 

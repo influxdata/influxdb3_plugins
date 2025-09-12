@@ -28,9 +28,9 @@ window = "your_window"  # e.g., "30min", "24h"
 # List of strings representing field names to include; leave empty to downsample all fields
 #specific_fields = ["field1", "field2"]  # e.g., ["temp", "hum"]
 
-# Fields to exclude from downsampling
-# List of strings representing field names to exclude; leave commented or empty to include all fields
-#excluded_fields = ["field3", "field4"]  # e.g., ["co", "hum2"]
+# Fields and tags to exclude from downsampling results
+# List of strings representing field and tag names to exclude; leave commented or empty to include all fields and tags
+#excluded_fields = ["field3", "field4", "tag1"]  # e.g., ["co", "hum2", "location"]
 
 # Maximum number of retries for write operations
 # Integer value ≥ 0; default is typically 5

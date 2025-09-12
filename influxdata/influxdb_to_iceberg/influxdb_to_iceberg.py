@@ -23,13 +23,13 @@
         {
             "name": "included_fields",
             "example": "usage_user.usage_idle",
-            "description": "Dot-separated list of field names to include in the query (optional).",
+            "description": "Dot-separated list of field and tag names to include in the query (optional).",
             "required": false
         },
         {
             "name": "excluded_fields",
             "example": "usage_system",
-            "description": "Dot-separated list of field names to exclude from the query (optional).",
+            "description": "Dot-separated list of field and tag names to exclude from the query (optional).",
             "required": false
         },
         {
@@ -331,8 +331,8 @@ def process_scheduled_call(
             - "measurement": str, InfluxDB measurement name (required).
             - "window": str, time window (e.g., "5m", "1h") (required).
             - "catalog_configs": str, base64-encoded JSON for load_catalog (required).
-            - "included_fields": str, dot-separated field names to include (optional).
-            - "excluded_fields": str, dot-separated field names to exclude (optional).
+            - "included_fields": str, dot-separated field and tag names to include (optional).
+            - "excluded_fields": str, dot-separated field and tag names to exclude (optional).
             - "namespace": str, Iceberg namespace (optional; default "default").
             - "table_name": str, Iceberg table name (optional; default = measurement).
             - "config_file_path": str, path to config file to override args (optional).
@@ -407,6 +407,12 @@ def process_scheduled_call(
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
         fields: list = get_fields_names(influxdb3_local, measurement, task_id)
 
+        # Filter tags using included_fields/excluded_fields parameters
+        if included_fields:
+            tags = [tag for tag in tags if tag in included_fields]
+        elif excluded_fields:
+            tags = [tag for tag in tags if tag not in excluded_fields]
+
         # Recognize fields to query
         if included_fields:
             fields_to_query: list = [
@@ -419,6 +425,7 @@ def process_scheduled_call(
         else:
             fields_to_query = fields
         influxdb3_local.info(f"[{task_id}] Fields to query: {fields_to_query}")
+        influxdb3_local.info(f"[{task_id}] Tags to include: {tags}")
 
         query: str = generate_query(
             measurement, tags, fields_to_query, start_time, end_time
@@ -568,8 +575,8 @@ def process_request(
                                                  #       "s3.secret-access-key": "...",
                                                  #       "supportedAPIVersion": "2"
                                                  #   }
-                "included_fields": list[str],     # Optional. List of field names to include in replication.
-                "excluded_fields": list[str],     # Optional. List of field names to exclude from replication.
+                "included_fields": list[str],     # Optional. List of field and tag names to include in replication.
+                "excluded_fields": list[str],     # Optional. List of field and tag names to exclude from replication.
                 "namespace": str,                 # Optional. Target namespace for the Iceberg catalog (default: "default").
                 "table_name": str,                # Optional. Target table name in the Iceberg catalog (default: measurement name).
                 "batch_size": str,                # Optional. Batch size duration for processing, e.g. "1d", "12h" (default: "1d").
@@ -627,6 +634,12 @@ def process_request(
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
         fields: list = get_fields_names(influxdb3_local, measurement, task_id)
 
+        # Filter tags using included_fields/excluded_fields parameters
+        if included_fields:
+            tags = [tag for tag in tags if tag in included_fields]
+        elif excluded_fields:
+            tags = [tag for tag in tags if tag not in excluded_fields]
+
         # Recognize fields to query
         if included_fields:
             fields_to_query: list = [
@@ -639,6 +652,7 @@ def process_request(
         else:
             fields_to_query = fields
         influxdb3_local.info(f"[{task_id}] Fields to query: {fields_to_query}")
+        influxdb3_local.info(f"[{task_id}] Tags to include: {tags}")
 
         batch_size: timedelta = parse_time_duration(
             data.get("batch_size", "1d"), task_id

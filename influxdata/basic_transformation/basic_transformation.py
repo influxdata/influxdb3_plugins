@@ -40,14 +40,14 @@
         },
         {
             "name": "included_fields",
-            "example": "temp.hum.something",
-            "description": "Dot-separated list of field names to include in the query.",
+            "example": "temp.hum.location",
+            "description": "Dot-separated list of field and tag names to include in the query.",
             "required": false
         },
         {
             "name": "excluded_fields",
-            "example": "co.h-u_m2",
-            "description": "Dot-separated list of field names to exclude from the query.",
+            "example": "co.h-u_m2.device_id",
+            "description": "Dot-separated list of field and tag names to exclude from the query.",
             "required": false
         },
         {
@@ -114,14 +114,14 @@
         },
         {
             "name": "included_fields",
-            "example": "temp.hum.something",
-            "description": "Dot-separated list of field names to include in the query.",
+            "example": "temp.hum.location",
+            "description": "Dot-separated list of field and tag names to include in the query.",
             "required": false
         },
         {
             "name": "excluded_fields",
-            "example": "co.h-u_m2",
-            "description": "Dot-separated list of field names to exclude from the query.",
+            "example": "co.h-u_m2.device_id",
+            "description": "Dot-separated list of field and tag names to exclude from the query.",
             "required": false
         },
         {
@@ -742,7 +742,7 @@ def build_regex_pattern(
         return compiled
     except re.error as e:
         influxdb3_local.warn(
-            f"[{task_id}] Failed to compile regex for part '{part}': {e}, skipping"
+            f"[{task_id}] Failed to compile regex: {e}, skipping"
         )
 
 
@@ -1288,8 +1288,8 @@ def process_scheduled_call(
             Optional keys:
                 - "config_file_path": path to config file to override args (str) .
                 - "target_database": target database/bucket name (str).
-                - "included_fields": dot-separated field names to include.
-                - "excluded_fields": dot-separated field names to exclude.
+                - "included_fields": dot-separated field and tag names to include.
+                - "excluded_fields": dot-separated field and tag names to exclude.
                 - "dry_run": "true"/"false"; if true, only logs transformed results without writing.
                 - "custom_replacements": string defining custom replacements per field.
                 - "custom_regex": string defining regex-based patterns for transformations.
@@ -1371,24 +1371,33 @@ def process_scheduled_call(
 
         # recognize fields and tags to query
         field_names: list[str] = get_fields_names(influxdb3_local, measurement, task_id)
+        tag_names: list[str] = get_tag_names(influxdb3_local, measurement, task_id)
+
+        # Filter fields based on included_fields/excluded_fields parameters
         if included_fields:
             fields_to_query: list = [
                 field for field in field_names if field in included_fields
+            ]
+            tags_to_query: list = [
+                tag for tag in tag_names if tag in included_fields
             ]
         elif excluded_fields:
             fields_to_query = [
                 field for field in field_names if field not in excluded_fields
             ]
+            tags_to_query = [
+                tag for tag in tag_names if tag not in excluded_fields
+            ]
         else:
             fields_to_query = field_names
-        influxdb3_local.info(f"[{task_id}] Fields to query: {fields_to_query}")
+            tags_to_query = tag_names
 
-        tag_names: list[str] = get_tag_names(influxdb3_local, measurement, task_id)
-        influxdb3_local.info(f"[{task_id}] Retrieved tag names: {tag_names}")
+        influxdb3_local.info(f"[{task_id}] Fields to query: {fields_to_query}")
+        influxdb3_local.info(f"[{task_id}] Tags to query: {tags_to_query}")
 
         # generate query
         query: str = generate_query(
-            measurement, filters, fields_to_query, tag_names, start_time, end_time
+            measurement, filters, fields_to_query, tags_to_query, start_time, end_time
         )
         influxdb3_local.info(f"[{task_id}] Executing query for {measurement} with {len(filters)} filters")
         results: list = influxdb3_local.query(query)
@@ -1453,7 +1462,7 @@ def process_scheduled_call(
         name_transform_count: int = 0
         tags_mapping: dict = {}
         used_tags: list = []
-        for tag in tag_names:
+        for tag in tags_to_query:
             new_tag: str = tag
             if tag in names_transformations:
                 used_tags.append(tag)
@@ -1471,7 +1480,7 @@ def process_scheduled_call(
         for regex_name, transforms in names_transformations.items():
             if regex_name in custom_regex:
                 matched_tags: list = []
-                for tag_name in tag_names:
+                for tag_name in tags_to_query:
                     if (
                         custom_regex[regex_name].search(tag_name)
                         and tag_name not in used_tags
@@ -1615,8 +1624,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
     Optional keys:
         - "config_file_path": path to config file to override args (str) .
         - "target_database": target database/bucket name (str).
-        - "included_fields": dot-separated field names to include.
-        - "excluded_fields": dot-separated field names to exclude.
+        - "included_fields": dot-separated field and tag names to include.
+        - "excluded_fields": dot-separated field and tag names to exclude.
         - "dry_run": "true"/"false"; if true, only logs transformed results without writing.
         - "custom_replacements": string defining custom replacements per field.
         - "custom_regex": string defining regex-based patterns for transformations.
@@ -1695,20 +1704,29 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
         # recognize fields and tags to transform and save
         field_names: list[str] = get_fields_names(influxdb3_local, measurement, task_id)
+        tag_names: list[str] = get_tag_names(influxdb3_local, measurement, task_id)
+
+        # Filter fields and tags based on included_fields/excluded_fields parameters
         if included_fields:
             fields_to_transform: list = [
                 field for field in field_names if field in included_fields
+            ]
+            tags_to_transform: list = [
+                tag for tag in tag_names if tag in included_fields
             ]
         elif excluded_fields:
             fields_to_transform = [
                 field for field in field_names if field not in excluded_fields
             ]
+            tags_to_transform = [
+                tag for tag in tag_names if tag not in excluded_fields
+            ]
         else:
             fields_to_transform = field_names
-        influxdb3_local.info(f"[{task_id}] Fields to transform: {fields_to_transform}")
+            tags_to_transform = tag_names
 
-        tag_names: list[str] = get_tag_names(influxdb3_local, measurement, task_id)
-        influxdb3_local.info(f"[{task_id}] Tags: {tag_names}")
+        influxdb3_local.info(f"[{task_id}] Fields to transform: {fields_to_transform}")
+        influxdb3_local.info(f"[{task_id}] Tags to transform: {tags_to_transform}")
 
         for table_batch in table_batches:
             table_name: str = table_batch["table_name"]
@@ -1717,7 +1735,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
             influxdb3_local.info(f"[{task_id}] Processing table batch for '{table_name}' with {len(table_batch['rows'])} rows")
             rows: list = apply_filters(
-                filters, fields_to_transform, tag_names, table_batch["rows"]
+                filters, fields_to_transform, tags_to_transform, table_batch["rows"]
             )
             if not rows:
                 influxdb3_local.warn(f"[{task_id}] No data to process after filtering")
@@ -1777,7 +1795,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             name_transform_count: int = 0
             tags_mapping: dict = {}
             used_tags: list = []
-            for tag in tag_names:
+            for tag in tags_to_transform:
                 new_tag: str = tag
                 if tag in names_transformations:
                     used_tags.append(tag)
@@ -1795,7 +1813,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             for regex_name, transforms in names_transformations.items():
                 if regex_name in custom_regex:
                     matched_tags: list = []
-                    for tag_name in tag_names:
+                    for tag_name in tags_to_transform:
                         if (
                             custom_regex[regex_name].search(tag_name)
                             and tag_name not in used_tags

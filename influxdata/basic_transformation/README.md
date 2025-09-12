@@ -39,8 +39,8 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | Parameter         | Type   | Default                   | Description                                                          |
 |-------------------|--------|---------------------------|----------------------------------------------------------------------|
 | `window`          | string | required (scheduled only) | Historical data window. Format: `<number><unit>` (e.g., "30d", "1h") |
-| `included_fields` | string | all fields                | Dot-separated list of fields to include (e.g., "temp.humidity")      |
-| `excluded_fields` | string | none                      | Dot-separated list of fields to exclude                              |
+| `included_fields` | string | all fields and tags       | Dot-separated list of fields and tags to include (e.g., "temp.humidity.location") |
+| `excluded_fields` | string | none                      | Dot-separated list of fields and tags to exclude                             |
 | `filters`         | string | none                      | Query filters. Format: `'field:"operator value"'`                    |
 
 ### TOML configuration

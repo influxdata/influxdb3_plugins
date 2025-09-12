@@ -30,8 +30,8 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 | Parameter         | Type   | Default          | Description                                                             |
 |-------------------|--------|------------------|-------------------------------------------------------------------------|
-| `included_fields` | string | all fields       | Dot-separated list of fields to include (e.g., "usage_user.usage_idle") |
-| `excluded_fields` | string | none             | Dot-separated list of fields to exclude                                 |
+| `included_fields` | string | all fields/tags  | Dot-separated list of fields and tags to include (e.g., "usage_user.host") |
+| `excluded_fields` | string | none             | Dot-separated list of fields and tags to exclude                        |
 | `namespace`       | string | "default"        | Iceberg namespace for the target table                                  |
 | `table_name`      | string | measurement name | Iceberg table name                                                      |
 
@@ -57,8 +57,8 @@ For more information on using TOML configuration files, see the Using TOML Confi
 |-------------------|--------|----------|-------------------------------------------------------------------------------------------------------------------------------|
 | `measurement`     | string | Yes      | Source measurement containing data to transfer                                                                                |
 | `catalog_configs` | object | Yes      | Iceberg catalog configuration dictionary. See [PyIceberg catalog documentation](https://py.iceberg.apache.org/configuration/) |
-| `included_fields` | array  | No       | List of field names to include in replication                                                                                 |
-| `excluded_fields` | array  | No       | List of field names to exclude from replication                                                                               |
+| `included_fields` | array  | No       | List of field and tag names to include in replication                                                                         |
+| `excluded_fields` | array  | No       | List of field and tag names to exclude from replication                                                                       |
 | `namespace`       | string | No       | Target Iceberg namespace (default: "default")                                                                                 |
 | `table_name`      | string | No       | Target Iceberg table name (default: measurement name)                                                                         |
 | `batch_size`      | string | No       | Batch size duration for processing (default: "1d"). Format: `<number><unit>`                                                  |
@@ -205,7 +205,7 @@ curl -X POST http://localhost:8181/api/v3/engine/replicate \
       "type": "sql",
       "uri": "sqlite:///path/to/catalog.db"
     },
-    "included_fields": ["temp_celsius", "humidity"],
+    "included_fields": ["temp_celsius", "humidity", "sensor_id"],
     "namespace": "weather",
     "table_name": "temperature_history",
     "batch_size": "12h",
@@ -370,7 +370,7 @@ base64 config.json
 
 - **File sizing**: Each scheduled run creates new Parquet files. Use appropriate window sizes to balance file count and size
 - **Batch processing**: For HTTP transfers, adjust `batch_size` based on available memory
-- **Field filtering**: Use `included_fields` to reduce data volume when only specific fields are needed
+- **Field and tag filtering**: Use `included_fields` to reduce data volume when only specific fields and tags are needed
 - **Catalog choice**: SQL catalogs (SQLite) are simpler but REST catalogs scale better
 
 ## Questions/Comments

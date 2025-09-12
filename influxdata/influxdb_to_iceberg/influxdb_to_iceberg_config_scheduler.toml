@@ -12,13 +12,13 @@ measurement = "your_measurement"  # e.g., "cpu", "temperature", "home"
 window = "your_window"  # e.g., "30m", "24h"
 
 ########## Optional Parameters ##########
-# Include only these fields from the query
-# List of strings representing field names to include; leave empty to include all fields
-#included_fields = ["field1", "field2"]  # e.g., ["temp", "hum"]
+# Include only these fields and tags from the query
+# List of strings representing field and tag names to include; leave empty to include all fields and tags
+#included_fields = ["field1", "field2", "tag1"]  # e.g., ["temp", "hum", "sensor_id"]
 
-# Exclude these fields from the query
-# List of strings representing field names to exclude; leave commented or empty to include all fields
-#excluded_fields = ["field3", "field4"]  # e.g., ["temp", "hum"]
+# Exclude these fields and tags from the query
+# List of strings representing field and tag names to exclude; leave commented or empty to include all fields and tags
+#excluded_fields = ["field3", "field4", "tag2"]  # e.g., ["temp", "hum", "location"]
 
 # Iceberg namespace for the target table
 # Specify the namespace (string); defaults to "default" if omitted

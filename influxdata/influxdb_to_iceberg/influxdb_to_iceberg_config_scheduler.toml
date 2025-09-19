@@ -28,6 +28,11 @@ window = "your_window"  # e.g., "30m", "24h"
 # Specify the target table name (string); defaults to the measurement name if omitted
 #table_name = "your_table_name"  # e.g., "cpu_metrics", "temperature_data"
 
+# Automatically update Iceberg table schema when data doesn't match existing schema
+# Boolean: true or false (defaults to false if omitted)
+# When true, new columns from data are added to Iceberg schema, missing columns are filled with nulls
+#auto_update_schema = false  # e.g., true to enable automatic schema updates
+
 # Iceberg catalog configuration (Required)
 # Dictionary of key-value pairs for configuring the Iceberg catalog
 # See https://py.iceberg.apache.org/configuration/ for supported options

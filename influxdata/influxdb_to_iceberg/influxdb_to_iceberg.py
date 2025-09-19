@@ -49,6 +49,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "auto_update_schema",
+            "example": "true",
+            "description": "Automatically update Iceberg table schema when data doesn't match existing schema (default: false).",
+            "required": false
         }
     ]
 }
@@ -318,6 +324,88 @@ def df_to_iceberg_schema(df: pd.DataFrame) -> Schema:
     return Schema(*fields)
 
 
+def update_schema_and_dataframe(table: Table, df: pd.DataFrame, influxdb3_local, task_id: str) -> tuple[bool, pd.DataFrame]:
+    """
+    Updates Iceberg table schema and DataFrame to ensure compatibility.
+
+    Args:
+        table: Iceberg table instance
+        df: DataFrame with new data (will be modified in-place)
+        influxdb3_local: InfluxDB client instance for logging
+        task_id: Task ID for logging
+
+    Returns:
+        tuple: (schema_was_updated: bool, updated_dataframe: pd.DataFrame)
+    """
+    current_schema = table.schema()
+    current_columns = {field.name for field in current_schema.fields}
+    df_columns = set(df.columns)
+
+    new_columns = df_columns - current_columns
+    missing_columns = current_columns - df_columns
+
+    # If no schema changes needed
+    if not new_columns and not missing_columns:
+        return False, df
+
+    schema_updated = False
+    df_modified = df.copy()
+
+    # Add missing columns to DataFrame with null values
+    if missing_columns:
+        influxdb3_local.info(f"[{task_id}] DataFrame missing columns from schema: {missing_columns}. Adding with null values.")
+
+        for col_name in missing_columns:
+            # Find the field type from current schema
+            field_type = None
+            for field in current_schema.fields:
+                if field.name == col_name:
+                    field_type = field.field_type
+                    break
+
+            # Add column with appropriate null values based on type
+            if isinstance(field_type, IntegerType):
+                df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='Int64')
+            elif isinstance(field_type, FloatType):
+                df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='float64')
+            elif isinstance(field_type, BooleanType):
+                df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='boolean')
+            elif isinstance(field_type, TimestampType):
+                df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='datetime64[us]')
+            else:  # StringType or other
+                df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='string')
+
+            influxdb3_local.info(f"[{task_id}] Added missing column '{col_name}' with null values")
+
+    # Add new columns to schema
+    if new_columns:
+        influxdb3_local.info(f"[{task_id}] Found new columns: {new_columns}. Updating schema.")
+
+        # Create update transaction
+        with table.update_schema() as update:
+            for col_name in new_columns:
+                iceberg_type = pandas_dtype_to_iceberg_type(df_modified[col_name].dtype)
+                # New columns must always be optional (required=False) when adding to existing table
+                # because existing records won't have this field
+                required = False
+
+                update.add_column(
+                    col_name,
+                    iceberg_type,
+                    required=required
+                )
+                influxdb3_local.info(f"[{task_id}] Added column '{col_name}' with type {iceberg_type} (optional)")
+
+        schema_updated = True
+
+    if schema_updated:
+        influxdb3_local.info(f"[{task_id}] Schema updated successfully")
+    elif missing_columns:
+        influxdb3_local.info(f"[{task_id}] DataFrame adjusted to match existing schema")
+
+    return schema_updated, df_modified
+
+
 def process_scheduled_call(
     influxdb3_local, call_time: datetime, args: dict | None = None
 ):
@@ -336,13 +424,14 @@ def process_scheduled_call(
             - "namespace": str, Iceberg namespace (optional; default "default").
             - "table_name": str, Iceberg table name (optional; default = measurement).
             - "config_file_path": str, path to config file to override args (optional).
+            - "auto_update_schema": str, automatically update schema when data doesn't match (optional; default False).
 
     Returns:
         None. All outcomes and errors are logged via influxdb3_local.
 
     Notes:
       - If the Iceberg table does not exist, it is created with a schema inferred from the DataFrame.
-      - If the table exists but schema differs, append may fail; handling schema evolution is not implemented here.
+      - If auto_update_schema=True and schema differs, the table schema is automatically updated.
       - Each append writes a new file in Iceberg (normal behavior).
     """
     task_id = str(uuid.uuid4())
@@ -395,8 +484,10 @@ def process_scheduled_call(
         excluded_fields: list = parse_fields(args, "excluded_fields", task_id)
         namespace: str = args.get("namespace", "default")
         table_name: str = args.get("table_name", measurement)
+        auto_update_schema: bool = str(args.get("auto_update_schema", False)).lower() == "true"
         full_table_name: str = f"{namespace}.{table_name}"
         influxdb3_local.info(f"[{task_id}] Target Iceberg table: {full_table_name}")
+        influxdb3_local.info(f"[{task_id}] Auto update schema: {auto_update_schema}")
 
         # Determine time window
         end_time: datetime = call_time.replace(tzinfo=timezone.utc)
@@ -476,6 +567,15 @@ def process_scheduled_call(
             influxdb3_local.info(f"[{task_id}] Table created successfully.")
 
         table: Table = catalog.load_table(full_table_name)
+
+        # Handle schema differences proactively if auto_update_schema is enabled
+        if auto_update_schema:
+            schema_changed, df = update_schema_and_dataframe(table, df, influxdb3_local, task_id)
+            if schema_changed:
+                # Reload table to get updated schema
+                table = catalog.load_table(full_table_name)
+                influxdb3_local.info(f"[{task_id}] Schema updated proactively")
+
         pa_schema: pa.Schema = table.schema().as_arrow()
         result_arrows: pa.Table = pa.Table.from_pandas(df, schema=pa_schema)
         table.append(result_arrows)
@@ -581,7 +681,8 @@ def process_request(
                 "table_name": str,                # Optional. Target table name in the Iceberg catalog (default: measurement name).
                 "batch_size": str,                # Optional. Batch size duration for processing, e.g. "1d", "12h" (default: "1d").
                 "backfill_start": str,            # Optional. ISO 8601 datetime string with timezone for start of backfill window.
-                "backfill_end": str               # Optional. ISO 8601 datetime string with timezone for end of backfill window.
+                "backfill_end": str,              # Optional. ISO 8601 datetime string with timezone for end of backfill window.
+                "auto_update_schema": str         # Optional. Automatically update schema when data doesn't match (default: false).
             }
         args: Optional additional arguments.
 
@@ -627,8 +728,10 @@ def process_request(
         excluded_fields: list = data.get("excluded_fields", [])
         namespace: str = data.get("namespace", "default")
         table_name: str = data.get("table_name", measurement)
+        auto_update_schema: bool = str(data.get("auto_update_schema", False)).lower() == "true"
         full_table_name: str = f"{namespace}.{table_name}"
         influxdb3_local.info(f"[{task_id}] Target Iceberg table: {full_table_name}")
+        influxdb3_local.info(f"[{task_id}] Auto update schema: {auto_update_schema}")
 
         # Get data
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
@@ -762,6 +865,15 @@ def process_request(
                     table = catalog.load_table(full_table_name)
                     pa_schema = table.schema().as_arrow()
                     is_first_valid_batch = False
+
+                # Handle schema differences proactively if auto_update_schema is enabled
+                if auto_update_schema:
+                    schema_changed, batch_df = update_schema_and_dataframe(table, batch_df, influxdb3_local, task_id)
+                    if schema_changed:
+                        # Reload table to get updated schema
+                        table = catalog.load_table(full_table_name)
+                        pa_schema = table.schema().as_arrow()
+                        influxdb3_local.info(f"[{task_id}] Schema updated proactively on batch {batch_count}")
 
                 result_arrows: pa.Table = pa.Table.from_pandas(
                     batch_df, schema=pa_schema

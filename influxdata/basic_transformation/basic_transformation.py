@@ -167,6 +167,7 @@ import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import math
 
 from pint import UnitRegistry
 
@@ -280,6 +281,66 @@ def normalize_underscores(s: str) -> str:
     return re.sub(r"[\-_\s]+", "_", s)
 
 
+def absolute_value(value: int | float) -> float:
+    return abs(value)
+
+
+def round_to_decimal(value: int | float) -> float:
+    return round(value, 2)
+
+
+def square_root(value: int | float) -> float:
+    return math.sqrt(value)
+
+
+def logarithm(value: int | float) -> float:
+    return math.log(value)
+
+
+def boolean_to_int(s) -> int:
+    if s in ('true', 'yes', '1', 'on', True):
+        return 1
+    elif s in ('false', 'no', '0', 'off', False):
+        return 0
+    return s
+
+
+def clamp_min_zero(value: int | float) -> float | int:
+    return max(0, value)
+
+
+def clamp_max_hundred(value: int | float) -> float | int:
+    return min(100, value)
+
+
+def extract_numbers_only(s: str) -> str:
+    return re.sub(r"[^\d]", "", s)
+
+
+def extract_letters_only(s: str) -> str:
+    return re.sub(r"[^a-zA-Z]", "", s)
+
+
+def to_percentage(value: int | float) -> float | int:
+    """Multiplies by 100 (to convert to percentage)"""
+    return value * 100
+
+
+def from_percentage(value: int | float) -> float | int:
+    """Divides by 100 (converts from percentage to decimal)"""
+    return value / 100
+
+
+def floor_value(value: int | float) -> int:
+    """Rounds down to the nearest integer"""
+    return math.floor(value)
+
+
+def ceil_value(value: int | float) -> int:
+    """Rounds up to the nearest integer"""
+    return math.ceil(value)
+
+
 # Transformation functions
 TRANSFORMATIONS = {
     "lower": to_lowercase,
@@ -304,6 +365,19 @@ TRANSFORMATIONS = {
     "remove_special_chars": remove_special_chars,
     "normalize_dashes": normalize_dashes,
     "normalize_underscores": normalize_underscores,
+    "abs": absolute_value,
+    "round2": round_to_decimal,
+    "sqrt": square_root,
+    "ln": logarithm,
+    "boolean_to_int": boolean_to_int,
+    "clamp_min_zero": clamp_min_zero,
+    "clamp_max_hundred": clamp_max_hundred,
+    "extract_numbers_only": extract_numbers_only,
+    "extract_letters_only": extract_letters_only,
+    "to_percentage": to_percentage,
+    "from_percentage": from_percentage,
+    "floor": floor_value,
+    "ceil": ceil_value,
 }
 
 

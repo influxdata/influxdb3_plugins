@@ -323,6 +323,25 @@ Supported transformations:
 - `keep_alphanumeric` - Keep only letters and numbers
 - `remove_special_chars` - Remove special characters (keep letters, numbers, spaces, _, -)
 
+**String extraction and filtering:**
+- `extract_numbers_only` - Extract only numeric characters
+- `extract_letters_only` - Extract only alphabetic characters
+
+**Mathematical operations (for numeric values):**
+- `abs` - Absolute value
+- `round2` - Round to 2 decimal places
+- `sqrt` - Square root
+- `ln` - Natural logarithm
+- `floor` - Round down to nearest integer
+- `ceil` - Round up to nearest integer
+
+**Value conversion and clamping:**
+- `to_percentage` - Multiply by 100 (convert to percentage)
+- `from_percentage` - Divide by 100 (convert from percentage)
+- `clamp_min_zero` - Limit minimum value to zero
+- `clamp_max_hundred` - Limit maximum value to 100
+- `boolean_to_int` - Convert boolean values to 1/0
+
 **Other operations:**
 - `reverse` - Reverse the string
 - Unit conversions: `convert_<from>_to_<to>`

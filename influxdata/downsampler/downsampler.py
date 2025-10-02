@@ -877,7 +877,14 @@ def generate_fields_string(
 
     for field in fields_aggregate_list:
         query += ",\n"
-        query += f'\t{field[1]}("{field[0]}") as "{field[0]}_{field[1]}"'
+        aggregation = field[1]
+        field_name = field[0]
+
+        # Add ORDER BY time for first_value and last_value to ensure correct temporal ordering
+        if aggregation in ('first_value', 'last_value'):
+            query += f'\t{aggregation}("{field_name}" ORDER BY time) as "{field_name}_{aggregation}"'
+        else:
+            query += f'\t{aggregation}("{field_name}") as "{field_name}_{aggregation}"'
 
     for tag in tags_list:
         query += f',\n\t"{tag}"'

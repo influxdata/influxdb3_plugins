@@ -575,7 +575,7 @@ def generate_query(
     select_clause = f'time, "{field}"'
     if tags:
         # Add tags to the SELECT clause, ensuring proper escaping
-        select_clause += ", " + ", ".join([f"{tag}" for tag in tags])
+        select_clause += ", " + ", ".join([f'"{tag}"' for tag in tags])
 
     return f"SELECT {select_clause} FROM '{measurement}' WHERE time >= '{start_time.isoformat()}' AND time < '{end_time.isoformat()}' ORDER BY time"
 

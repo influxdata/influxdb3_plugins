@@ -2,7 +2,7 @@ name: Remind to Sync Documentation
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths: 
       - 'influxdata/**/README.md'
 

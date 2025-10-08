@@ -17,7 +17,7 @@ MINIMUM_TROUBLESHOOTING_ISSUES = 2
 SUMMARY_SEPARATOR_LENGTH = 60
 
 # Section search offsets
-SECTION_SEARCH_OFFSET = 1
+SECTION_SEARCH_OFFSET = 100
 SECTION_NOT_FOUND = -1
 
 # Exit codes
@@ -95,7 +95,7 @@ def validate_parameter_tables(content: str) -> List[str]:
     errors = []
     
     # Check for parameter table headers
-    if '| Parameter | Type | Default | Description |' not in content:
+    if not re.search(r'\|\s*Parameter\s*\|\s*Type\s*\|\s*Default\s*\|\s*Description\s*\|', content):
         errors.append("No properly formatted parameter tables found (should have Parameter | Type | Default | Description columns)")
     
     # Check for required parameters section

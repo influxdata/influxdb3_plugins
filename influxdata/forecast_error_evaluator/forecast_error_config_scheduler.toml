@@ -20,8 +20,9 @@ forecast_field = "your_forecast_field"  # e.g., "predicted_temp", "forecast_valu
 actual_field = "your_actual_field"  # e.g., "temp", "actual_value"
 
 # Error metric to compute
-# Specify one of: "mse" (mean squared error), "mae" (mean absolute error), "rmse" (root mean squared error)
-error_metric = "your_error_metric"  # e.g., "mse", "mae", "rmse"
+# Specify one of: "mse" (mean squared error), "mae" (mean absolute error), "rmse" (root mean squared error),
+# "mape" (mean absolute percentage error), "smape" (symmetric mean absolute percentage error)
+error_metric = "your_error_metric"  # e.g., "mse", "mae", "rmse", "mape", "smape"
 
 # Time window for analysis
 # Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)

@@ -351,7 +351,7 @@ def send_notification(
             resp = requests.post(url, headers=headers, data=data, timeout=timeout)
             resp.raise_for_status()  # raises on 4xx/5xx
             influxdb3_local.info(
-                f"[{task_id}] Alert sent successfully to notification plugin with results: {resp.json()['results']}"
+                f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
             break
         except requests.RequestException as e:
@@ -544,8 +544,6 @@ def parse_mad_thresholds(influxdb3_local, args: dict, task_id: str) -> list[tupl
                 influxdb3_local.warn(
                     f"[{task_id}] Invalid threshold definition: {threshold}, skipping"
                 )
-        if not results:
-            raise Exception(f"[{task_id}] No valid MAD threshold in '{raw_input}'")
         return results
 
     segments: list = [seg.strip() for seg in raw_input.split("@") if seg.strip()]
@@ -662,6 +660,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         All exceptions are caught and logged via influxdb3_local.error.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting writes processing with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -786,6 +785,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
                     is_outlier: bool = (current_val < lower) or (current_val > upper)
 
+                    influxdb3_local.info(
+                        f"[{task_id}] MAD calculation for {field_name}: median={med:.3f}, mad={mad:.3f}, "
+                        f"thresholds=({lower:.3f}, {upper:.3f}), current={current_val:.3f}, outlier={is_outlier}, tags: {tag_str}"
+                    )
+
                     # Flip-detection deque (size = state_change_window)
                     can_send: bool = check_state_changes(
                         window_deque, state_change_count
@@ -803,6 +807,9 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                         if is_outlier:
                             count_so_far += 1
                             influxdb3_local.cache.put(count_key, str(count_so_far))
+                            influxdb3_local.info(
+                                f"[{task_id}] Count-based outlier {count_so_far}/{threshold_param} for {field_name}, tags: {tag_str}"
+                            )
                             if count_so_far >= threshold_param:
                                 influxdb3_local.error(
                                     f"[{task_id}] MAD count threshold reached for {measurement}.{field_name} (k={k}), tags: {tag_str}, sending alert."
@@ -839,6 +846,9 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                     f"[{task_id}] MAD count threshold reached for {measurement}.{field_name} (k={k}) for the {count_so_far}/{threshold_param} time. tags: {tag_str}"
                                 )
                         else:
+                            influxdb3_local.info(
+                                f"[{task_id}] Count-based outlier cleared for {field_name}, tags: {tag_str}"
+                            )
                             influxdb3_local.cache.put(count_key, "0")
 
                     # Duration-based mode
@@ -860,7 +870,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                             if not start_dt:
                                 influxdb3_local.cache.put(time_key, now.isoformat())
                                 influxdb3_local.warn(
-                                    f"[{task_id}] MAD outlier start for {field_name} at {now.isoformat()} (k={k}), tags: {tag_str}"
+                                    f"[{task_id}] Duration-based outlier started for {field_name} at {now.isoformat()} (k={k}), tags: {tag_str}"
                                 )
                             else:
                                 elapsed = now - start_dt

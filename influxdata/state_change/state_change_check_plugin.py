@@ -461,7 +461,7 @@ def send_notification(
             resp = requests.post(url, headers=headers, data=data, timeout=timeout)
             resp.raise_for_status()  # raises on 4xx/5xx
             influxdb3_local.info(
-                f"[{task_id}] Alert sent successfully to notification plugin with results: {resp.json()['results']}"
+                f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
             break
         except requests.RequestException as e:
@@ -811,6 +811,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         Exception: Captures and logs any unexpected error (with `influxdb3_local.error`).
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting writes process with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -857,6 +858,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
     try:
         field_thresholds: list = parse_field_thresholds(influxdb3_local, args, task_id)
+        influxdb3_local.info(f"[{task_id}] Field thresholds: {field_thresholds}")
+
         senders_config: dict = parse_senders(influxdb3_local, args, task_id)
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
         port_override: int = parse_port_override(args, task_id)
@@ -1223,6 +1226,7 @@ def process_scheduled_call(
         No exceptions are raised directly; all errors are caught and logged.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting scheduled field change check at {call_time} with args: {args}.")
 
     # Override args with config file if specified
     if args:
@@ -1271,6 +1275,8 @@ def process_scheduled_call(
     try:
         # Extract and validate parameters
         field_counts: dict = parse_field_change_count(influxdb3_local, args, task_id)
+        influxdb3_local.info(f"[{task_id}] Field change counts: {field_counts}")
+
         senders_config: dict = parse_senders(influxdb3_local, args, task_id)
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
         window: timedelta = parse_window(args, task_id)
@@ -1292,16 +1298,17 @@ def process_scheduled_call(
         # Calculate time range
         end_time: datetime = call_time.replace(tzinfo=timezone.utc)
         start_time: datetime = end_time - window
+        influxdb3_local.info(f"[{task_id}] Querying '{measurement}' from {start_time} to {end_time}")
 
         # Build query to get data
         query: str = build_query(measurement, start_time, end_time)
         results: list = influxdb3_local.query(query)
-
         if not results:
             influxdb3_local.info(
                 f"[{task_id}] No data found in '{measurement}' from {start_time} to {end_time}."
             )
             return
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
 
         # Group data by unique tag combinations
         tag_combinations = defaultdict(list)

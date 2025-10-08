@@ -4,7 +4,7 @@
 
 ## Description
 
-The Downsampler Plugin enables time-based data aggregation and downsampling in InfluxDB 3. Reduce data volume by aggregating measurements over specified time intervals using functions like avg, sum, min, max, derivative, or median. The plugin supports both scheduled batch processing of historical data and on-demand downsampling through HTTP requests. Each downsampled record includes metadata about the original data points compressed.
+The Downsampler Plugin enables time-based data aggregation and downsampling in InfluxDB 3. Reduce data volume by aggregating measurements over specified time intervals using functions like avg, sum, min, max, median, count, stddev, first_value, last_value, var, or approx_median. The plugin supports both scheduled batch processing of historical data and on-demand downsampling through HTTP requests. Each downsampled record includes metadata about the original data points compressed.
 
 ## Configuration
 
@@ -31,7 +31,7 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `interval`        | string | "10min"    | Time interval for downsampling. Format: `<number><unit>` (e.g., "10min", "2h", "1d") |
 | `calculations`    | string | "avg"      | Aggregation functions. Single function or dot-separated field:aggregation pairs      |
 | `specific_fields` | string | all fields | Dot-separated list of fields to downsample (e.g., "co.temperature")                  |
-| `excluded_fields` | string | none       | Dot-separated list of fields to exclude from downsampling                            |
+| `excluded_fields` | string | none       | Dot-separated list of fields and tags to exclude from downsampling results           |
 
 ### Filtering parameters
 
@@ -60,8 +60,7 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 [downsampling_config_scheduler.toml](downsampling_config_scheduler.toml)
 
-For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins
-/README.md](/README.md).
+For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins/README.md](/README.md).
 
 ## Schema management
 
@@ -258,8 +257,13 @@ Supported aggregation functions:
 - `sum`: Sum of values
 - `min`: Minimum value
 - `max`: Maximum value
-- `derivative`: Rate of change
 - `median`: Median value
+- `count`: Count of values
+- `stddev`: Standard deviation
+- `first_value`: First value in time interval
+- `last_value`: Last value in time interval
+- `var`: Variance of values
+- `approx_median`: Approximate median (faster than exact median)
 
 ## Troubleshooting
 

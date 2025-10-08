@@ -95,8 +95,7 @@ Multiple thresholds are separated by `@`: `temp:2.5:20:5@load:3:10:2m`
 
 [mad_anomaly_config_data_writes.toml](mad_anomaly_config_data_writes.toml)
 
-For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins
-/README.md](/README.md).
+For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins/README.md](/README.md).
 
 ## Software Requirements
 

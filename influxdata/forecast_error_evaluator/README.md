@@ -4,7 +4,7 @@
 
 ## Description
 
-The Forecast Error Evaluator Plugin validates forecast model accuracy for time series data in InfluxDB 3 by comparing predicted values with actual observations. The plugin periodically computes error metrics (MSE, MAE, or RMSE), detects anomalies based on error thresholds, and sends notifications when forecast accuracy degrades. It includes debounce logic to suppress transient anomalies and supports multi-channel notifications via the Notification Sender Plugin.
+The Forecast Error Evaluator Plugin validates forecast model accuracy for time series data in InfluxDB 3 by comparing predicted values with actual observations. The plugin periodically computes error metrics (MSE, MAE, RMSE, MAPE, or SMAPE), detects anomalies based on error thresholds, and sends notifications when forecast accuracy degrades. It includes debounce logic to suppress transient anomalies and supports multi-channel notifications via the Notification Sender Plugin.
 
 ## Configuration
 
@@ -24,7 +24,7 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `actual_measurement`   | string | required | Measurement containing actual (ground truth) values                          |
 | `forecast_field`       | string | required | Field name for forecasted values                                             |
 | `actual_field`         | string | required | Field name for actual values                                                 |
-| `error_metric`         | string | required | Error metric to compute: "mse", "mae", or "rmse"                             |
+| `error_metric`         | string | required | Error metric to compute: "mse", "mae", "rmse", "mape", or "smape"            |
 | `error_thresholds`     | string | required | Threshold levels. Format: `INFO-"0.5":WARN-"0.9":ERROR-"1.2":CRITICAL-"1.5"` |
 | `window`               | string | required | Time window for data analysis. Format: `<number><unit>` (e.g., "1h")         |
 | `senders`              | string | required | Dot-separated list of notification channels (e.g., "slack.discord")          |
@@ -94,8 +94,7 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 [forecast_error_config_scheduler.toml](forecast_error_config_scheduler.toml)
 
-For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins
-/README.md](/README.md).
+For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins/README.md](/README.md).
 
 ## Software Requirements
 
@@ -296,7 +295,7 @@ Key operations:
 1. Parses configuration from arguments or TOML file
 2. Queries forecast and actual measurements within time window
 3. Aligns timestamps using rounding frequency
-4. Computes specified error metric (MSE, MAE, or RMSE)
+4. Computes specified error metric (MSE, MAE, RMSE, MAPE, or SMAPE)
 5. Evaluates thresholds and applies debounce logic
 6. Sends notifications via configured channels
 
@@ -306,9 +305,11 @@ Core error computation engine that calculates forecast accuracy metrics.
 
 Supported error metrics:
 
-- `mse`: Mean Squared Error
-- `mae`: Mean Absolute Error  
-- `rmse`: Root Mean Squared Error (square root of MSE)
+- `mse`: Mean Squared Error - measures average squared differences
+- `mae`: Mean Absolute Error - measures average absolute differences
+- `rmse`: Root Mean Squared Error - square root of MSE, same units as original data
+- `mape`: Mean Absolute Percentage Error - percentage-based error
+- `smape`: Symmetric Mean Absolute Percentage Error - bounded 0-200%, handles over/under-estimation symmetrically
 
 #### `evaluate_thresholds(error_value, threshold_config)`
 
@@ -348,11 +349,19 @@ curl -X POST "your_webhook_url" -d '{"text": "test message"}'
 
 #### Issue: Error threshold format not recognized
 
-**Solution**: Use proper threshold format with level prefixes:
+**Solution**: Use proper threshold format with level prefixes. Note that MAPE and SMAPE thresholds are in percentages:
 
 ```bash
+# For absolute metrics (MSE, MAE, RMSE)
 --trigger-arguments 'error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0":CRITICAL-"3.0"'
+
+# For percentage metrics (MAPE, SMAPE)
+--trigger-arguments 'error_thresholds=INFO-"5.0":WARN-"10.0":ERROR-"20.0":CRITICAL-"30.0"'
 ```
+
+#### Issue: MAPE/SMAPE calculation errors with zero values
+
+**Solution**: MAPE cannot be calculated when actual values are zero, and SMAPE cannot be calculated when both forecast and actual are zero. The plugin automatically skips such rows and logs warnings. For datasets with frequent zero values, consider using MAE or RMSE instead.
 
 #### Issue: Environment variables not loaded
 

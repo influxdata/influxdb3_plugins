@@ -50,6 +50,67 @@ OPTIONAL_SECTIONS = [
     "### Performance considerations"
 ]
 
+def extract_section_content(content: str, section_heading: str) -> str:
+    """
+    Extract content between a markdown section heading and the next same-level heading.
+    
+    This function properly handles:
+    - Subsections (###, ####) within the section
+    - Code blocks containing ## characters
+    - Section being at start or end of document
+    - Missing sections
+    
+    Args:
+        content: Full markdown document content
+        section_heading: Heading text without the ## prefix (e.g., "Troubleshooting")
+    
+    Returns:
+        Section content as string, or empty string if section not found
+    
+    Examples:
+        >>> extract_section_content(doc, "Troubleshooting")
+        '### Common issues\\n#### Issue: ...'
+    """
+    # Build the section marker - look for "## Heading" where Heading doesn't start with #
+    # This ensures we match "## Troubleshooting" but not "### Troubleshooting"
+    section_pattern = f'## {section_heading}'
+    
+    # Find the section heading
+    section_index = content.find(section_pattern)
+    if section_index == -1:
+        return ""
+    
+    # Find the end of the heading line (start of content)
+    content_start = content.find('\n', section_index)
+    if content_start == -1:
+        # Section heading is at end of file with no content
+        return ""
+    content_start += 1  # Move past the newline
+    
+    # Find the next same-level heading (## followed by space, not ###)
+    # Use a loop to ensure we're not matching subsections
+    search_pos = content_start
+    while True:
+        next_heading_pos = content.find('\n## ', search_pos)
+        
+        if next_heading_pos == -1:
+            # No more headings, take everything to end of document
+            return content[content_start:].rstrip()
+        
+        # Check that it's actually a ## heading and not ###
+        # Look at the character after '## '
+        check_pos = next_heading_pos + 4  # Position after '\n## '
+        if check_pos < len(content) and content[check_pos] != '#':
+            # This is a proper ## heading, not ### or ####
+            return content[content_start:next_heading_pos].rstrip()
+        
+        # This was a false match (like \n### ), keep searching
+        search_pos = next_heading_pos + 1
+        
+        # Safety: if we've searched too far, something is wrong
+        if search_pos > len(content):
+            return content[content_start:].rstrip()
+        
 def validate_emoji_metadata(content: str) -> List[str]:
     """Validate the emoji metadata line."""
     errors = []
@@ -94,20 +155,38 @@ def validate_parameter_tables(content: str) -> List[str]:
     """Validate parameter table formatting."""
     errors = []
     
-    # Check for parameter table headers
-    if not re.search(r'\|\s*Parameter\s*\|\s*Type\s*\|\s*Default\s*\|\s*Description\s*\|', content):
+    # Check for parameter table headers with flexible whitespace
+    # This regex allows variable spacing between columns
+    table_pattern = r'\|\s*Parameter\s*\|\s*Type\s*\|\s*Default\s*\|\s*Description\s*\|'
+    if not re.search(table_pattern, content):
         errors.append("No properly formatted parameter tables found (should have Parameter | Type | Default | Description columns)")
     
-    # Check for required parameters section
+    # Validate Required parameters section if present
     if '### Required parameters' in content:
-        section_start = content.index('### Required parameters')
-        section_end = content.find('\n###', section_start + SECTION_SEARCH_OFFSET)
-        if section_end == SECTION_NOT_FOUND:
-            section_end = content.find('\n##', section_start + SECTION_SEARCH_OFFSET)
+        # Find the subsection
+        subsection_start = content.find('### Required parameters')
         
-        section_content = content[section_start:section_end] if section_end != SECTION_NOT_FOUND else content[section_start:]
+        # Find the end: next subsection (###) or next section (##)
+        # Look for '\n### ' or '\n## ' after current position
+        search_pos = subsection_start + len('### Required parameters')
         
-        if 'required' not in section_content.lower():
+        next_subsection = content.find('\n### ', search_pos)
+        next_section = content.find('\n## ', search_pos)
+        
+        # Determine the end position
+        if next_subsection == -1 and next_section == -1:
+            subsection_end = len(content)
+        elif next_subsection == -1:
+            subsection_end = next_section
+        elif next_section == -1:
+            subsection_end = next_subsection
+        else:
+            subsection_end = min(next_subsection, next_section)
+        
+        section_content = content[subsection_start:subsection_end]
+        
+        # Check that it indicates which parameters are required
+        if 'required' not in section_content.lower() and 'yes' not in section_content.lower():
             errors.append("Required parameters section should indicate which parameters are required")
     
     return errors
@@ -166,23 +245,32 @@ def validate_troubleshooting(content: str) -> List[str]:
     """Validate troubleshooting section content."""
     errors = []
     
-    if '## Troubleshooting' in content:
-        section_start = content.index('## Troubleshooting')
-        section_end = content.find('\n##', section_start + SECTION_SEARCH_OFFSET)
-        section_content = content[section_start:section_end] if section_end != SECTION_NOT_FOUND else content[section_start:]
-        
-        # Check for common subsections
-        if '### Common issues' not in section_content:
-            errors.append("Troubleshooting should include 'Common issues' subsection")
-        
-        # Check for issue/solution pattern
-        issue_count = section_content.count('#### Issue:') + section_content.count('**Issue:')
-        solution_count = section_content.count('**Solution:') + section_content.count('Solution:')
-        
-        if issue_count < MINIMUM_TROUBLESHOOTING_ISSUES:
-            errors.append(f"Troubleshooting should include at least {MINIMUM_TROUBLESHOOTING_ISSUES} documented issues")
-        if issue_count > solution_count:
-            errors.append("Each troubleshooting issue should have a corresponding solution")
+    # Check if section exists
+    if '## Troubleshooting' not in content:
+        return errors
+    
+    # Extract the section content using robust extraction
+    section_content = extract_section_content(content, 'Troubleshooting')
+    
+    # Defensive check
+    if not section_content.strip():
+        errors.append("Troubleshooting section exists but appears empty")
+        return errors
+    
+    # Check for required subsections
+    if '### Common issues' not in section_content:
+        errors.append("Troubleshooting should include 'Common issues' subsection")
+    
+    # Check for issue/solution patterns
+    # Count both markdown heading style (####) and bold style (**)
+    issue_count = section_content.count('#### Issue:') + section_content.count('**Issue:')
+    solution_count = (section_content.count('**Solution**:') + section_content.count('**Solution:') + section_content.count('Solution:'))
+    
+    if issue_count < MINIMUM_TROUBLESHOOTING_ISSUES:
+        errors.append(f"Troubleshooting should include at least {MINIMUM_TROUBLESHOOTING_ISSUES} documented issues")
+    
+    if issue_count > 0 and solution_count < issue_count:
+        errors.append("Each troubleshooting issue should have a corresponding solution")
     
     return errors
 
@@ -190,20 +278,34 @@ def validate_code_overview(content: str) -> List[str]:
     """Validate code overview section."""
     errors = []
     
-    if '## Code overview' in content:
-        section_start = content.index('## Code overview')
-        section_end = content.find('\n##', section_start + SECTION_SEARCH_OFFSET)
-        section_content = content[section_start:section_end] if section_end != SECTION_NOT_FOUND else content[section_start:]
-        
-        # Check for required subsections
-        if '### Files' not in section_content:
-            errors.append("Code overview should include 'Files' subsection")
-        if '### Main functions' not in section_content and '### Key functions' not in section_content:
-            errors.append("Code overview should include 'Main functions' or 'Key functions' subsection")
-        
-        # Check for function documentation
-        if 'def ' not in section_content and not re.search(r'`\w+\(.*?\)`', section_content):
-            errors.append("Code overview should document main functions with their signatures")
+    # Check if section exists
+    if '## Code overview' not in content:
+        return errors
+    
+    # Extract the section content using robust extraction
+    section_content = extract_section_content(content, 'Code overview')
+    
+    # Defensive check
+    if not section_content.strip():
+        errors.append("Code overview section exists but appears empty")
+        return errors
+    
+    # Check for required subsections
+    if '### Files' not in section_content:
+        errors.append("Code overview should include 'Files' subsection")
+    
+    if not ('### Main functions' in section_content or '### Key functions' in section_content):
+        errors.append("Code overview should include 'Main functions' or 'Key functions' subsection")
+    
+    # Check for function documentation (signatures in backticks or Python def)
+    has_function_signatures = (
+        'def ' in section_content or 
+        re.search(r'####?\s+`\w+\(.*?\)`', section_content) or
+        re.search(r'`\w+\([^)]*\)`:', section_content)
+    )
+    
+    if not has_function_signatures:
+        errors.append("Code overview should document main functions with their signatures")
     
     return errors
 

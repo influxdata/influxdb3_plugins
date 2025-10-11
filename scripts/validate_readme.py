@@ -23,6 +23,7 @@ SECTION_NOT_FOUND = -1
 # Exit codes
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
+EMOJI_METADATA_PATTERN = r'^⚡\s+[\w\-,\s]+\s+🏷️\s+[\w\-,\s]+\s+🔧\s+InfluxDB 3'
 
 # Required sections in order
 REQUIRED_SECTIONS = [
@@ -49,6 +50,8 @@ OPTIONAL_SECTIONS = [
     "### Debugging tips",
     "### Performance considerations"
 ]
+
+OPTIONAL_SECTIONS_SKIP_WARNING = ["### Debugging tips", "### Performance considerations"]
 
 def extract_section_content(content: str, section_heading: str) -> str:
     """
@@ -116,8 +119,7 @@ def validate_emoji_metadata(content: str) -> List[str]:
     errors = []
     
     # Check for emoji metadata pattern
-    metadata_pattern = r'^⚡\s+[\w\-,\s]+\s+🏷️\s+[\w\-,\s]+\s+🔧\s+InfluxDB 3'
-    if not re.search(metadata_pattern, content, re.MULTILINE):
+    if not re.search(EMOJI_METADATA_PATTERN, content, re.MULTILINE):
         errors.append("Missing or invalid emoji metadata line (should have ⚡ trigger types 🏷️ tags 🔧 compatibility)")
     
     return errors
@@ -355,7 +357,7 @@ def validate_readme(readme_path: Path) -> Tuple[List[str], List[str]]:
     
     # Check for optional but recommended sections
     for section in OPTIONAL_SECTIONS:
-        if section not in content and section not in ["### Debugging tips", "### Performance considerations"]:
+        if section not in content and section not in OPTIONAL_SECTIONS_SKIP_WARNING:
             warnings.append(f"Consider adding '{section}' section")
     
     # Check for template remnants

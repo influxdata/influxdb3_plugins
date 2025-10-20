@@ -1,0 +1,122 @@
+name: Remind to Sync Documentation
+
+on:
+  push:
+    branches: [main]
+    paths: 
+      - 'influxdata/**/README.md'
+
+permissions:
+  contents: read
+
+jobs:
+  remind-sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Need previous commit to detect changes
+
+      - name: Detect changed plugins
+        id: detect-changes
+        run: |
+          # Get list of changed README files
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep '^influxdata/.*/README\.md$')
+          
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "No plugin README files changed"
+            echo "changed_plugins=" >> $GITHUB_OUTPUT
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          
+          # Extract plugin names from file paths
+          PLUGIN_NAMES=""
+          while IFS= read -r file; do
+            if [[ -n "$file" ]]; then
+              # Extract plugin name from path: influxdata/plugin_name/README.md -> plugin_name
+              PLUGIN_NAME=$(echo "$file" | sed 's|influxdata/||' | sed 's|/README\.md||')
+              if [[ -n "$PLUGIN_NAMES" ]]; then
+                PLUGIN_NAMES="$PLUGIN_NAMES, $PLUGIN_NAME"
+              else
+                PLUGIN_NAMES="$PLUGIN_NAME"
+              fi
+            fi
+          done <<< "$CHANGED_FILES"
+          
+          echo "Changed plugins: $PLUGIN_NAMES"
+          echo "changed_plugins=$PLUGIN_NAMES" >> $GITHUB_OUTPUT
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+
+      - name: Create sync reminder comment
+        if: steps.detect-changes.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const changedPlugins = '${{ steps.detect-changes.outputs.changed_plugins }}';
+            const commitSha = context.sha;
+            const shortSha = commitSha.substring(0, 7);
+            
+            // Build the GitHub issue URL with pre-filled parameters
+            const baseUrl = 'https://github.com/influxdata/docs-v2/issues/new';
+            const template = 'sync-plugin-docs.yml';
+            const title = encodeURIComponent(`Sync plugin docs: ${changedPlugins}`);
+            const plugins = encodeURIComponent(changedPlugins);
+            const sourceCommit = encodeURIComponent(commitSha);
+            
+            const issueUrl = `${baseUrl}?template=${template}&title=${title}&plugins=${plugins}&source_commit=${sourceCommit}`;
+            
+            // Create the comment body
+            const commentBody = `📚 **Plugin documentation updated!**
+            
+            The following plugin READMEs were changed in this commit:
+            **${changedPlugins}**
+            
+            ## Next Steps
+            
+            To sync these changes to the InfluxDB documentation site:
+            
+            ### 🚀 [**Click here to create sync request**](${issueUrl})
+            
+            This will open a pre-filled issue in docs-v2 that will automatically trigger the sync workflow.
+            
+            ### What the sync process does:
+            1. ✅ Validates your plugin READMEs against template requirements
+            2. 🔄 Transforms content for docs-v2 compatibility (adds Hugo shortcodes, fixes links)
+            3. 🖼️ Generates screenshots of the plugin documentation pages
+            4. 📝 Creates a pull request in docs-v2 ready for review
+            
+            ### Before syncing:
+            - Ensure your README follows the [README_TEMPLATE.md](https://github.com/influxdata/influxdb3_plugins/blob/master/README_TEMPLATE.md) structure
+            - Include proper emoji metadata (⚡ triggers, 🏷️ tags, 🔧 compatibility)
+            - Verify all required sections are present and complete
+            
+            ---
+            *Commit: ${shortSha} | [View workflow](https://github.com/influxdata/docs-v2/blob/master/helper-scripts/influxdb3-plugins/README.md)*`;
+            
+            // Create commit comment
+            await github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: commitSha,
+              body: commentBody
+            });
+            
+            console.log(`Created sync reminder for plugins: ${changedPlugins}`);
+            console.log(`Issue URL: ${issueUrl}`);
+
+      - name: Log workflow completion
+        if: steps.detect-changes.outputs.has_changes == 'true'
+        run: |
+          echo "✅ Sync reminder created for plugins: ${{ steps.detect-changes.outputs.changed_plugins }}"
+          echo "🔗 Users can click the link in the commit comment to trigger docs sync"
+          
+      - name: No changes detected
+        if: steps.detect-changes.outputs.has_changes == 'false'
+        run: |
+          echo "ℹ️ No plugin README files were changed in this commit"

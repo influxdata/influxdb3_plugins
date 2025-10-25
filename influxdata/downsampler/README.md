@@ -2,6 +2,8 @@
 
 ⚡ scheduled, http 🏷️ downsampling, aggregation, data-reduction 🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
+# Test update for automation check
+
 ## Description
 
 The Downsampler Plugin enables time-based data aggregation and downsampling in InfluxDB 3. Reduce data volume by aggregating measurements over specified time intervals using functions like avg, sum, min, max, median, count, stddev, first_value, last_value, var, or approx_median. The plugin supports both scheduled batch processing of historical data and on-demand downsampling through HTTP requests. Each downsampled record includes metadata about the original data points compressed.

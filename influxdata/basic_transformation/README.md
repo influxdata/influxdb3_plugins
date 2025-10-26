@@ -419,3 +419,5 @@ chmod +x ~/.plugins/basic_transformation.py
 ## Questions/Comments
 
 For additional support, see the [Support section](../README.md#support).
+
+<--volume /Users/jameelahmercer/Desktop/influxdb3_plugins/ssl:/etc/nginx/ssl:ro --publish Test sync workflow Fri Oct 24 13:07:53 PDT 2025 -->

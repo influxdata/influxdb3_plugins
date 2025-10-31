@@ -410,7 +410,7 @@ Validation Rules:
     parser.add_argument(
         '--errors-only',
         action='store_true',
-        help='Exit with success code even if warnings are found (only fail on errors)'
+        help='(Deprecated: this is now the default behavior) Exit with success code even if warnings are found'
     )
     
     return parser.parse_args()
@@ -528,9 +528,8 @@ def main():
     elif not has_errors and has_warnings:
         if not args.quiet:
             print(f"\n⚠️  Validation completed with {warning_count} warning(s) but no errors")
-        # If --errors-only is specified, exit successfully even with warnings
-        exit_code = EXIT_SUCCESS if args.errors_only else EXIT_ERROR
-        sys.exit(exit_code)
+        # Exit successfully when there are only warnings (warnings are advisory, not blocking)
+        sys.exit(EXIT_SUCCESS)
     else:
         if not args.quiet:
             print(f"\n❌ Validation failed with {error_count} error(s)")

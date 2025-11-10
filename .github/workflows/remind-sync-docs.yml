@@ -59,6 +59,7 @@ jobs:
         if: steps.detect-changes.outputs.has_changes == 'true'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.ISSUES_READ_WRITE_TOKEN }}
           script: |
             const changedPlugins = '${{ steps.detect-changes.outputs.changed_plugins }}';
             const commitSha = context.sha;

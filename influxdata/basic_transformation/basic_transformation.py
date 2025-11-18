@@ -914,7 +914,7 @@ def generate_fields_string(tags: list[str], fields: list[str]) -> str:
     Returns:
         str: Formatted string with quoted field names separated by commas and newlines.
     """
-    all_fields: list = tags + fields + ["time"]
+    all_fields: list = tags + fields
     return ",\n\t".join(f'"{field}"' for field in all_fields)
 
 

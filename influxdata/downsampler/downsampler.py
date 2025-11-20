@@ -1219,7 +1219,7 @@ def process_scheduled_call(
 
         real_now: datetime = call_time_ - offset
         real_then: datetime = real_now - window
-        influxdb3_local.info(f"[{task_id}] Querying data from {real_then} to {real_now}")
+        influxdb3_local.info(f"[{task_id}] Querying data from {real_then} to {real_now} with fields: {fields} and tags: {tags}")
 
         query: str = build_downsample_query(
             fields,
@@ -1447,6 +1447,10 @@ def process_request(
             "days": lambda x: timedelta(days=x),
         }
         batch_delta: timedelta = unit_mapping[unit.lower()](magnitude)
+
+        influxdb3_local.info(
+            f"[{task_id}] Starting downsampling for measurement {source_measurement} with fields: {fields} and tags: {tags} to query")
+
         while cursor < backfill_end:
             batch_count += 1
             batch_end = min(cursor + batch_delta, backfill_end)

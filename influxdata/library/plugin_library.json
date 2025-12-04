@@ -163,6 +163,17 @@
                 "required_libraries": ["influxdb_client_3"],
                 "last_update": "2025-06-27",
                 "trigger_types_supported": ["data_writes"]
+            },
+            {
+                "name": "US Weather Sampler",
+                "path": "influxdata/nws_weather/nws_weather_sampler.py",
+                "description": "Provides real-time weather data from the National Weather Service API for demonstration and sample data purposes. Fetches live observations from multiple weather stations across the United States.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/nws_weather/README.md",
+                "required_plugins": [],
+                "required_libraries": [],
+                "last_update": "2025-12-04",
+                "trigger_types_supported": ["scheduler"]
             }
         ]
     }

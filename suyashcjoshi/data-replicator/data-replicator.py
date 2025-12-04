@@ -1,3 +1,46 @@
+"""
+{
+    "plugin_type": ["onwrite"],
+    "onwrite_args_config": [
+        {
+            "name": "host",
+            "example": "https://remote-influxdb.com:8181",
+            "description": "Remote InfluxDB host URL.",
+            "required": true
+        },
+        {
+            "name": "token",
+            "example": "remote_api_token",
+            "description": "Remote InfluxDB API token.",
+            "required": true
+        },
+        {
+            "name": "database",
+            "example": "remote_db",
+            "description": "Remote database name.",
+            "required": true
+        },
+        {
+            "name": "tables",
+            "example": "cpu,mem,disk",
+            "description": "Comma-separated list of tables to replicate. If not specified, all tables will be replicated.",
+            "required": false
+        },
+        {
+            "name": "aggregate_interval",
+            "example": "10s",
+            "description": "Aggregation interval for downsampling in seconds (e.g., '1a', '5s', '10s'). If not specified, no downsampling will be applied.",
+            "required": false
+        },
+        {
+            "name": "validate",
+            "example": "true",
+            "description": "Enable validation of replicated data by comparing checksums. Defaults to 'false'.",
+            "required": false
+        }
+    ]
+}
+"""
 # Data Replicator Plugin for InfluxDB v3 Core/Enterprise
 # Copyright (c) 2025 InfluxData Inc.
 

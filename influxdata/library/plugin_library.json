@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2025-07-18T14:06:08+03:00",
+        "last_updated": "2025-12-04T20:49:08+03:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -152,17 +152,6 @@
                 "required_libraries": ["psutil"],
                 "last_update": "2025-07-23",
                 "trigger_types_supported": ["scheduler"]
-            },
-            {
-                "name": "Simple Data Replicator",
-                "path": "suyashcjoshi/data-replicator/data-replicator.py",
-                "description": "Replicates data from a local InfluxDB 3 instance to a remote instance on WAL flush. Supports filtering, downsampling, and optional validation of replicated entries with a persistent queue.",
-                "author": "InfluxData",
-                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/suyashcjoshi/data-replicator/README.md",
-                "required_plugins": [],
-                "required_libraries": ["influxdb_client_3"],
-                "last_update": "2025-06-27",
-                "trigger_types_supported": ["data_writes"]
             },
             {
                 "name": "US Weather Sampler",

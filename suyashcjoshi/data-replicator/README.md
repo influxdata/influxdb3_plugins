@@ -4,7 +4,7 @@ This plugin replicates **any/all data** written to an InfluxDB 3 Core/Enterprise
 
 ## Software requirements
 
-- **InfluxDB 3 Core**
+- **InfluxDB 3 Core / Enterprise**
 - **InfluxDB Cloud Account**: InfluxDB 3 account information where you want to replicate data e.g. Cloud Serverless URL, API Token with write access for the given bucket/database where data needs to be replicated.
 - **Telegraf**: For collecting system metrics (optional). Anytime, however data gets written to InfluxDB 3 Core/Enterprise, this plugin will come into action.
 - **Python**: 3.7+

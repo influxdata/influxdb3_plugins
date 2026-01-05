@@ -324,10 +324,58 @@ influxdb3 list triggers --database mydb
 
 ### Performance considerations
 
-- **Batch processing**: Use appropriate batch_size for HTTP requests to balance memory usage and performance
-- **Field filtering**: Use specific_fields to process only necessary data
-- **Retry logic**: Configure max_retries based on network reliability
-- **Metadata overhead**: Metadata columns add ~20% storage overhead but provide valuable debugging information
+#### Consolidate calculations in fewer triggers
+
+For best performance, define a single trigger per measurement that performs all necessary field calculations.
+Avoid creating multiple separate triggers that each handle only one field or calculation.
+
+Internal testing showed significant performance differences based on trigger design:
+
+- **Many triggers** (one calculation each): When 134 triggers were created, each handling a single calculation for a measurement, the cluster showed degraded performance with high CPU and memory usage.
+- **Consolidated triggers** (all calculations per measurement): When triggers were restructured so each one performed all necessary field calculations for a measurement, CPU usage dropped to approximately 4% and memory remained stable.
+
+#### Recommended <!-- {.green} -->
+
+Combine all field calculations for a measurement in one trigger:
+
+```bash
+influxdb3 create trigger \
+  --database mydb \
+  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --trigger-spec "every:1h" \
+  --trigger-arguments 'source_measurement=temperature,target_measurement=temperature_hourly,interval=1h,window=6h,calculations=temp:avg.temp:max.temp:min,specific_fields=temp' \
+  temperature_hourly_downsample
+```
+
+#### Not recommended <!-- {.orange} -->
+
+Multiple triggers for the same measurement creates unnecessary overhead:
+
+```bash
+# Avoid creating multiple triggers for calculations on the same measurement
+influxdb3 create trigger ... --trigger-arguments 'calculations=temp:avg' avg_trigger
+influxdb3 create trigger ... --trigger-arguments 'calculations=temp:max' max_trigger
+influxdb3 create trigger ... --trigger-arguments 'calculations=temp:min' min_trigger
+```
+
+#### Use specific_fields to limit processing
+
+If your measurement contains fields that you don't need to downsample, use the `specific_fields` parameter to specify only the relevant ones.
+Without this parameter, the downsampler processes all fields and applies the default aggregation (such as `avg`) to fields not listed in your calculations, which can lead to unnecessary processing and storage.
+
+```bash
+# Only downsample the 'temp' field, ignore other fields in the measurement
+--trigger-arguments 'specific_fields=temp'
+
+# Downsample multiple specific fields
+--trigger-arguments 'specific_fields=temp.humidity.pressure'
+```
+
+#### Additional performance tips
+
+- **Batch processing**: Use appropriate `batch_size` for HTTP requests to balance memory usage and performance
+- **Retry logic**: Configure `max_retries` based on network reliability
+- **Metadata overhead**: Metadata columns add approximately 20% storage overhead but provide valuable debugging information
 - **Index optimization**: Tag filters are more efficient than field filters for large datasets
 
 ## Questions/Comments

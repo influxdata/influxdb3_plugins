@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2025-12-04T20:49:08+03:00",
+        "last_updated": "2026-01-08T16:30:00+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -163,6 +163,17 @@
                 "required_libraries": [],
                 "last_update": "2025-12-04",
                 "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Synthefy Forecasting",
+                "path": "synthefy/synthefy-forecasting/synthefy_forecasting.py",
+                "description": "Integrates Synthefy Forecasting API with InfluxDB 3 to enable automated time series forecasting workflows. Reads time series data from InfluxDB, generates forecasts using Synthefy's advanced forecasting models and writes the results back to InfluxDB for visualization and alerting.",
+                "author": "Synthefy",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/synthefy/synthefy-forecasting/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdb3-python", "pandas", "pyarrow", "httpx"],
+                "last_update": "2026-01-08",
+                "trigger_types_supported": ["scheduler", "data_writes", "http"]
             }
         ]
     }

@@ -17,7 +17,7 @@ If a plugin supports multiple trigger specifications, some parameters may depend
 
 This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the [InfluxDB 3 Explorer](https://docs.influxdata.com/influxdb3/explorer/) UI to display and configure the plugin.
 
-### Request body parameters
+### Required parameters
 
 | Parameter           | Type   | Default  | Description                                 |
 |---------------------|--------|----------|---------------------------------------------|
@@ -93,14 +93,16 @@ The `senders_config` parameter accepts channel configurations where keys are sen
    influxdb3 install package twilio
    ```
 
-### Create trigger
+## Trigger setup
+
+### HTTP trigger
 
 Create an HTTP trigger to handle notification requests:
 
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename notifier_plugin.py \
+  --path "gh:influxdata/notifier/notifier_plugin.py" \
   --trigger-spec "request:notify" \
   notification_trigger
 ```
@@ -113,9 +115,42 @@ This registers an HTTP endpoint at `/api/v3/engine/notify`.
 influxdb3 enable trigger --database mydb notification_trigger
 ```
 
-## Examples
+## Example usage
 
-### Slack notification
+### Example 1: Slack notification with data context
+
+Write test data and send a notification to Slack:
+
+```bash
+# Write some test data that might trigger an alert
+influxdb3 write \
+  --database mydb \
+  "system_alerts,host=server1 cpu_usage=95.2,status=\"critical\""
+
+# Send notification via the notifier plugin
+curl -X POST http://localhost:8181/api/v3/engine/notify \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "notification_text": "Alert: High CPU usage detected on server1",
+    "senders_config": {
+      "slack": {
+        "slack_webhook_url": "https://hooks.slack.com/services/..."
+      }
+    }
+  }'
+
+# Query to verify data was written
+influxdb3 query \
+  --database mydb \
+  "SELECT * FROM system_alerts ORDER BY time DESC LIMIT 5"
+```
+
+**Expected output**
+
+Notification sent to Slack channel with message: "Alert: High CPU usage detected on server1"
+
+### Example 2: Slack notification
 
 Send a notification to Slack:
 
@@ -177,25 +212,48 @@ curl -X POST http://localhost:8181/api/v3/engine/notify \
   }'
 ```
 
+## Code overview
+
+### Files
+
+- `notifier_plugin.py`: The main plugin code containing the HTTP handler for notification dispatch
+
+### Logging
+
+Logs are stored in the `_internal` database in the `system.processing_engine_logs` table. To view logs:
+
+```bash
+influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'notification_trigger'"
+```
+
+### Main functions
+
+#### `process_http_request(influxdb3_local, request_body, args)`
+
+Handles incoming HTTP notification requests. Parses the request body, extracts notification text and sender configurations, and dispatches notifications to configured channels.
+
+Key operations:
+
+1. Validates request body for required `notification_text` and `senders_config`
+2. Iterates through sender configurations (Slack, Discord, HTTP, SMS, WhatsApp)
+3. Dispatches notifications with built-in retry logic and error handling
+4. Returns success/failure status for each channel
+
 ## Troubleshooting
 
 ### Common issues
 
-**Notification not delivered**
+#### Issue: Notification not delivered
 
-- Verify webhook URLs are correct and accessible
-- Check Twilio credentials and phone number formats
-- Review logs for specific error messages
+**Solution**: Verify webhook URLs are correct and accessible. Check Twilio credentials and phone number formats. Review logs for specific error messages.
 
-**Authentication errors**
+#### Issue: Authentication errors
 
-- Ensure Twilio credentials are set via environment variables or request parameters
-- Verify webhook URLs have proper authentication if required
+**Solution**: Ensure Twilio credentials are set via environment variables or request parameters. Verify webhook URLs have proper authentication if required.
 
-**Rate limiting**
+#### Issue: Rate limiting
 
-- Plugin includes built-in retry logic with exponential backoff
-- Consider implementing client-side rate limiting for high-frequency notifications
+**Solution**: Plugin includes built-in retry logic with exponential backoff. Consider implementing client-side rate limiting for high-frequency notifications.
 
 ### Environment variables
 

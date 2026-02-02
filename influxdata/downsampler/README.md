@@ -93,7 +93,7 @@ Run downsampling periodically on historical data:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'source_measurement=cpu_metrics,target_measurement=cpu_hourly,interval=1h,window=6h,calculations=avg,specific_fields=usage_user.usage_system' \
   cpu_hourly_downsample
@@ -106,7 +106,7 @@ Trigger downsampling via HTTP requests:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "request:downsample" \
   downsample_api
 ```
@@ -121,7 +121,7 @@ Downsample CPU usage data from 1-minute intervals to hourly averages:
 # Create the trigger
 influxdb3 create trigger \
   --database system_metrics \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'source_measurement=cpu,target_measurement=cpu_hourly,interval=1h,window=6h,calculations=avg,specific_fields=usage_user.usage_system.usage_idle' \
   cpu_hourly_downsample
@@ -157,7 +157,7 @@ Apply different aggregation functions to different fields:
 # Create trigger with field-specific aggregations
 influxdb3 create trigger \
   --database sensors \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:10min" \
   --trigger-arguments 'source_measurement=environment,target_measurement=environment_10min,interval=10min,window=30min,calculations=temperature:avg.humidity:avg.pressure:max' \
   env_multi_agg
@@ -341,7 +341,7 @@ Combine all field calculations for a measurement in one trigger:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'source_measurement=temperature,target_measurement=temperature_hourly,interval=1h,window=6h,calculations=temp:avg.temp:max.temp:min,specific_fields=temp' \
   temperature_hourly_downsample

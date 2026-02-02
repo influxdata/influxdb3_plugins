@@ -23,14 +23,19 @@ If a plugin supports multiple trigger specifications, some parameters may depend
 
 This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the [InfluxDB 3 Explorer](https://docs.influxdata.com/influxdb3/explorer/) UI to display and configure the plugin.
 
-### Scheduled trigger parameters
+### Required parameters
 
-| Parameter            | Type    | Default                                                           | Description                                                                           |
-|----------------------|---------|-------------------------------------------------------------------|---------------------------------------------------------------------------------------|
-| `stations`           | string  | KSEA.KORD.KJFK.KDEN.KATL.KDFW.KLAX.KMIA.KPHX.KBOS                | Dot-separated list of NWS station IDs                                                |
-| `measurement`        | string  | weather_observations                                              | Destination measurement for weather data                                              |
-| `user_agent`         | string  | InfluxDB3-NWS-Plugin/1.0                                          | Custom User-Agent header for NWS API requests                                         |
-| `use_data_timestamp` | boolean | true                                                              | Use timestamp from weather observation data instead of current time when writing data |
+| Parameter  | Type   | Default                                            | Description                              |
+|------------|--------|----------------------------------------------------|------------------------------------------|
+| `stations` | string | KSEA.KORD.KJFK.KDEN.KATL.KDFW.KLAX.KMIA.KPHX.KBOS | Dot-separated list of NWS station IDs   |
+
+### Optional parameters
+
+| Parameter            | Type    | Default                    | Description                                                                           |
+|----------------------|---------|----------------------------|---------------------------------------------------------------------------------------|
+| `measurement`        | string  | weather_observations       | Destination measurement for weather data                                              |
+| `user_agent`         | string  | InfluxDB3-NWS-Plugin/1.0   | Custom User-Agent header for NWS API requests                                         |
+| `use_data_timestamp` | boolean | true                       | Use timestamp from weather observation data instead of current time when writing data |
 
 **Note:** Station IDs are separated by dots (`.`) in trigger arguments. Example: `stations=KSEA.KSFO.KLAX`
 
@@ -63,7 +68,7 @@ Create a trigger for periodic weather data collection:
 ```bash
 influxdb3 create trigger \
   --database weather_demo \
-  --plugin-filename nws_weather_sampler.py \
+  --path "gh:influxdata/nws_weather/nws_weather_sampler.py" \
   --trigger-spec "every:5m" \
   nws_weather_trigger
 
@@ -81,7 +86,7 @@ Collect weather data from multiple stations every 5 minutes:
 # Create the trigger
 influxdb3 create trigger \
   --database weather_demo \
-  --plugin-filename nws_weather_sampler.py \
+  --path "gh:influxdata/nws_weather/nws_weather_sampler.py" \
   --trigger-spec "every:5m" \
   --trigger-arguments "stations=KSEA.KSFO.KORD" \
   nws_basic_weather
@@ -103,13 +108,33 @@ influxdb3 query \
  KSFO       | 18.3          | 65.0                      | 2025-11-26T10:00:00Z
  KORD       | 12.2          | 68.0                      | 2025-11-26T10:00:00Z
 
-### Example 2: Custom measurement name and user agent
+### Example 2: Write correlation marker and query
+
+This plugin fetches external data, but you can write correlation markers:
+
+```bash
+# Write a correlation marker for analysis
+influxdb3 write \
+  --database weather_demo \
+  "collection_markers,plugin=nws_weather event=\"collection_started\""
+
+# Query weather data collected by the plugin
+influxdb3 query \
+  --database weather_demo \
+  "SELECT station_id, temperature_c, time FROM weather_observations ORDER BY time DESC LIMIT 5"
+```
+
+**Expected output**
+
+Weather observations are collected from NWS API and stored automatically by the plugin.
+
+### Example 3: Custom measurement name and user agent
 
 ```bash
 # Create trigger with custom configuration
 influxdb3 create trigger \
   --database weather_demo \
-  --plugin-filename nws_weather_sampler.py \
+  --path "gh:influxdata/nws_weather/nws_weather_sampler.py" \
   --trigger-spec "every:10m" \
   --trigger-arguments "stations=KJFK.KATL.KDFW,measurement=us_weather,user_agent=MyDemo/1.0" \
   nws_custom_weather
@@ -133,7 +158,7 @@ To ensure data is written on every plugin execution (useful for demos or populat
 # Create trigger that writes data on every execution using current time
 influxdb3 create trigger \
   --database weather_demo \
-  --plugin-filename nws_weather_sampler.py \
+  --path "gh:influxdata/nws_weather/nws_weather_sampler.py" \
   --trigger-spec "every:3m" \
   --trigger-arguments "stations=KSEA.KSFO,use_data_timestamp=false" \
   nws_current_time
@@ -279,79 +304,76 @@ WHERE time > now() - INTERVAL '1 hour'
 ORDER BY time DESC;
 ```
 
+## Code overview
+
+### Files
+
+- `nws_weather_sampler.py`: The main plugin code containing the scheduled handler for weather data collection
+
+### Logging
+
+Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+
+```bash
+influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'nws_weather_trigger'"
+```
+
+### Main functions
+
+#### `process_scheduled_call(influxdb3_local, call_time, args)`
+
+Handles scheduled weather data fetching. Fetches observations from configured NWS stations in parallel and writes to InfluxDB.
+
+Key operations:
+
+1. Parses configuration from trigger arguments
+2. Fetches weather data from stations in parallel using ThreadPoolExecutor
+3. Writes weather observations and plugin statistics to InfluxDB
+4. Implements comprehensive error handling and logging
+
 ## Troubleshooting
 
-### Check Trigger Status
+### Common issues
+
+#### Issue: No data appearing
+
+**Solution**: Check trigger status, review plugin logs, and verify network connectivity:
 
 ```bash
+# Check trigger status
 influxdb3 show summary --database weather_demo --token YOUR_TOKEN
+
+# Check plugin logs
+influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE message LIKE '%NWS%' ORDER BY time DESC LIMIT 10"
+
+# Verify network connectivity
+curl -H "User-Agent: test" https://api.weather.gov/stations/KSEA/observations/latest
 ```
 
-### View Plugin Logs
+#### Issue: Rate limiting from NWS API
 
-Plugin logs are written to:
-- Standard output (stdout)
-- `system.processing_engine_logs` system table
+**Solution**: The NWS API has generous rate limits. If you encounter rate limiting, reduce polling frequency, reduce number of stations, or add delays between station requests.
 
-Query logs:
+#### Issue: HTTP 404 errors for specific stations
 
-```sql
-SELECT time, level, message
-FROM system.processing_engine_logs
-WHERE message LIKE '%NWS%'
-ORDER BY time DESC
-LIMIT 100;
-```
+**Solution**: Station may not exist or be decommissioned. Check station ID spelling and try a different station from the same area.
 
-### Enable/Disable Trigger
+#### Issue: JSON decode errors
 
-```bash
-# Disable trigger
-influxdb3 disable trigger nws_weather --database weather_demo --token YOUR_TOKEN
+**Solution**: NWS API may be temporarily unavailable. Check if station is reporting data: `curl -H "User-Agent: test" https://api.weather.gov/stations/STATION_ID/observations/latest`
 
-# Re-enable trigger
-influxdb3 enable trigger nws_weather --database weather_demo --token YOUR_TOKEN
-```
+### Debugging tips
 
-### No Data Appearing
-
-1. **Check trigger status:**
+1. **Check trigger status**:
    ```bash
    influxdb3 show summary --database weather_demo --token YOUR_TOKEN
    ```
 
-2. **Check plugin logs:**
-   ```sql
-   SELECT * FROM system.processing_engine_logs 
-   WHERE message LIKE '%NWS%' 
-   ORDER BY time DESC LIMIT 10;
-   ```
-
-3. **Verify network connectivity:**
+2. **Enable/Disable trigger**:
    ```bash
-   curl -H "User-Agent: test" https://api.weather.gov/stations/KSEA/observations/latest
+   influxdb3 disable trigger nws_weather --database weather_demo --token YOUR_TOKEN
+   influxdb3 enable trigger nws_weather --database weather_demo --token YOUR_TOKEN
    ```
-
-### Rate Limiting
-
-The NWS API has generous rate limits (not publicly disclosed, but typically clears within 5 seconds). If you encounter rate limiting:
-- Reduce polling frequency
-- Reduce number of stations
-- Add delays between station requests (requires plugin modification)
-
-### HTTP 404 Errors
-
-If specific stations return 404:
-- Station may not exist or be decommissioned
-- Check station ID spelling
-- Try a different station from the same area
-
-### JSON Decode Errors
-
-If you see JSON parsing errors:
-- NWS API may be temporarily unavailable
-- Check if station is reporting data: `curl -H "User-Agent: test" https://api.weather.gov/stations/STATION_ID/observations/latest`
-- Some stations occasionally have incomplete data
 
 ## Integration with Grafana
 
@@ -387,7 +409,7 @@ influxdb3 delete trigger nws_weather --database weather_demo --token YOUR_TOKEN
 
 influxdb3 create trigger \
   --trigger-spec "every:1m" \
-  --plugin-filename "nws_weather_sampler.py" \
+  --path "gh:influxdata/nws_weather/nws_weather_sampler.py" \
   --database weather_demo \
   --trigger-arguments "use_data_timestamp=false" \
   --token YOUR_TOKEN \
@@ -410,53 +432,6 @@ Pick from major US cities:
 # Texas
 --trigger-arguments "stations=KDFW.KIAH.KAUS.KSAT.KHOU"
 ```
-
-## Code overview
-
-### Files
-
-- `nws_weather_sampler.py`: The main plugin code containing the scheduled handler for weather data collection
-- `README.md`: This documentation file
-
-### Logging
-
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
-
-```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'nws_weather_trigger'"
-```
-
-Log columns:
-
-- **event_time**: Timestamp of the log event
-- **trigger_name**: Name of the trigger that generated the log
-- **log_level**: Severity level (INFO, WARN, ERROR)
-- **log_text**: Message describing the action or error with unique task_id for traceability
-
-### Main functions
-
-#### `process_scheduled_call(influxdb3_local, call_time, args)`
-
-Handles scheduled weather data fetching. Fetches observations from configured NWS stations in parallel and writes to InfluxDB.
-
-Key operations:
-
-1. Parses configuration from trigger arguments
-2. Fetches weather data from stations in parallel using ThreadPoolExecutor
-3. Writes weather observations and plugin statistics to InfluxDB
-4. Implements comprehensive error handling and logging
-
-#### `fetch_station_data(influxdb3_local, station_id, user_agent, task_id)`
-
-Fetches latest weather observations from a single NWS station using the NWS API.
-
-#### `write_weather_data(influxdb3_local, measurement_name, station_id, data, task_id, use_data_timestamp)`
-
-Parses NWS API response and writes weather data to InfluxDB in line protocol format.
-
-#### `write_plugin_stats(influxdb3_local, success_count, error_count, total_count, task_id)`
-
-Writes plugin execution statistics to the `nws_plugin_stats` measurement for monitoring.
 
 ## API Reference
 

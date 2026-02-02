@@ -136,7 +136,7 @@ Periodically transfer data from InfluxDB 3 to Iceberg:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py \
+  --path "gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'measurement=cpu,window=1h,catalog_configs="eyJ1cmkiOiAiaHR0cDovL25lc3NpZTo5MDAwIn0=",namespace=monitoring,table_name=cpu_metrics' \
   hourly_iceberg_transfer
@@ -149,7 +149,7 @@ Create an on-demand transfer endpoint:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py \
+  --path "gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py" \
   --trigger-spec "request:replicate" \
   iceberg_http_transfer
 ```
@@ -174,7 +174,7 @@ Transfer CPU metrics to Iceberg every hour:
 # Base64: eyJ1cmkiOiAiaHR0cDovL25lc3NpZTo5MDAwIn0=
 influxdb3 create trigger \
   --database metrics \
-  --plugin-filename gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py \
+  --path "gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'measurement=cpu,window=24h,catalog_configs="eyJ1cmkiOiAiaHR0cDovL25lc3NpZTo5MDAwIn0="' \
   cpu_to_iceberg
@@ -187,7 +187,7 @@ influxdb3 write \
 # After trigger runs, data is available in Iceberg table "default.cpu"
 ```
 
-### Expected results
+**Expected output**
 
 - Creates Iceberg table `default.cpu` with schema matching the measurement
 - Transfers all CPU data from the last 24 hours
@@ -201,7 +201,7 @@ Backfill specific fields from historical data:
 # Create and enable HTTP trigger
 influxdb3 create trigger \
   --database metrics \
-  --plugin-filename gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py \
+  --path "gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py" \
   --trigger-spec "request:replicate" \
   iceberg_backfill
 
@@ -225,7 +225,7 @@ curl -X POST http://localhost:8181/api/v3/engine/replicate \
   }'
 ```
 
-### Expected results
+**Expected output**
 
 - Creates Iceberg table `weather.temperature_history`
 - Transfers only `temp_celsius` and `humidity` fields
@@ -256,7 +256,7 @@ CATALOG_CONFIG=$(base64 < catalog_config.json)
 # Create trigger
 influxdb3 create trigger \
   --database metrics \
-  --plugin-filename gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py \
+  --path "gh:influxdata/influxdb_to_iceberg/influxdb_to_iceberg.py" \
   --trigger-spec "every:30m" \
   --trigger-arguments "measurement=sensor_data,window=1h,catalog_configs=\"$CATALOG_CONFIG\",namespace=iot,table_name=sensors" \
   s3_iceberg_transfer

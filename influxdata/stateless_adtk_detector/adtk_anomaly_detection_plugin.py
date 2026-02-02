@@ -17,7 +17,7 @@
         {
             "name": "detectors",
             "example": "QuantileAD.LevelShiftAD",
-            "description": "Dot-separated list of ADTK detectors (e.g., `QuantileAD.LevelShiftAD`).",
+            "description": "Dot-separated list of ADTK detectors. Supported: GeneralizedESDTestAD, InterQuartileRangeAD, ThresholdAD, QuantileAD, LevelShiftAD, VolatilityShiftAD, PersistAD, SeasonalAD.",
             "required": true
         },
         {
@@ -161,6 +161,7 @@ import pandas as pd
 import requests
 from adtk.data import validate_series
 from adtk.detector import (
+    GeneralizedESDTestAD,
     InterQuartileRangeAD,
     LevelShiftAD,
     PersistAD,
@@ -189,6 +190,7 @@ EXCLUDED_KEYWORDS = ["headers", "token", "sid"]
 
 # Supported ADTK detectors
 AVAILABLE_DETECTORS = {
+    "GeneralizedESDTestAD": GeneralizedESDTestAD,
     "InterQuartileRangeAD": InterQuartileRangeAD,
     "ThresholdAD": ThresholdAD,
     "QuantileAD": QuantileAD,
@@ -362,7 +364,7 @@ def send_notification(
             resp = requests.post(url, headers=headers, data=data, timeout=timeout)
             resp.raise_for_status()  # raises on 4xx/5xx
             influxdb3_local.info(
-                f"[{task_id}] Alert sent successfully to notification plugin with results: {resp.json()['results']}"
+                f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
             break
         except requests.RequestException as e:
@@ -613,6 +615,7 @@ def process_scheduled_call(
         All exceptions are caught and logged via influxdb3_local.error.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting anomaly detection scheduled call at {call_time} with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -653,12 +656,14 @@ def process_scheduled_call(
 
     try:
         # Parse configuration
+        influxdb3_local.info(f"[{task_id}] Starting configuration parsing")
         measurement: str = args["measurement"]
         # Validate measurement
         all_measurements: list = get_all_measurements(influxdb3_local)
         if measurement not in all_measurements:
             influxdb3_local.error(f"[{task_id}] Measurement '{measurement}' not found")
             return
+        influxdb3_local.info(f"[{task_id}] Validated measurement: {measurement}")
 
         field: str = args["field"]
         detectors: list = (
@@ -669,6 +674,8 @@ def process_scheduled_call(
         detector_params: dict = parse_detector_params(
             influxdb3_local, args, detectors, task_id
         )
+        influxdb3_local.info(f"[{task_id}] Retrieved detector_params: {detector_params}")
+
         min_consensus: int = parse_min_consensus(args.get("min_consensus", 1), task_id)
         window: timedelta = parse_time_duration(args["window"], task_id)
         senders_config: dict = parse_senders(influxdb3_local, args, task_id)
@@ -688,12 +695,17 @@ def process_scheduled_call(
             influxdb3_local.error(f"[{task_id}] Missing influxdb3_auth_token")
             return
 
+        influxdb3_local.info(f"[{task_id}] Configuration completed: field={field}, detectors={len(detectors)}, min_consensus={min_consensus}, window={window}")
+
         # Query data
+        tags: list = get_tag_names(influxdb3_local, measurement, task_id)
+        tags_clause: str = ", ".join([f'"{tag}"' for tag in tags])
         end_time: datetime = call_time
         start_time: datetime = end_time - window
+        influxdb3_local.info(f"[{task_id}] Querying {measurement}.{field} from {start_time} to {end_time}")
         query: str = f"""
-                SELECT {field}, time
-                FROM {measurement}
+                SELECT "{field}", "time", {tags_clause}
+                FROM "{measurement}"
                 WHERE time >= $start_time AND time < $end_time
                 ORDER BY time
             """
@@ -701,12 +713,12 @@ def process_scheduled_call(
             query,
             {"start_time": start_time.isoformat(), "end_time": end_time.isoformat()},
         )
-
         if not result:
             influxdb3_local.info(
                 f"[{task_id}] No data found for {measurement}.{field} from {start_time} to {end_time}"
             )
             return
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(result)} records from {measurement}")
 
         # Convert to pandas Series
         df: pd.DataFrame = pd.DataFrame(result)
@@ -719,8 +731,10 @@ def process_scheduled_call(
             df[field].values, index=pd.to_datetime(df["time"], unit="ns")
         )
         series = validate_series(series)  # Ensure regular sampling and time order
+        influxdb3_local.info(f"[{task_id}] Prepared time series data with {len(series)} points")
 
         # Apply detectors
+        influxdb3_local.info(f"[{task_id}] Starting anomaly detection with {len(detectors)} detectors")
         anomaly_results: list = []
         for detector_name in detectors:
             try:
@@ -730,10 +744,12 @@ def process_scheduled_call(
                 )
                 detector_class = AVAILABLE_DETECTORS[detector_name]
                 detector = detector_class(**params)
-                detector.fit(series)
+                if detector_name not in ("ThresholdAD",):
+                    detector.fit(series)
                 anomalies: pd.Series = detector.detect(series)
                 anomaly_results.append(anomalies)
-                influxdb3_local.info(f"[{task_id}] Applied detector {detector_name}")
+                anomaly_count = anomalies.sum()
+                influxdb3_local.info(f"[{task_id}] Detector {detector_name} found {anomaly_count} anomalies")
             except Exception as e:
                 influxdb3_local.warn(
                     f"[{task_id}] Failed to apply detector {detector_name}: {e}"
@@ -750,9 +766,13 @@ def process_scheduled_call(
         anomaly_count = anomaly_df.sum(axis=1)
         consensus_anomalies = anomaly_count >= min_consensus
         consensus_anomalies = consensus_anomalies.astype(bool)
+        total_consensus_anomalies = consensus_anomalies.sum()
+        influxdb3_local.info(f"[{task_id}] Consensus analysis: {total_consensus_anomalies} anomalies detected with min_consensus={min_consensus}")
 
         # Process anomalies with debounce logic
-        tags: list = get_tag_names(influxdb3_local, measurement, task_id)
+        influxdb3_local.info(f"[{task_id}] Processing anomalies with debounce logic (min_condition_duration={min_condition_duration})")
+        processed_anomalies = 0
+        sent_notifications = 0
         for idx, is_anomaly in consensus_anomalies.items():
             row: pd.Series = df[df["time"] == pd.Timestamp(idx.isoformat()).value].iloc[
                 0
@@ -797,6 +817,7 @@ def process_scheduled_call(
                         payload,
                         task_id,
                     )
+                    sent_notifications += 1
                 else:
                     # Check duration
                     duration_start_time: datetime = datetime.fromisoformat(
@@ -832,6 +853,7 @@ def process_scheduled_call(
                         influxdb3_local.cache.put(
                             cache_key, ""
                         )  # Reset cache after sending
+                        sent_notifications += 1
                     else:
                         influxdb3_local.info(
                             f"[{task_id}] Anomaly ongoing for {elapsed} < {min_condition_duration} for {measurement}.{field} (tags: {tag_str})"
@@ -843,6 +865,9 @@ def process_scheduled_call(
                     influxdb3_local.info(
                         f"[{task_id}] Anomaly cleared for {measurement}.{field} (tags: {tag_str})"
                     )
+            processed_anomalies += 1
+
+        influxdb3_local.info(f"[{task_id}] Anomaly processing completed: {processed_anomalies} points processed, {sent_notifications} notifications sent")
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error: {e}")

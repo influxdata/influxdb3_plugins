@@ -65,8 +65,7 @@ Example TOML configuration files provided:
 - [state_change_config_scheduler.toml](state_change_config_scheduler.toml) - for scheduled triggers
 - [state_change_config_data_writes.toml](state_change_config_data_writes.toml) - for data write triggers
 
-For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins
-/README.md](/README.md).
+For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins/README.md](/README.md).
 
 ### Channel-specific configuration
 

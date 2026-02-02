@@ -91,7 +91,7 @@ window = "your_window"  # e.g., "10m", "1h"
 # Aggregation-based threshold conditions (Required if deadman check is disabled)
 # Format: {field = [[aggregation, operator, value, level], ...], ...}
 #   - field: field name (string)
-#   - aggregation: aggregation function (string, e.g., "avg", "min", "max")
+#   - aggregation: aggregation function (string). Supported: "avg", "min", "max", "count", "sum", "median", "stddev", "first_value", "last_value", "var", "approx_median"
 #   - operator: comparison operator (string, e.g., ">", ">=", "<", "<=", "==")
 #   - value: threshold value (number)
 #   - level: alert level (string, e.g., "INFO", "WARN", "ERROR", "CRITICAL")

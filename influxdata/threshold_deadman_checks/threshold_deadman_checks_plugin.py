@@ -70,8 +70,8 @@
         },
         {
             "name": "field_aggregation_values",
-            "example": "temp:avg@>=30-ERROR$field2:min@'<5.0-INFO'",
-            "description": "Aggregation conditions for threshold checks (e.g., field:aggregation@\\\"operator value-level\\\"). Multiple conditions separated by '$'.",
+            "example": "temp:avg@>=30-ERROR field2:min@<5.0-INFO cpu:stddev@>10-WARN",
+            "description": "Aggregation conditions for threshold checks (e.g., field:aggregation@operator value-level). Supported aggregations: avg, count, sum, min, max, median, stddev, first_value, last_value, var, approx_median. Multiple conditions separated by spaces.",
             "required": false
         },
         {
@@ -460,7 +460,7 @@ def parse_field_conditions(influxdb3_local, args: dict, task_id: str) -> list:
             ["count", operator.le, 100, WARN]
         ]
     """
-    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR")
+    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR", "CRITICAL")
     cond_input: str | list = args.get("field_conditions")
     conditions: list = []
 
@@ -607,7 +607,7 @@ def send_notification(
             resp = requests.post(url, headers=headers, data=data, timeout=timeout)
             resp.raise_for_status()  # raises on 4xx/5xx
             influxdb3_local.info(
-                f"[{task_id}] Alert sent successfully to notification plugin with results: {resp.json()['results']}"
+                f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
             break
         except requests.RequestException as e:
@@ -632,6 +632,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict):
     for a specified number of times.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting writes process with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -679,6 +680,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict):
         trigger_count: int = int(args.get("trigger_count", 1))
         senders_config: dict = parse_senders(influxdb3_local, args, task_id)
         field_conditions: list = parse_field_conditions(influxdb3_local, args, task_id)
+        influxdb3_local.info(f"[{task_id}] Field conditions: {field_conditions}")
+
         port_override: int = parse_port_override(args, task_id)
         notification_path: str = args.get("notification_path", "notify")
         influxdb3_auth_token: str = args.get("influxdb3_auth_token") or os.getenv(
@@ -829,7 +832,12 @@ def generate_fields_string(
             if f'{aggregation}("{field_name}")' in query:
                 continue
             query += ",\n"
-            query += f'\t{aggregation}("{field_name}") as "{field_name}_{aggregation}"'
+
+            # Add ORDER BY time for first_value and last_value to ensure correct temporal ordering
+            if aggregation in ('first_value', 'last_value'):
+                query += f'\t{aggregation}("{field_name}" ORDER BY time) as "{field_name}_{aggregation}"'
+            else:
+                query += f'\t{aggregation}("{field_name}") as "{field_name}_{aggregation}"'
 
     for tag in tags_list:
         query += f',\n\t"{tag}"'
@@ -847,9 +855,9 @@ def generate_group_by_string(tags_list: list):
     Returns:
         str: SQL GROUP BY clause string including '_time' and tags.
     """
-    group_by_clause: str = f"_time"
+    group_by_clause: str = "_time"
     for tag in tags_list:
-        group_by_clause += f", {tag}"
+        group_by_clause += f', "{tag}"'
     return group_by_clause
 
 
@@ -982,8 +990,8 @@ def parse_field_aggregation_values(
 
     Args:
         influxdb3_local: InfluxDB client instance.
-        args (dict): Contains the 'field_aggregation_values' key with $-separated strings,
-            e.g., 'field:avg@">=10-INFO"$field2:min@"<5.0-WARN"'.
+        args (dict): Contains the 'field_aggregation_values' key with space-separated strings,
+            e.g., 'field:avg@>=10-INFO field2:min@<5.0-WARN'.
         task_id (str): Task identifier (used for logging/warnings).
 
     Returns:
@@ -999,11 +1007,15 @@ def parse_field_aggregation_values(
         "sum",
         "min",
         "max",
-        "derivative",
         "median",
+        "stddev",
+        "first_value",
+        "last_value",
+        "var",
+        "approx_median",
     )
     allowed_operators: tuple = (">", "<", ">=", "<=", "==", "!=")
-    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR")
+    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR", "CRITICAL")
     raw_input: str | None = args.get("field_aggregation_values")
     if raw_input is None:
         return {}
@@ -1045,7 +1057,11 @@ def parse_field_aggregation_values(
             raise Exception(f"[{task_id}] No valid field aggregation values provided.")
         return result
 
-    pairs = raw_input.split("$")
+    # Strip quotes around the string if present
+    if raw_input[0] == raw_input[-1] and raw_input[0] in ('"', "'"):
+        raw_input = raw_input[1:-1]
+
+    pairs = raw_input.split(" ")
     for pair in pairs:
         if not pair or ":" not in pair:
             influxdb3_local.warn(
@@ -1156,6 +1172,7 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
             "measurement", "senders", "influxdb3_auth_token", "window", and other alert settings.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
 
     # Override args with config file if specified
     if args:
@@ -1206,6 +1223,8 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
         field_aggregation_values: dict = parse_field_aggregation_values(
             influxdb3_local, args, task_id
         )
+        influxdb3_local.info(f"[{task_id}] Field aggregation conditions: {field_aggregation_values}")
+
         deadman_check: bool = True if args.get("deadman_check") else False
         if not field_aggregation_values and not deadman_check:
             influxdb3_local.error(
@@ -1238,11 +1257,11 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
 
         time_to: datetime = call_time.replace(tzinfo=timezone.utc)
         time_from: datetime = time_to - window
+        influxdb3_local.info(f"[{task_id}] Querying data in '{measurement}' from {time_from} to {time_to}")
 
         query: str = build_query(
             field_aggregation_values, measurement, tags, interval, time_from, time_to
         )
-
         results: list = influxdb3_local.query(query)
         if not results and deadman_check:
             cache_value: str | None = influxdb3_local.cache.get(measurement)
@@ -1279,6 +1298,8 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                 influxdb3_local.cache.put(measurement, str(current_count + 1))
         else:
             influxdb3_local.cache.put(measurement, "0")
+
+        influxdb3_local.info(f"[{task_id}] Query executed, {len(results)} records returned")
 
         for row in results:
             for field, aggregation_values in field_aggregation_values.items():
@@ -1326,7 +1347,7 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                             }
 
                             influxdb3_local.error(
-                                f"[{task_id}] Condition on {measurement}: {field} {op_sym} {compare_value!r} matched {trigger_count} times in row {cache_key} ({actual!r}), sending alert"
+                                f"[{task_id}] Condition on {measurement}: {aggregation}({field}) {op_sym} {compare_value!r} matched {trigger_count} times in row {cache_key} ({actual!r}), sending alert"
                             )
                             send_notification(
                                 influxdb3_local,
@@ -1339,7 +1360,7 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                             influxdb3_local.cache.put(cache_key, "0")
                         else:
                             influxdb3_local.warn(
-                                f"[{task_id}] Condition for row {cache_key} ({field} {op_sym} {compare_value!r}) matched ({actual!r}) for the {current_count + 1}/{trigger_count} time. Skipping alert."
+                                f"[{task_id}] Condition for row {cache_key} ({aggregation}({field}) {op_sym} {compare_value!r}) matched ({actual!r}) for the {current_count + 1}/{trigger_count} time. Skipping alert."
                             )
                             influxdb3_local.cache.put(cache_key, str(current_count + 1))
                     else:

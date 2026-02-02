@@ -12,13 +12,13 @@ measurement = "your_measurement"  # e.g., "cpu", "temperature", "home"
 window = "your_window"  # e.g., "30m", "24h"
 
 ########## Optional Parameters ##########
-# Include only these fields from the query
-# List of strings representing field names to include; leave empty to include all fields
-#included_fields = ["field1", "field2"]  # e.g., ["temp", "hum"]
+# Include only these fields and tags from the query
+# List of strings representing field and tag names to include; leave empty to include all fields and tags
+#included_fields = ["field1", "field2", "tag1"]  # e.g., ["temp", "hum", "sensor_id"]
 
-# Exclude these fields from the query
-# List of strings representing field names to exclude; leave commented or empty to include all fields
-#excluded_fields = ["field3", "field4"]  # e.g., ["temp", "hum"]
+# Exclude these fields and tags from the query
+# List of strings representing field and tag names to exclude; leave commented or empty to include all fields and tags
+#excluded_fields = ["field3", "field4", "tag2"]  # e.g., ["temp", "hum", "location"]
 
 # Iceberg namespace for the target table
 # Specify the namespace (string); defaults to "default" if omitted
@@ -27,6 +27,11 @@ window = "your_window"  # e.g., "30m", "24h"
 # Iceberg table name
 # Specify the target table name (string); defaults to the measurement name if omitted
 #table_name = "your_table_name"  # e.g., "cpu_metrics", "temperature_data"
+
+# Automatically update Iceberg table schema when data doesn't match existing schema
+# Boolean: true or false (defaults to false if omitted)
+# When true, new columns from data are added to Iceberg schema, missing columns are filled with nulls
+#auto_update_schema = false  # e.g., true to enable automatic schema updates
 
 # Iceberg catalog configuration (Required)
 # Dictionary of key-value pairs for configuring the Iceberg catalog

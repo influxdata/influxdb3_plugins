@@ -368,8 +368,8 @@ def generate_query(
     tag_filter_clause: str = generate_tag_filter_clause(tag_values)
 
     return f"""
-        SELECT time AS ds, {field} AS y
-        FROM {measurement}
+        SELECT time AS ds, "{field}" AS y
+        FROM '{measurement}'
         WHERE time >= '{start_time.isoformat()}'
           AND time < '{end_time.isoformat()}'
           {tag_filter_clause}
@@ -494,13 +494,16 @@ def write_downsampled_data(
         return False, str(e), retry_count
 
 
-def parse_tag_values(influxdb3_local, tag_string: str, task_id: str) -> dict[str, str]:
+def parse_tag_values(
+    influxdb3_local, tag_input: str | dict, args: dict, task_id: str
+) -> dict[str, str]:
     """
     Parse a string of the form 'tag:value.tag2:value...' into a dictionary.
 
     Args:
         influxdb3_local: InfluxDB client instance.
-        tag_string (str): Input string in the format 'tag:value.tag:value2.tag2:value...'.
+        tag_input (str or dict): Input string in the format 'tag:value.tag:value2.tag2:value...' or a dictionary.
+        args (dict): Dictionary of runtime arguments.
         task_id (str): Unique task identifier.
 
     Returns:
@@ -510,12 +513,21 @@ def parse_tag_values(influxdb3_local, tag_string: str, task_id: str) -> dict[str
         parse_tag_values("host:server1.region:us-west")
         {'host': 'server1', 'region': 'us-west'}
     """
-    if not tag_string:
+    if not tag_input:
         return {}
+
+    if args["use_config_file"]:
+        if isinstance(tag_input, dict):
+            return tag_input
+        else:
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping malformed tag-value pair: '{tag_input}' (expected dict)"
+            )
+            return {}
 
     result: dict = {}
     # Split the string by '.' to get individual tag:value pairs
-    pairs: list = tag_string.split(".")
+    pairs: list = tag_input.split(".")
 
     for pair in pairs:
         # Split each pair by ':' to separate tag and value
@@ -531,25 +543,42 @@ def parse_tag_values(influxdb3_local, tag_string: str, task_id: str) -> dict[str
 
 
 def parse_string_of_dates(
-    influxdb3_local, input_string: str | None, task_id: str
+    influxdb3_local, input_value: str | list | None, args: dict, task_id: str
 ) -> list[str] | None:
     """
-    Parses a space-separated string of changepoint dates and validates their format.
+    Parses a space-separated string of changepoint dates and validates their format or use values from config file.
 
     Args:
         influxdb3_local: Logger for reporting errors.
-        input_string (str | None): Space-separated string of date strings.
+        input_value (str | None): Space-separated string of date strings.
+        args (dict): Dictionary of runtime arguments.
         task_id (str): Task identifier for logging.
 
     Returns:
         list[str] | None: List of validated date strings, or None if input is None or invalid.
     """
-    if input_string is None:
+    if input_value is None:
         return None
-
-    raw_points: list = input_string.strip().split(" ")
     result: list = []
 
+    if args["use_config_file"]:
+        if isinstance(input_value, list):
+            for point in input_value:
+                try:
+                    datetime.fromisoformat(point)
+                    result.append(point)
+                except ValueError:
+                    influxdb3_local.warn(
+                        f"[{task_id}] Skipping invalid point '{point}'"
+                    )
+            return result
+        else:
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping malformed date string: '{input_value}' (expected list)"
+            )
+            return None
+
+    raw_points: list = input_value.strip().split(" ")
     for point in raw_points:
         if not point.strip():
             continue  # skip empty parts
@@ -758,7 +787,7 @@ def send_notification(
             resp = requests.post(url, headers=headers, data=data, timeout=timeout)
             resp.raise_for_status()  # raises on 4xx/5xx
             influxdb3_local.info(
-                f"[{task_id}] Alert sent successfully to notification plugin with results: {resp.json()['results']}"
+                f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
             break
         except requests.RequestException as e:
@@ -818,12 +847,19 @@ def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
     """
     senders_config: defaultdict = defaultdict(dict)
 
-    senders_input: str | None = args.get("senders", None)
+    senders_input: str | list | None = args.get("senders", None)
     if not senders_input:
         raise Exception(f"[{task_id}] No senders provided. Skipping sending alerts.")
 
-    senders: list = senders_input.split(".")
-    for sender in senders:
+    if args["use_config_file"]:
+        if not isinstance(senders_input, list):
+            raise Exception(
+                f"[{task_id}] 'senders' must be a list when using config file"
+            )
+    else:
+        senders_input = senders_input.split(".")
+
+    for sender in senders_input:
         if sender not in AVAILABLE_SENDERS:
             influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
             continue
@@ -959,6 +995,7 @@ def process_scheduled_call(
         All exceptions are caught and logged. No exceptions are propagated upward.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting scheduled forecast process at {call_time} with args: {args}")
 
     # Override args with config file if specified
     if args:
@@ -975,10 +1012,13 @@ def process_scheduled_call(
                 influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
+                    args["use_config_file"] = True
                 influxdb3_local.info(f"[{task_id}] New args content: {args}")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
+        else:
+            args["use_config_file"] = False
 
     required_keys: list = [
         "measurement",
@@ -1002,7 +1042,7 @@ def process_scheduled_call(
         measurement: str = args["measurement"]
         field: str = args["field"]
         tag_values: dict = parse_tag_values(
-            influxdb3_local, args.get("tag_values", ""), task_id
+            influxdb3_local, args.get("tag_values", ""), args, task_id
         )
         is_sending_alert: bool = str(args.get("is_sending_alert", "")).lower() == "true"
         window: timedelta = parse_time_interval(args["window"], task_id)
@@ -1019,7 +1059,7 @@ def process_scheduled_call(
             args.get("changepoint_prior_scale", 0.05)
         )
         changepoints: list | None = parse_string_of_dates(
-            influxdb3_local, args.get("changepoints", None), task_id
+            influxdb3_local, args.get("changepoints", None), args, task_id
         )
         validation_window: timedelta = parse_time_interval(
             args.get("validation_window", "0s"), task_id
@@ -1027,16 +1067,37 @@ def process_scheduled_call(
         msre_threshold: float = float(args.get("msre_threshold", float("inf")))
         target_database: str | None = args.get("target_database", None)
         holiday_date_list: list[str] | None = parse_string_of_dates(
-            influxdb3_local, args.get("holiday_date_list", None), task_id
+            influxdb3_local, args.get("holiday_date_list", None), args, task_id
         )
-        holiday_names_list: list[str] | None = (
-            args.get("holiday_names").split(".") if args.get("holiday_names") else None
-        )
-        holiday_country_names: list | None = (
-            args.get("holiday_country_names").split(".")
-            if args.get("holiday_country_names")
-            else None
-        )
+
+        if args["use_config_file"]:
+            holiday_names_list: list | None = args.get("holiday_names")
+            if not isinstance(holiday_names_list, list) and not None:
+                influxdb3_local.warn(
+                    f"[{task_id}] Expecting holiday_names to be a list, got {type(holiday_names_list)}. Skipping adding holidays."
+                )
+                holiday_names_list = None
+        else:
+            holiday_names_list: list[str] | None = (
+                args.get("holiday_names").split(".")
+                if args.get("holiday_names")
+                else None
+            )
+
+        if args["use_config_file"]:
+            holiday_country_names: list | None = args.get("holiday_country_names")
+            if not isinstance(holiday_country_names, list) and not None:
+                influxdb3_local.warn(
+                    f"[{task_id}] Expecting holiday_country_names to be a list, got {type(holiday_country_names)}. Skipping adding holidays."
+                )
+                holiday_country_names = None
+        else:
+            holiday_country_names: list | None = (
+                args.get("holiday_country_names").split(".")
+                if args.get("holiday_country_names")
+                else None
+            )
+
         inferred_freq: str | None = args.get("inferred_freq", None)
 
         # Fetch historical data
@@ -1045,6 +1106,11 @@ def process_scheduled_call(
         else:
             end_time: datetime = call_time
         start_time: datetime = call_time - window
+        if start_time == end_time:
+            raise Exception(
+                f"[{task_id}] Time window for data query is zero — no time range specified for data collection."
+            )
+        influxdb3_local.info(f"[{task_id}] Fetching data from {start_time} to {end_time}")
         query: str = generate_query(
             measurement, field, tag_values, start_time, end_time
         )
@@ -1055,6 +1121,7 @@ def process_scheduled_call(
                 f"[{task_id}] No data found from {start_time} to {end_time}"
             )
             return
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
 
         df: pd.DataFrame = pd.DataFrame(results)
         df["ds"] = pd.to_datetime(df["ds"], unit="ns", utc=True)
@@ -1130,6 +1197,7 @@ def process_scheduled_call(
                     f"[{task_id}] Unable to infer frequency, please provide it manually with the 'inferred_freq' argument"
                 )
                 return
+        influxdb3_local.info(f"[{task_id}] Inferred frequency: {inferred_freq}")
 
         try:
             freq_timedelta: timedelta = pd.to_timedelta(
@@ -1191,6 +1259,7 @@ def process_scheduled_call(
             builders: list = transform_to_influx_line(
                 forecast_data, output_measurement, fields_list, tag_values
             )
+            influxdb3_local.info(f"[{task_id}] Writing {len(builders)} lines to InfluxDB")
             # Write forecast data to InfluxDB
             max_retries: int = 3
             success, error, retries = write_downsampled_data(
@@ -1222,9 +1291,9 @@ def process_scheduled_call(
                     val_start_time: datetime = end_time - validation_window
                     port_override: int = parse_port_override(args, task_id)
                     notification_path: str = args.get("notification_path", "notify")
-                    influxdb3_auth_token: str | None = os.getenv(
-                        "INFLUXDB3_AUTH_TOKEN"
-                    ) or args.get("influxdb3_auth_token")
+                    influxdb3_auth_token: str = args.get(
+                        "influxdb3_auth_token"
+                    ) or os.getenv("INFLUXDB3_AUTH_TOKEN")
                     if not influxdb3_auth_token:
                         raise Exception(f"[{task_id}] INFLUXDB3_AUTH_TOKEN not found")
 
@@ -1387,10 +1456,12 @@ def process_request(
                      }'
         """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Received forecasting request.")
     run_time: datetime = datetime.now(timezone.utc)
 
     if request_body:
         data: dict = json.loads(request_body)
+        influxdb3_local.info(f"[{task_id}] Request body: {data}")
     else:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"message": f"[{task_id}] Error: No request body provided."}
@@ -1444,6 +1515,8 @@ def process_request(
             data, "start_time", "end_time", task_id
         )
         validation_start_time: datetime = end_time - validation_window
+
+        influxdb3_local.info(f"[{task_id}] Fetching historical data from {start_time} to {validation_start_time}.")
         query: str = generate_query(
             measurement, field, tag_values, start_time, validation_start_time
         )
@@ -1456,6 +1529,7 @@ def process_request(
             return {
                 "message": f"[{task_id}] No data found from {start_time} to {end_time}"
             }
+        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
 
         df: pd.DataFrame = pd.DataFrame(results)
         df["ds"] = pd.to_datetime(df["ds"], unit="ns", utc=True)
@@ -1533,6 +1607,7 @@ def process_request(
                 return {
                     "message": f"[{task_id}] Unable to infer frequency, please provide it manually with the 'inferred_freq' argument"
                 }
+        influxdb3_local.info(f"[{task_id}] Inferred frequency: {inferred_freq}")
 
         try:
             freq_timedelta: timedelta = pd.to_timedelta(
@@ -1596,6 +1671,7 @@ def process_request(
             builders: list = transform_to_influx_line(
                 forecast_data, output_measurement, fields_list, tag_values
             )
+            influxdb3_local.info(f"[{task_id}] Writing {len(builders)} lines to InfluxDB")
 
             # Write forecast data to InfluxDB
             max_retries: int = 3

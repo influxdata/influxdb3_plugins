@@ -35,7 +35,7 @@
         {
             "name": "calculations",
             "example": "avg",
-            "description": "Aggregation functions (e.g., 'avg' or 'field1:avg.field2:sum'). Valid functions: avg, sum, min, max, derivative, median.",
+            "description": "Aggregation functions (e.g., 'avg' or 'field1:avg.field2:sum'). Valid functions: avg, sum, min, max, median, count, stddev, first_value, last_value, var, approx_median.",
             "required": false
         },
         {
@@ -46,8 +46,8 @@
         },
         {
             "name": "excluded_fields",
-            "example": "field1.field2",
-            "description": "Dot-separated field names to exclude from downsampling.",
+            "example": "field1.field2.tag1",
+            "description": "Dot-separated field and tag names to exclude from downsampling results.",
             "required": false
         },
         {
@@ -65,7 +65,7 @@
         {
             "name": "target_database",
             "example": "mydb",
-            "description": "Target database for writing downsampled data. If not provided, uses 'default' database.",
+            "description": "Target database for writing downsampled data. If not provided, uses the trigger's database.",
             "required": false
         },
         {
@@ -197,6 +197,41 @@ def get_aggregatable_fields(
     return field_names
 
 
+def parse_excluded_fields_for_http(
+    influxdb3_local,
+    args: dict,
+    aggregatable_fields: list,
+    tag_names: list,
+    task_id: str,
+) -> list[str]:
+    """
+    Parses excluded_fields for HTTP-based requests, handling both fields and tags.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        args (dict): Dictionary containing the 'excluded_fields' key.
+        aggregatable_fields (list): List of aggregatable field names.
+        tag_names (list): List of tag names.
+        task_id (str): The task ID.
+
+    Returns:
+        list[str]: List of valid field/tag names to exclude.
+    """
+    fields: list | None = args.get("excluded_fields", None)
+    result_fields: list = []
+    if fields is not None:
+        for item in fields:
+            if item in aggregatable_fields:
+                result_fields.append(item)
+            elif item in tag_names:
+                result_fields.append(item)
+            else:
+                influxdb3_local.info(
+                    f"[{task_id}] Field/tag '{item}' is not available in measurement."
+                )
+    return result_fields
+
+
 def parse_fields_for_http(
     influxdb3_local,
     measurement: str,
@@ -207,6 +242,7 @@ def parse_fields_for_http(
 ) -> list[str]:
     """
     Parses fields for HTTP-based downsampling.
+    Only processes field names (not tags).
 
     Args:
         influxdb3_local: InfluxDB client instance.
@@ -222,6 +258,7 @@ def parse_fields_for_http(
     fields: list | None = args.get(key, None)
     result_fields: list = []
     if fields is not None:
+        # Only process aggregatable fields (not tags)
         for field in fields:
             if field not in aggregatable_fields:
                 influxdb3_local.info(
@@ -363,7 +400,7 @@ def parse_tag_values_for_http(
 
 
 def parse_field_aggregations_for_scheduler(
-    influxdb3_local, args: dict, task_id: str
+    influxdb3_local, args: dict, aggregatable_fields: list, excluded_fields: list, task_id: str
 ) -> list[tuple[str, str]]:
     """
     Parses field aggregations for scheduler-based downsampling.
@@ -372,6 +409,8 @@ def parse_field_aggregations_for_scheduler(
         influxdb3_local: InfluxDB client instance.
         args (dict): Dictionary containing 'source_measurement' and 'calculations' keys.
             'calculations' can be a single aggregation (e.g., 'avg') or a dot-separated string of field:aggregation pairs.
+        aggregatable_fields (list): List of aggregatable field names in the measurement.
+        excluded_fields (list): List of field and tag names to exclude from aggregations.
         task_id (str): The task ID.
 
     Returns:
@@ -380,20 +419,10 @@ def parse_field_aggregations_for_scheduler(
     Raises:
         Exception: If no aggregatable fields are found, or if the aggregation format or type is invalid.
     """
-    available_calculations: list = ["avg", "sum", "min", "max", "derivative", "median"]
+    available_calculations: list = ["avg", "sum", "min", "max", "median", "count", "stddev", "first_value", "last_value", "var", "approx_median"]
     pattern: str = r"^([^:.]+:[^:.]+)(\.[^:.]+:[^:.]+)*$"
     measurement: str = args["source_measurement"]
-    aggregatable_fields: list = get_aggregatable_fields(
-        influxdb3_local, measurement, task_id
-    )
-    excluded_fields: list = parse_fields_for_scheduler(
-        influxdb3_local,
-        measurement,
-        "excluded_fields",
-        args,
-        aggregatable_fields,
-        task_id,
-    )
+
     specific_fields: list = parse_fields_for_scheduler(
         influxdb3_local,
         measurement,
@@ -455,7 +484,7 @@ def parse_field_aggregations_for_scheduler(
 
 
 def parse_field_aggregations_for_http(
-    influxdb3_local, data: dict, task_id: str
+    influxdb3_local, data: dict, aggregatable_fields: list, excluded_fields: list, task_id: str
 ) -> list[tuple[str, str]]:
     """
     Parses field aggregations for HTTP-based downsampling.
@@ -464,6 +493,8 @@ def parse_field_aggregations_for_http(
         influxdb3_local: InfluxDB client instance.
         data (dict): Dictionary containing 'source_measurement' and 'calculations' keys.
             'calculations' can be 'avg' or a list of list with 'field' and 'aggregation' (e.g., [['co', 'avg']]).
+        aggregatable_fields (list): List of aggregatable field names in the measurement.
+        excluded_fields (list): List of field and tag names to exclude from aggregations.
         task_id (str): The task ID.
 
     Returns:
@@ -473,18 +504,8 @@ def parse_field_aggregations_for_http(
         Exception: If no aggregatable fields are found, or if the aggregation format or type is invalid.
     """
     measurement: str = data["source_measurement"]
-    aggregatable_fields: list = get_aggregatable_fields(
-        influxdb3_local, measurement, task_id
-    )
     calculations_input: list[list[str, str]] | str = data.get("calculations", "avg")
-    excluded_fields: list = parse_fields_for_http(
-        influxdb3_local,
-        measurement,
-        "excluded_fields",
-        data,
-        aggregatable_fields,
-        task_id,
-    )
+
     specific_fields: list = parse_fields_for_http(
         influxdb3_local,
         measurement,
@@ -493,7 +514,7 @@ def parse_field_aggregations_for_http(
         aggregatable_fields,
         task_id,
     )
-    available_calculations: list = ["avg", "sum", "min", "max", "derivative", "median"]
+    available_calculations: list = ["avg", "sum", "min", "max", "median", "count", "stddev", "first_value", "last_value", "var", "approx_median"]
 
     if specific_fields:
         fields_to_use: list = []
@@ -541,6 +562,51 @@ def parse_field_aggregations_for_http(
     return result
 
 
+def parse_excluded_fields_for_scheduler(
+    influxdb3_local,
+    args: dict,
+    aggregatable_fields: list,
+    tag_names: list,
+    task_id: str,
+) -> list[str]:
+    """
+    Parses excluded_fields for scheduler-based requests, handling both fields and tags.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        args (dict): Dictionary containing the 'excluded_fields' key.
+        aggregatable_fields (list): List of aggregatable field names.
+        tag_names (list): List of tag names.
+        task_id (str): The task ID.
+
+    Returns:
+        list[str]: List of valid field/tag names to exclude.
+    """
+    fields: str | None = args.get("excluded_fields", None)
+    pattern: str = r"^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9][A-Za-z0-9_-]*)*$"
+
+    if fields is None:
+        return []
+
+    if not re.fullmatch(pattern, fields):
+        raise Exception(f"[{task_id}] Invalid excluded_fields format: {fields!r}.")
+
+    requested: list = fields.split(".")
+    valid: list = []
+
+    for item in requested:
+        if item in aggregatable_fields:
+            valid.append(item)
+        elif item in tag_names:
+            valid.append(item)
+        else:
+            influxdb3_local.info(
+                f"[{task_id}] Field/tag '{item}' is not available in measurement."
+            )
+
+    return valid
+
+
 def parse_fields_for_scheduler(
     influxdb3_local,
     measurement: str,
@@ -551,6 +617,7 @@ def parse_fields_for_scheduler(
 ) -> list[str]:
     """
     Parses fields for downsampling in scheduler-based requests.
+    Only processes field names (not tags).
 
     Args:
         influxdb3_local: InfluxDB client instance.
@@ -576,11 +643,12 @@ def parse_fields_for_scheduler(
         return []
 
     if not re.fullmatch(pattern, fields):
-        raise Exception(f"[{task_id}] Invalid specific_fields format: {fields!r}.")
+        raise Exception(f"[{task_id}] Invalid {key} format: {fields!r}.")
 
     requested: list = fields.split(".")
     valid: list = []
 
+    # Only process aggregatable fields (not tags)
     for field in requested:
         if field not in aggregatable_fields:
             influxdb3_local.info(
@@ -809,7 +877,14 @@ def generate_fields_string(
 
     for field in fields_aggregate_list:
         query += ",\n"
-        query += f'\t{field[1]}("{field[0]}") as "{field[0]}_{field[1]}"'
+        aggregation = field[1]
+        field_name = field[0]
+
+        # Add ORDER BY time for first_value and last_value to ensure correct temporal ordering
+        if aggregation in ('first_value', 'last_value'):
+            query += f'\t{aggregation}("{field_name}" ORDER BY time) as "{field_name}_{aggregation}"'
+        else:
+            query += f'\t{aggregation}("{field_name}") as "{field_name}_{aggregation}"'
 
     for tag in tags_list:
         query += f',\n\t"{tag}"'
@@ -827,9 +902,9 @@ def generate_group_by_string(tags_list: list):
     Returns:
         str: SQL GROUP BY clause string including '_time' and tags.
     """
-    group_by_clause: str = f"_time"
+    group_by_clause: str = "_time"
     for tag in tags_list:
-        group_by_clause += f", {tag}"
+        group_by_clause += f', "{tag}"'
     return group_by_clause
 
 
@@ -933,11 +1008,11 @@ def write_downsampled_data(
 
     # Calculate metrics for logging
     record_count: int = len(data)
-    db_name: str = target_database if target_database else "default"
+    db_name: str | None = target_database if target_database else None
     # Log the operation details
     log_data: dict = {
         "records": record_count,
-        "database": db_name,
+        "database": db_name if db_name else "default",
         "measurement": target_measurement,
         "max_retries": max_retries,
     }
@@ -946,7 +1021,10 @@ def write_downsampled_data(
         for tries in range(max_retries):
             try:
                 for row in data:
-                    influxdb3_local.write_to_db(db_name, row)
+                    if db_name:
+                        influxdb3_local.write_to_db(db_name, row)
+                    else:
+                        influxdb3_local.write(row)
                 # Log successful write with metrics
                 success_log: dict = {
                     "records_written": record_count,
@@ -1062,6 +1140,7 @@ def process_scheduled_call(
         Exception: If no args are provided.
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Downsampling task started at {call_time} with args: {args}")
 
     if args is None:
         influxdb3_local.error(f"[{task_id}] No args provided for plugin.")
@@ -1103,15 +1182,31 @@ def process_scheduled_call(
         tag_value_filters: dict | None = parse_tag_values_for_scheduler(
             influxdb3_local, args, source_measurement, task_id
         )
-        tags: list = get_tag_names(influxdb3_local, source_measurement, task_id)
+        # Get metadata once and reuse
+        all_tags: list = get_tag_names(influxdb3_local, source_measurement, task_id)
+        aggregatable_fields: list = get_aggregatable_fields(
+            influxdb3_local, source_measurement, task_id
+        )
+
+        # Parse excluded_fields to filter out both fields and tags
+        excluded_items: list = parse_excluded_fields_for_scheduler(
+            influxdb3_local,
+            args,
+            aggregatable_fields,
+            all_tags,
+            task_id,
+        )
+
+        # Filter tags to exclude excluded tags
+        tags: list = [tag for tag in all_tags if tag not in excluded_items]
 
         if args["use_config_file"]:
             fields: list = parse_field_aggregations_for_http(
-                influxdb3_local, args, task_id
+                influxdb3_local, args, aggregatable_fields, excluded_items, task_id
             )
         else:
             fields: list = parse_field_aggregations_for_scheduler(
-                influxdb3_local, args, task_id
+                influxdb3_local, args, aggregatable_fields, excluded_items, task_id
             )
 
         interval: tuple = parse_time_interval(
@@ -1120,10 +1215,11 @@ def process_scheduled_call(
         max_retries: int = parse_max_retries(args)
         offset: timedelta = parse_offset(args, task_id)
         window: timedelta = parse_window(args, task_id)
-        call_time_: datetime = call_time.replace(tzinfo=timezone.utc)
+        call_time_: datetime = call_time.astimezone(timezone.utc)
 
         real_now: datetime = call_time_ - offset
         real_then: datetime = real_now - window
+        influxdb3_local.info(f"[{task_id}] Querying data from {real_then} to {real_now} with fields: {fields} and tags: {tags}")
 
         query: str = build_downsample_query(
             fields,
@@ -1271,6 +1367,7 @@ def process_request(
         Exception: If no request body is provided.)
     """
     task_id: str = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Downsampling task started")
 
     if request_body:
         data: dict = json.loads(request_body)
@@ -1280,7 +1377,6 @@ def process_request(
         return {"message": f"[{task_id}] Error: No request body provided."}
 
     try:
-        influxdb3_local.info(f"[{task_id}] Starting downsampling process.")
         start_time: float = time.time()
 
         source_measurement, target_measurement = parse_source_and_target_measurement(
@@ -1290,8 +1386,27 @@ def process_request(
         tag_value_filters: dict | None = parse_tag_values_for_http(
             influxdb3_local, data, source_measurement, task_id
         )
-        tags: list = get_tag_names(influxdb3_local, source_measurement, task_id)
-        fields: list = parse_field_aggregations_for_http(influxdb3_local, data, task_id)
+        # Get metadata once and reuse
+        all_tags: list = get_tag_names(influxdb3_local, source_measurement, task_id)
+        aggregatable_fields: list = get_aggregatable_fields(
+            influxdb3_local, source_measurement, task_id
+        )
+
+        # Parse excluded_fields to filter out both fields and tags
+        excluded_items: list = parse_excluded_fields_for_http(
+            influxdb3_local,
+            data,
+            aggregatable_fields,
+            all_tags,
+            task_id,
+        )
+
+        # Filter tags to exclude excluded tags
+        tags: list = [tag for tag in all_tags if tag not in excluded_items]
+
+        fields: list = parse_field_aggregations_for_http(
+            influxdb3_local, data, aggregatable_fields, excluded_items, task_id
+        )
         interval: tuple = parse_time_interval(
             influxdb3_local, data, "interval", task_id
         )
@@ -1332,6 +1447,10 @@ def process_request(
             "days": lambda x: timedelta(days=x),
         }
         batch_delta: timedelta = unit_mapping[unit.lower()](magnitude)
+
+        influxdb3_local.info(
+            f"[{task_id}] Starting downsampling for measurement {source_measurement} with fields: {fields} and tags: {tags} to query")
+
         while cursor < backfill_end:
             batch_count += 1
             batch_end = min(cursor + batch_delta, backfill_end)

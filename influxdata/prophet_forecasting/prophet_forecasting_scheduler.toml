@@ -1,133 +1,149 @@
 # Prophet Forecasting Plugin Scheduler Configuration Template
-# Copy this file to your PLUGIN_DIR and reference it with
-#   --trigger-arguments config_file_path=prophet_forecasting_scheduler.toml
-
+# Copy this file to your PLUGIN_DIR (e.g., /plugins) and reference it with
+#   --trigger-arguments config_file_path=<relative_path>
+# Example: If the file is at /plugins/configs/prophet_forecasting_scheduler.toml, use
+#   config_file_path=configs/prophet_forecasting_scheduler.toml
 
 ########## Required Parameters ##########
 # InfluxDB measurement to query for historical data
-measurement = "temperature"            # e.g., "cpu_load", "temperature"
+# Specify the measurement name (string) from your source InfluxDB database
+measurement = "your_measurement"  # e.g., "cpu_load", "temperature", "home"
 
 # Field within the measurement to forecast
-field = "value"                        # e.g., "value"
+# Specify the field name (string) for forecasting
+field = "your_field"  # e.g., "value", "temp"
 
-# Historical window duration for training data. Format: <number><unit>
-# Units: s, min, h, d, w, m, q, y
-window = "30d"                         # e.g., "7d", "90d"
+# Historical window duration for training data
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks), m (months), q (quarters), y (years)
+window = "your_window"  # e.g., "7d", "90d"
 
-# Future duration to forecast. Format: <number><unit>
-# Units: s, min, h, d, w, m, q, y
-forecast_horizont = "2d"               # e.g., "1h", "7d"
+# Future duration to forecast
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks), m (months), q (quarters), y (years)
+forecast_horizont = "your_forecast_horizont"  # e.g., "1h", "7d"
 
 # Tag filters for querying specific tag values
-# Format: key1:value1.key2:value2
-tag_values = "region:west.device:sensor1"  # e.g., "host:server1.region:eu"
+# Format: {tag_name = tag_value, ...}
+tag_values = { tag1 = "your_tag_value" }  # e.g., { room = "Kitchen" }
 
 # Destination measurement for writing forecast results
-target_measurement = "temperature_forecast"  # e.g., "cpu_forecast"
+# Specify the target measurement name (string)
+target_measurement = "your_target_measurement"  # e.g., "temperature_forecast", "cpu_forecast"
 
-# Mode of operation: "train" or "predict"
-model_mode = "train"                   # "train" trains new model for each trigger; "predict" loads existing or trains if not found and safe for future use
+# Mode of operation
+# Specify "train" to train a new model for each trigger, or "predict" to load existing or train if not found
+model_mode = "your_mode"  # e.g., "train", "predict"
 
 # Unique identifier for model versioning and storage
-unique_suffix = "20250619_v1"          # e.g., "20250701_v2"
-
-
+# Specify a unique string (e.g., date_version)
+unique_suffix = "your_unique_suffix"  # e.g., "20250619_v1", "20250701_v2"
 
 ########## Optional Parameters ##########
-# Prophet style of seasonality: "additive" or "multiplicative"
-# seasonality_mode = "additive"        # default: "additive"
+# Prophet style of seasonality
+# Specify "additive" or "multiplicative"; default is "additive"
+#seasonality_mode = "your_seasonality_mode"  # e.g., "additive", "multiplicative"
 
-# Flexibility of trend changepoints. Float > 0
-# changepoint_prior_scale = "0.05"        # default: 0.05
+# Flexibility of trend changepoints
+# Specify a float > 0; default is 0.05
+#changepoint_prior_scale = 0.05  # e.g., 0.05
 
-# Specific changepoint dates (space-separated, ISO format)
-# changepoints = "2025-01-01 2025-06-01"
+# Specific changepoint dates
+# Specify a list of dates in ISO format (YYYY-MM-DD)
+#changepoints = ["your_date"]  # e.g., ["2025-01-01", "2025-06-01"]
 
-# Custom holiday dates (space-separated, ISO format)
-# holiday_date_list = "2025-01-01 2025-12-25"
+# Custom holiday dates
+# Specify a space-separated list of dates in ISO format (YYYY-MM-DD)
+#holiday_date_list = ["your_holiday_date"]  # e.g., ["2025-01-01", "2025-12-25"]
 
-# Names for custom holidays (dot-separated, matching holiday_date_list)
-# holiday_names = "New Year.Christmas"
+# Names for custom holidays
+# Specify a dot-separated list matching holiday_date_list
+#holiday_names = ["your_holiday_name"]  # e.g., "New Year", "Christmas"
 
-# Built-in holiday country codes (dot-separated, e.g., "US.UK")
-# holiday_country_names = "US.UK"
+# Built-in holiday country codes
+# Specify a dot-separated list (e.g., "US.UK")
+#holiday_country_names = ["your_country_code"]  # e.g., ["US", "UK"]
 
-# Manually specified frequency (e.g., "1D", "1H"); If not provided, frequency is inferred from data.
-# inferred_freq = "1D"
+# Manually specified frequency
+# Specify a string (e.g., "1D", "1H"); if not provided, frequency is inferred from data
+#inferred_freq = "your_frequency"  # e.g., "1s", "1D"
 
-# Duration for validation window (e.g., "3d"); default: "0s"
-# validation_window = "3d"
+# Duration for validation window
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks), m (months), q (quarters), y (years); default: "0s"
+#validation_window = "your_validation_window"  # e.g., "3d", "10s"
 
-# Threshold for Mean Squared Relative Error (float); default: infinite
-# msre_threshold = "0.05"
+# Threshold for Mean Squared Relative Error
+# Specify a float; default is infinite
+#msre_threshold = 0.0  # e.g., 0.05
 
-# InfluxDB database for writing results (optional)
-# target_database = "forecast_db"
+# InfluxDB database for writing results
+# Specify the target database name (string)
+#target_database = "your_target_database"  # e.g., "forecast_db"
 
-# Send alerts if validation fails ("true" or "false"); default: "false", if set, Sender-Specific Settings are required
-# is_sending_alert = "true"
+# Send alerts if validation fails
+# Specify a boolean (true/false); default is "false"; requires Sender-Specific Settings if true
+#is_sending_alert = false  # e.g., true
 
-# Template for notification message on validation failure (will be used if is_sending_alert = "true")
-# Variables: $version, $measurement, $field, $start_time, $end_time, $output_measurement
-# notification_text = "Validation failed for model:$version on measurement:$measurement.$field"
+# Template for notification message on validation failure
+# Use variables: $version, $measurement, $field, $start_time, $end_time, $output_measurement
+# Will be used if is_sending_alert = "true"
+#notification_text = "your_notification_template"  # e.g., "Validation failed for model:$version on measurement:$measurement.$field"
 
-# Notification channels, dot-separated list, e.g., "slack.sms" (will be used if is_sending_alert = "true")
-# senders = "slack"                     # required if is_sending_alert = "true"
+# Notification channels
+# Specify a list of channels (strings); required if is_sending_alert = "true"
+#senders = ["your_channel"]  # e.g., ["slack", "sms"]
 
-# Custom URL path for notification sender plugin; default: "notify"(will be used if is_sending_alert = "true")
-# notification_path = "notify"
+# Custom URL path for notification sender plugin
+# Specify a custom path (string); defaults to "notify" if omitted; used if is_sending_alert = "true"
+#notification_path = "your_notification_path"  # e.g., "notify", "custom/notify"
 
-# InfluxDB API token for notifications (or via INFLUXDB3_AUTH_TOKEN env var)
-# influxdb3_auth_token = "YOUR_API_TOKEN"
+# InfluxDB API token for notifications
+# Specify the token (string); can also be provided via INFLUXDB3_AUTH_TOKEN environment variable
+#influxdb3_auth_token = "your_api_token"  # e.g., "apiv3_AuHk_8LYFHTa1QM..."
 
-# Override InfluxDB port for notifications; default: 8181
-# port_override = 8182
-
-
+# Override InfluxDB port for notifications
+# Specify a port number (integer); defaults to 8181 if omitted
+#port_override = 8181  # e.g., 8183
 
 ########## Sender-Specific Settings ##########
-# For each channel listed in senders, uncomment and configure the following parameters:
+# For each channel listed in senders, uncomment and configure the relevant parameters below:
 
 # --- Slack ---
 # Webhook URL for Slack notifications (required)
-# slack_webhook_url = "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+#slack_webhook_url = "your_slack_webhook_url"  # e.g., "https://hooks.slack.com/services/T06D4..."
 # Optional: Custom headers for Slack webhook (Base64-encoded JSON string)
-# slack_headers = "eyJIb3N0IjogImV4YW1wbGUuY29tIn0="
+#slack_headers = "your_slack_headers"  # e.g., "eyJIb3N0IjogImV4YW1wbGUuY29tIn0="
 
 # --- Discord ---
 # Webhook URL for Discord notifications (required)
-# discord_webhook_url = "https://discord.com/api/webhooks/AAA/BBB"
+#discord_webhook_url = "your_discord_webhook_url"  # e.g., "https://discord.com/api/webhooks/AAA/BBB"
 # Optional: Custom headers for Discord webhook (Base64-encoded JSON string)
-# discord_headers = "eyJDb250ZW50VHlwZSI6ICJhcHBsaWNhdGlvbi9qc29uIn0="
+#discord_headers = "your_discord_headers"  # e.g., "eyJDb250ZW50VHlwZSI6ICJhcHBsaWNhdGlvbi9qc29uIn0="
 
 # --- HTTP ---
 # HTTP endpoint to send notifications (required)
-# http_webhook_url = "https://example.com/webhook"
+#http_webhook_url = "your_http_webhook_url"  # e.g., "https://example.com/webhook"
 # Optional: Custom HTTP headers (Base64-encoded JSON string)
-# http_headers = "eyJhdXRoIjogIkJlYXJlciBZT1VSX1RPS0VOIn0="
+#http_headers = "your_http_headers"  # e.g., "eyJhdXRoIjogIkJlYXJlciBZT1VSX1RPS0VOIn0="
 
 # --- SMS (Twilio) ---
 # Twilio Account SID (required, or via TWILIO_SID env var)
-# twilio_sid = "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+#twilio_sid = "your_twilio_sid"  # e.g., "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 # Twilio Auth Token (required, or via TWILIO_TOKEN env var)
-# twilio_token = "your_auth_token"
+#twilio_token = "your_twilio_token"  # e.g., "your_auth_token"
 # Twilio sender number (required, format: +1234567890)
-# twilio_from_number = "+1234567890"
+# twilio_from_number = "your_twilio_from_number"  # e.g., "+1234567890"
 # Recipient phone number (required, format: +0987654321)
-# twilio_to_number = "+0987654321"
+# twilio_to_number = "your_twilio_to_number"  # e.g., "+0987654321"
 
 # --- WhatsApp (via Twilio) ---
 # WhatsApp sender number (required, format: +1234567890)
-# whatsapp_from_number = "+1234567890"
+#whatsapp_from_number = "your_whatsapp_from_number"  # e.g., "+1234567890"
 # WhatsApp recipient number (required, format: +0987654321)
-# whatsapp_to_number = "+0987654321"
-
-
+#whatsapp_to_number = "your_whatsapp_to_number"  # e.g., "+0987654321"
 
 ###### Example: Create Trigger Using This Config ######
 # influxdb3 create trigger \
-#   --database mydb \
+#   --database your_database_name \
 #   --plugin-filename prophet_forecasting.py \
-#   --trigger-spec "every:1d" \
+#   --trigger-spec "every:your_interval" \
 #   --trigger-arguments config_file_path=prophet_forecasting_scheduler.toml \
-#   prophet_forecast_schedule_trigger
+#   your_trigger_name

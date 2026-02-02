@@ -23,17 +23,17 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 |-------------------|--------|----------|---------------------------------------------------------------------------------------------|
 | `measurement`     | string | required | Measurement to analyze for anomalies                                                        |
 | `field`           | string | required | Numeric field to evaluate                                                                   |
-| `detectors`       | string | required | Dot-separated list of advanced ADTK detectors for different anomaly types                  |
+| `detectors`       | string | required | Dot-separated list of advanced ADTK detectors for different anomaly types                   |
 | `detector_params` | string | required | Base64-encoded JSON parameters for each detector                                            |
 | `window`          | string | required | Data analysis window with flexible scheduling. Format: `<number><unit>` (e.g., "1h", "30m") |
 | `senders`         | string | required | Dot-separated notification channels with multi-channel notification support                 |
 
 ### Advanced parameters
 
-| Parameter                | Type   | Default | Description                                                                                      |
-|--------------------------|--------|---------|--------------------------------------------------------------------------------------------------|
-| `min_consensus`          | number | 1       | Minimum detectors required to agree for consensus-based filtering to reduce false positives     |
-| `min_condition_duration` | string | "0s"    | Minimum duration for configurable anomaly persistence before alerting                           |
+| Parameter                | Type   | Default | Description                                                                                  |
+|--------------------------|--------|---------|----------------------------------------------------------------------------------------------|
+| `min_consensus`          | number | 1       | Minimum detectors required to agree for consensus-based filtering to reduce false positives  |
+| `min_condition_duration` | string | "0s"    | Minimum duration for configurable anomaly persistence before alerting                        |
 
 ### Notification parameters
 
@@ -56,13 +56,13 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 [adtk_anomaly_config_scheduler.toml](adtk_anomaly_config_scheduler.toml)
 
-For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins
-/README.md](/README.md).
+For more information on using TOML configuration files, see the Using TOML Configuration Files section in the [influxdb3_plugins/README.md](/README.md).
 
 ### Supported ADTK detectors
 
 | Detector               | Description                           | Required Parameters      |
 |------------------------|---------------------------------------|--------------------------|
+| `GeneralizedESDTestAD` | Extreme Studentized Deviate test      | `alpha` (optional)       |
 | `InterQuartileRangeAD` | Detects outliers using IQR method     | None                     |
 | `ThresholdAD`          | Detects values above/below thresholds | `high`, `low` (optional) |
 | `QuantileAD`           | Detects outliers based on quantiles   | `low`, `high` (optional) |

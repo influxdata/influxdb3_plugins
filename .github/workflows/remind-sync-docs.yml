@@ -2,13 +2,15 @@ name: Remind to Sync Documentation
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths: 
       - 'influxdata/**/README.md'
 
 permissions:
-  contents: read
-
+  contents: write
+  pull-requests: write
+  issues: write
+  
 jobs:
   remind-sync:
     runs-on: ubuntu-latest
@@ -23,7 +25,7 @@ jobs:
         id: detect-changes
         run: |
           # Get list of changed README files
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep '^influxdata/.*/README\.md$' | head -10)
+          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD | grep '^influxdata/.*/README\.md$')
           
           if [[ -z "$CHANGED_FILES" ]]; then
             echo "No plugin README files changed"
@@ -57,6 +59,7 @@ jobs:
         if: steps.detect-changes.outputs.has_changes == 'true'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.ISSUES_READ_WRITE_TOKEN }}
           script: |
             const changedPlugins = '${{ steps.detect-changes.outputs.changed_plugins }}';
             const commitSha = context.sha;

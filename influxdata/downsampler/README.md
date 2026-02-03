@@ -66,9 +66,9 @@ For more information on using TOML configuration files, see the Using TOML Confi
 
 Each downsampled record includes three additional metadata columns:
 
-- `record_count` — the number of original points compressed into this single downsampled row
-- `time_from` — the minimum timestamp among the original points in the interval  
-- `time_to` — the maximum timestamp among the original points in the interval
+- `record_count`: the number of original points compressed into this single downsampled row
+- `time_from`: the minimum timestamp among the original points in the interval
+- `time_to`: the maximum timestamp among the original points in the interval
 
 ## Installation steps
 

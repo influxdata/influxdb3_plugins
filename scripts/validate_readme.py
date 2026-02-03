@@ -117,6 +117,16 @@ def extract_section_content(content: str, section_heading: str) -> str:
             return content[content_start:].rstrip()
 
 
+def extract_trigger_types(content: str) -> List[str]:
+    """Extract trigger types from the emoji metadata line."""
+    # Match the trigger types between ⚡ and 🏷️
+    match = re.search(r'⚡\s+([\w\-,\s]+)\s+🏷️', content)
+    if match:
+        trigger_str = match.group(1).strip()
+        return [t.strip() for t in trigger_str.split(',')]
+    return []
+
+
 def validate_emoji_metadata(content: str) -> List[str]:
     """Validate the emoji metadata line."""
     errors = []
@@ -161,16 +171,28 @@ def validate_sections(content: str) -> List[str]:
             last_position = position
 
     # Check for parameter documentation (accepts categorized parameter sections)
-    has_parameters = (
-        "### Required parameters" in content
-        or "### Transformation parameters" in content
-        or "### Data selection parameters" in content
-        or "### Optional parameters" in content
-    )
-    if not has_parameters:
-        errors.append(
-            "Missing parameter documentation (should have at least one parameter section)"
+    trigger_types = extract_trigger_types(content)
+    is_pure_http_plugin = trigger_types == ["http"]  # Only HTTP, no scheduled/data-write
+
+    if is_pure_http_plugin:
+        # Pure HTTP plugins should have "Request body parameters" section
+        if "### Request body parameters" not in content:
+            errors.append(
+                "HTTP plugin missing '### Request body parameters' section (document parameters sent in HTTP POST body)"
+            )
+    else:
+        # Non-HTTP or hybrid plugins should have standard parameter sections
+        has_parameters = (
+            "### Required parameters" in content
+            or "### Transformation parameters" in content
+            or "### Data selection parameters" in content
+            or "### Optional parameters" in content
+            or "### Request body parameters" in content  # Also valid for hybrid plugins
         )
+        if not has_parameters:
+            errors.append(
+                "Missing parameter documentation (should have at least one parameter section)"
+            )
 
     # Check for Installation steps (can be standalone OR nested under Software Requirements)
     has_installation = (

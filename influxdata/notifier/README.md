@@ -9,24 +9,24 @@ The Notifier Plugin provides multi-channel notification capabilities for InfluxD
 
 ## Configuration
 
-Plugin parameters may be specified as key-value pairs in the `--trigger-arguments` flag (CLI) or in the `trigger_arguments` field (API) when creating a trigger. Some plugins support TOML configuration files, which can be specified using the plugin's `config_file_path` parameter.
-
-If a plugin supports multiple trigger specifications, some parameters may depend on the trigger specification that you use.
+This HTTP plugin receives all configuration via the request body. No trigger arguments are required.
 
 ### Plugin metadata
 
 This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the [InfluxDB 3 Explorer](https://docs.influxdata.com/influxdb3/explorer/) UI to display and configure the plugin.
 
-### Required parameters
+### Request body parameters
+
+Send these parameters as JSON in the HTTP POST request body:
 
 | Parameter           | Type   | Default  | Description                                 |
 |---------------------|--------|----------|---------------------------------------------|
 | `notification_text` | string | required | Text content of the notification message    |
 | `senders_config`    | object | required | Configuration for each notification channel |
 
-### Sender-specific configuration
+### Sender-specific configuration (in request body)
 
-The `senders_config` parameter accepts channel configurations where keys are sender names and values contain channel-specific settings:
+The `senders_config` object accepts channel configurations where keys are sender names and values contain channel-specific settings:
 
 #### Slack notifications
 

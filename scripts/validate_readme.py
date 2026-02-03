@@ -184,10 +184,12 @@ def validate_sections(content: str) -> List[str]:
         # Non-HTTP or hybrid plugins should have standard parameter sections
         has_parameters = (
             "### Required parameters" in content
+            or "### Scheduled trigger parameters" in content
             or "### Transformation parameters" in content
             or "### Data selection parameters" in content
             or "### Optional parameters" in content
-            or "### Request body parameters" in content  # Also valid for hybrid plugins
+            or "### Request body parameters" in content
+            or "### HTTP request parameters" in content
         )
         if not has_parameters:
             errors.append(

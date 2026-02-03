@@ -23,7 +23,9 @@ If a plugin supports multiple trigger specifications, some parameters may depend
 
 This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the [InfluxDB 3 Explorer](https://docs.influxdata.com/influxdb3/explorer/) UI to display and configure the plugin.
 
-### Required parameters
+### Scheduled trigger parameters
+
+Set these parameters with `--trigger-arguments` when creating a scheduled trigger:
 
 | Parameter            | Type   | Default  | Description                                                       |
 |----------------------|--------|----------|-------------------------------------------------------------------|
@@ -36,7 +38,9 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `model_mode`         | string | required | Operation mode: "train" or "predict"                              |
 | `unique_suffix`      | string | required | Unique model identifier for versioning                            |
 
-### HTTP trigger parameters
+### HTTP request parameters
+
+Send these parameters as JSON in the HTTP POST request body:
 
 | Parameter            | Type   | Default  | Description                                              |
 |----------------------|--------|----------|----------------------------------------------------------|

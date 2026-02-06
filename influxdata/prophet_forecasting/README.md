@@ -97,10 +97,11 @@ For more information on using TOML configuration files, see the Using TOML Confi
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled.
 - **Python packages**:
- 	- `pandas` (for data manipulation)
- 	- `numpy` (for numerical operations)
- 	- `requests` (for HTTP requests)
- 	- `prophet` (for time series forecasting)
+  - `pandas` (for data manipulation)
+  - `numpy` (for numerical operations)
+  - `requests` (for HTTP requests)
+  - `prophet` (for time series forecasting)
+- **Notification Sender Plugin** *(optional)*: Required if using the `senders` parameter. See the [influxdata/notifier plugin](../notifier/README.md).
 
 ### Installation steps
 
@@ -122,6 +123,8 @@ For more information on using TOML configuration files, see the Using TOML Confi
    influxdb3 install package requests
    influxdb3 install package prophet
    ```
+
+3. *(Optional)* For notifications, install the [influxdata/notifier plugin](../notifier/README.md) and create an HTTP trigger for it.
 
 ## Trigger setup
 

@@ -100,29 +100,29 @@ For more information on using TOML configuration files, see the Using TOML Confi
 ## Software Requirements
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled.
-- **Notification Sender Plugin for InfluxDB 3**: Required for sending notifications. See the [influxdata/notifier plugin](../notifier/README.md).
 - **Python packages**:
- 	- `requests` (for notification delivery)
+  - `requests` (for notification delivery)
+- **Notification Sender Plugin** *(optional)*: Required if using the `senders` parameter. See the [influxdata/notifier plugin](../notifier/README.md).
 
 ### Installation steps
 
 1. Start InfluxDB 3 with the Processing Engine enabled (`--plugin-dir /path/to/plugins`):
 
- ```bash
- influxdb3 serve \
-  --node-id node0 \
-  --object-store file \
-  --data-dir ~/.influxdb3 \
-  --plugin-dir ~/.plugins
- ```
+   ```bash
+   influxdb3 serve \
+     --node-id node0 \
+     --object-store file \
+     --data-dir ~/.influxdb3 \
+     --plugin-dir ~/.plugins
+   ```
 
 2. Install required Python packages:
 
- ```bash
- influxdb3 install package requests
- ```
+   ```bash
+   influxdb3 install package requests
+   ```
 
-3. *Optional*: For notifications, install and configure the [influxdata/notifier plugin](../notifier/README.md)
+3. *(Optional)* For notifications, install the [influxdata/notifier plugin](../notifier/README.md) and create an HTTP trigger for it.
 
 ## Schema requirement
 
@@ -253,19 +253,22 @@ This plugin supports using TOML configuration files to specify all plugin argume
  cp mad_anomaly_config_data_writes.toml ~/.plugins/
  ```
 
-3. **Edit the TOML file** to match your requirements:\`\``toml
+3. **Edit the TOML file** to match your requirements:
 
- # Required parameters
+   ```toml
+   # Required parameters
+   measurement = "cpu"
+   mad_thresholds = "temp:2.5:20:5@load:3:10:2m"
+   senders = "slack"
 
- measurement = "cpu" mad_thresholds = "temp:2.5:20:5@load:3:10:2m" senders = "slack"
+   # Notification settings
+   slack_webhook_url = "$SLACK_WEBHOOK_URL"
+   notification_count_text = "Custom alert: $field anomaly detected"
+   ```
 
-# Notification settings
-slack_webhook_url = "$SLACK_WEBHOOK_URL"
-notification_count_text = "Custom alert: $field anomaly detected"
+   Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
-Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
-
- 4. **Create a trigger using the `config_file_path` argument**:
+4. **Create a trigger using the `config_file_path` argument**:
    
    ```bash
    influxdb3 create trigger \

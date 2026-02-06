@@ -117,100 +117,73 @@ influxdb3 enable trigger --database mydb notification_trigger
 
 ## Example usage
 
-### Example 1: Slack notification with data context
-
-Write test data and send a notification to Slack:
-
-```bash
-# Write some test data that might trigger an alert
-influxdb3 write \
-  --database mydb \
-  "system_alerts,host=server1 cpu_usage=95.2,status=\"critical\""
-
-# Send notification via the notifier plugin
-curl -X POST http://localhost:8181/api/v3/engine/notify \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "notification_text": "Alert: High CPU usage detected on server1",
-    "senders_config": {
-      "slack": {
-        "slack_webhook_url": "https://hooks.slack.com/services/..."
-      }
-    }
-  }'
-
-# Query to verify data was written
-influxdb3 query \
-  --database mydb \
-  "SELECT * FROM system_alerts ORDER BY time DESC LIMIT 5"
-```
-
-**Expected output**
-
-Notification sent to Slack channel with message: "Alert: High CPU usage detected on server1"
-
-### Example 2: Slack notification
+### Example 1: Slack notification
 
 Send a notification to Slack:
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/notify \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "notification_text": "Database alert: High CPU usage detected",
+    "notification_text": "Alert: High CPU usage detected on server1",
     "senders_config": {
       "slack": {
-        "slack_webhook_url": "https://hooks.slack.com/services/..."
+        "slack_webhook_url": "'"$SLACK_WEBHOOK_URL"'"
       }
     }
   }'
 ```
 
-### SMS notification
+Set `INFLUXDB3_AUTH_TOKEN` and `SLACK_WEBHOOK_URL` to your credentials.
+
+**Expected output**
+
+Notification sent to Slack channel with message: "Alert: High CPU usage detected on server1"
+
+### Example 2: SMS notification
 
 Send an SMS via Twilio:
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/notify \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "notification_text": "Critical alert: System down",
     "senders_config": {
       "sms": {
-        "twilio_from_number": "+1234567890",
-        "twilio_to_number": "+0987654321"
+        "twilio_from_number": "'"$TWILIO_FROM_NUMBER"'",
+        "twilio_to_number": "'"$TWILIO_TO_NUMBER"'"
       }
     }
   }'
 ```
 
-### Multi-channel notification
+Set `TWILIO_FROM_NUMBER` and `TWILIO_TO_NUMBER` to your phone numbers. Twilio credentials can be set via `TWILIO_SID` and `TWILIO_TOKEN` environment variables.
+
+### Example 3: Multi-channel notification
 
 Send notifications via multiple channels simultaneously:
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/notify \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "notification_text": "Performance warning: Memory usage above threshold",
     "senders_config": {
       "slack": {
-        "slack_webhook_url": "https://hooks.slack.com/services/..."
+        "slack_webhook_url": "'"$SLACK_WEBHOOK_URL"'"
       },
       "discord": {
-        "discord_webhook_url": "https://discord.com/api/webhooks/..."
-      },
-      "whatsapp": {
-        "twilio_from_number": "+1234567890",
-        "twilio_to_number": "+0987654321"
+        "discord_webhook_url": "'"$DISCORD_WEBHOOK_URL"'"
       }
     }
   }'
 ```
+
+Set `SLACK_WEBHOOK_URL` and `DISCORD_WEBHOOK_URL` to your webhook URLs.
 
 ## Code overview
 

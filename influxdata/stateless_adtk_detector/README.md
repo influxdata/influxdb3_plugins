@@ -75,9 +75,10 @@ For more information on using TOML configuration files, see the Using TOML Confi
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled.
 - **Python packages**:
- 	- `adtk` (for anomaly detection)
- 	- `pandas` (for data manipulation)
- 	- `requests` (for HTTP notifications)
+  - `adtk` (for anomaly detection)
+  - `pandas` (for data manipulation)
+  - `requests` (for HTTP notifications)
+- **Notification Sender Plugin** *(optional)*: Required if using the `senders` parameter. See the [influxdata/notifier plugin](../notifier/README.md).
 
 ### Installation steps
 
@@ -98,6 +99,8 @@ For more information on using TOML configuration files, see the Using TOML Confi
    influxdb3 install package adtk
    influxdb3 install package pandas
    ```
+
+3. *(Optional)* For notifications, install the [influxdata/notifier plugin](../notifier/README.md) and create an HTTP trigger for it.
 
 ## Trigger setup
 

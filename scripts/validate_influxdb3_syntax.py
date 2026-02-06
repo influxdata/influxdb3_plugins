@@ -18,6 +18,7 @@ import argparse
 import os
 import re
 import sys
+from typing import Optional
 from pathlib import Path
 from typing import NamedTuple
 
@@ -623,7 +624,7 @@ def find_readme_files(base_dir: Path) -> list[Path]:
     return sorted(readme_files)
 
 
-def find_docs_v2_path(script_dir: Path) -> Path | None:
+def find_docs_v2_path(script_dir: Path) -> Optional[Path]:
     """Try to find the docs-v2 repository path."""
     # Check common relative paths from the plugins repo
     candidates = [
@@ -645,7 +646,7 @@ def find_docs_v2_path(script_dir: Path) -> Path | None:
     return None
 
 
-def find_openapi_path(docs_v2_path: Path = None) -> Path | None:
+def find_openapi_path(docs_v2_path: Path = None) -> Optional[Path]:
     """Try to find the OpenAPI specification file."""
     if docs_v2_path:
         # Check standard location in docs-v2

@@ -139,17 +139,11 @@ influxdb3 create trigger \
   high_freq_metrics
 ```
 
-### Example 4: Write test data and query metrics
+### Query collected metrics
 
-This plugin collects system metrics automatically. Write a test marker and query collected metrics:
+This plugin collects system metrics automatically. Query to view the collected data:
 
 ```bash
-# Write a test marker (optional, for correlation)
-influxdb3 write \
-  --database system_monitoring \
-  "test_marker,host=web-server-01 event=\"metrics_collection_started\""
-
-# Query collected CPU metrics
 influxdb3 query \
   --database system_monitoring \
   "SELECT * FROM system_cpu WHERE time >= now() - interval '5 minutes' LIMIT 5"
@@ -299,12 +293,12 @@ influxdb3 install package psutil
 
 ### Viewing Logs
 
-Logs are stored in the `_internal` database in the `system.processing_engine_logs` table:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table:
 
 ```bash
 influxdb3 query \
-  --database _internal \
-  "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'system_metrics_trigger' ORDER BY time DESC LIMIT 10"
+  --database YOUR_DATABASE \
+  "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'system_metrics_trigger' ORDER BY event_time DESC LIMIT 10"
 ```
 
 ### Verifying Data Collection

@@ -113,9 +113,11 @@ influxdb3 create trigger \
   --database mydb \
   --path "gh:influxdata/state_change/state_change_check_plugin.py" \
   --trigger-spec "every:10m" \
-  --trigger-arguments "measurement=cpu,field_change_count=temp:3.load:2,window=10m,senders=slack,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=cpu,field_change_count=temp:3.load:2,window=10m,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   state_change_scheduler
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ### Data write trigger
 
@@ -126,9 +128,11 @@ influxdb3 create trigger \
   --database mydb \
   --path "gh:influxdata/state_change/state_change_check_plugin.py" \
   --trigger-spec "all_tables" \
-  --trigger-arguments "measurement=cpu,field_thresholds=temp:30:10@status:ok:1h,senders=slack,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=cpu,field_thresholds=temp:30:10@status:ok:1h,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   state_change_datawrite
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ### Enable triggers
 
@@ -144,34 +148,41 @@ influxdb3 enable trigger --database mydb state_change_datawrite
 Monitor field changes over a time window and alert when thresholds are exceeded:
 
 ```bash
-# Write test data with changing values
+# Write test data with changing values (7 writes = 6 changes)
 influxdb3 write \
   --database sensors \
   "temperature,location=office value=22.5"
-
 influxdb3 write \
   --database sensors \
   "temperature,location=office value=25.0"
-
 influxdb3 write \
   --database sensors \
-  "temperature,location=office value=28.5"
+  "temperature,location=office value=22.8"
+influxdb3 write \
+  --database sensors \
+  "temperature,location=office value=26.5"
+influxdb3 write \
+  --database sensors \
+  "temperature,location=office value=23.0"
+influxdb3 write \
+  --database sensors \
+  "temperature,location=office value=27.2"
+influxdb3 write \
+  --database sensors \
+  "temperature,location=office value=24.0"
 
 # Create and enable the trigger
 influxdb3 create trigger \
   --database sensors \
   --path "gh:influxdata/state_change/state_change_check_plugin.py" \
   --trigger-spec "every:15m" \
-  --trigger-arguments "measurement=temperature,field_change_count=value:5,window=1h,senders=slack,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=temperature,field_change_count=value:5,window=1h,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   temp_change_monitor
 
 influxdb3 enable trigger --database sensors temp_change_monitor
-
-# Query to verify data
-influxdb3 query \
-  --database sensors \
-  "SELECT * FROM temperature ORDER BY time DESC LIMIT 5"
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 **Expected output**
 
@@ -186,9 +197,11 @@ influxdb3 create trigger \
   --database sensors \
   --path "gh:influxdata/state_change/state_change_check_plugin.py" \
   --trigger-spec "every:15m" \
-  --trigger-arguments "measurement=temperature,field_change_count=value:5,window=1h,senders=slack,slack_webhook_url=https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX,notification_text=Temperature sensor $field changed $changes times in $window for tags $tags" \
+  --trigger-arguments "measurement=temperature,field_change_count=value:5,window=1h,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL,notification_text=Temperature sensor $field changed $changes times in $window for tags $tags" \
   temp_change_monitor
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ### Real-time threshold detection
 
@@ -199,9 +212,11 @@ influxdb3 create trigger \
   --database monitoring \
   --path "gh:influxdata/state_change/state_change_check_plugin.py" \
   --trigger-spec "all_tables" \
-  --trigger-arguments "measurement=system_metrics,field_thresholds=cpu_usage:80:5@memory_usage:90:10min,senders=discord,discord_webhook_url=https://discord.com/api/webhooks/..." \
+  --trigger-arguments "measurement=system_metrics,field_thresholds=cpu_usage:80:5@memory_usage:90:10min,senders=discord,discord_webhook_url=$DISCORD_WEBHOOK_URL" \
   system_threshold_monitor
 ```
+
+Set `DISCORD_WEBHOOK_URL` to your Discord incoming webhook URL.
 
 ### Multi-condition monitoring
 
@@ -212,9 +227,11 @@ influxdb3 create trigger \
   --database application \
   --path "gh:influxdata/state_change/state_change_check_plugin.py" \
   --trigger-spec "all_tables" \
-  --trigger-arguments "measurement=app_health,field_thresholds=error_rate:0.05:3@response_time:500:30s@status:down:1,senders=slack.sms,slack_webhook_url=https://hooks.slack.com/services/...,twilio_from_number=+1234567890,twilio_to_number=+0987654321" \
+  --trigger-arguments "measurement=app_health,field_thresholds=error_rate:0.05:3@response_time:500:30s@status:down:1,senders=slack.sms,slack_webhook_url=$SLACK_WEBHOOK_URL,twilio_from_number=+1234567890,twilio_to_number=+0987654321" \
   app_health_monitor
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ## Code overview
 
@@ -226,10 +243,10 @@ influxdb3 create trigger \
 
 ### Logging
 
-Logs are stored in the `_internal` database in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'state_change_scheduler'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'state_change_scheduler'"
 ```
 
 ### Main functions

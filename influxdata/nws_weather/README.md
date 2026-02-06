@@ -108,27 +108,7 @@ influxdb3 query \
  KSFO       | 18.3          | 65.0                      | 2025-11-26T10:00:00Z
  KORD       | 12.2          | 68.0                      | 2025-11-26T10:00:00Z
 
-### Example 2: Write correlation marker and query
-
-This plugin fetches external data, but you can write correlation markers:
-
-```bash
-# Write a correlation marker for analysis
-influxdb3 write \
-  --database weather_demo \
-  "collection_markers,plugin=nws_weather event=\"collection_started\""
-
-# Query weather data collected by the plugin
-influxdb3 query \
-  --database weather_demo \
-  "SELECT station_id, temperature_c, time FROM weather_observations ORDER BY time DESC LIMIT 5"
-```
-
-**Expected output**
-
-Weather observations are collected from NWS API and stored automatically by the plugin.
-
-### Example 3: Custom measurement name and user agent
+### Example 2: Custom measurement name and user agent
 
 ```bash
 # Create trigger with custom configuration
@@ -312,10 +292,10 @@ ORDER BY time DESC;
 
 ### Logging
 
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'nws_weather_trigger'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'nws_weather_trigger'"
 ```
 
 ### Main functions
@@ -344,7 +324,7 @@ Key operations:
 influxdb3 show summary --database weather_demo --token YOUR_TOKEN
 
 # Check plugin logs
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE message LIKE '%NWS%' ORDER BY time DESC LIMIT 10"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%NWS%' ORDER BY event_time DESC LIMIT 10"
 
 # Verify network connectivity
 curl -H "User-Agent: test" https://api.weather.gov/stations/KSEA/observations/latest

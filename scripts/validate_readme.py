@@ -233,41 +233,84 @@ def validate_parameter_tables(content: str) -> List[str]:
     return errors
 
 
-def validate_examples(content: str) -> List[str]:
-    """Validate code examples and expected output."""
+def validate_examples(content: str) -> Tuple[List[str], List[str]]:
+    """
+    Validate code examples and expected output.
+
+    Returns:
+        Tuple of (errors, warnings)
+    """
     errors = []
+    warnings = []
 
     # Check for bash code examples
     bash_examples = re.findall(r"```bash(.*?)```", content, re.DOTALL)
     if len(bash_examples) < MINIMUM_BASH_EXAMPLES:
-        errors.append(
-            f"Should have at least {MINIMUM_BASH_EXAMPLES} bash code examples (found {len(bash_examples)})"
+        warnings.append(
+            f"Consider adding more bash code examples (found {len(bash_examples)}, recommend at least {MINIMUM_BASH_EXAMPLES})"
         )
 
     # Check for influxdb3 commands in examples
     has_create_trigger = any("influxdb3 create trigger" in ex for ex in bash_examples)
-    has_write_data = any("influxdb3 write" in ex for ex in bash_examples)
     has_query = any("influxdb3 query" in ex for ex in bash_examples)
 
     if not has_create_trigger:
         errors.append("Examples should include 'influxdb3 create trigger' command")
-    if not has_write_data:
-        errors.append("Examples should include 'influxdb3 write' command for test data")
     if not has_query:
-        errors.append(
-            "Examples should include 'influxdb3 query' command to verify results"
+        warnings.append(
+            "Consider adding 'influxdb3 query' command to show results"
         )
+
+    # Check for 'influxdb3 write' - only warn, and skip for HTTP-only plugins
+    # HTTP plugins receive data via request body, not writes
+    trigger_types = extract_trigger_types(content)
+    is_http_only = trigger_types == ["http"]
+
+    if not is_http_only:
+        has_write_data = any("influxdb3 write" in ex for ex in bash_examples)
+        if not has_write_data:
+            # This is a warning, not an error - some plugins generate their own data
+            # (e.g., system_metrics collects via psutil, nws_weather fetches from API)
+            warnings.append(
+                "Consider adding 'influxdb3 write' command for test data (skip if plugin generates its own data)"
+            )
 
     # Check for expected output
     expected_output_count = content.count("### Expected output") + content.count(
         "**Expected output"
     )
     if expected_output_count < MINIMUM_EXPECTED_OUTPUT_SECTIONS:
-        errors.append(
-            f"Should include at least {MINIMUM_EXPECTED_OUTPUT_SECTIONS} 'Expected output' section in examples"
+        warnings.append(
+            "Consider adding 'Expected output' section to show what users should see"
         )
 
-    return errors
+    return errors, warnings
+
+
+def validate_log_references(content: str) -> List[str]:
+    """Check for incorrect log query patterns."""
+    warnings = []
+
+    # Check for _internal database references in log queries
+    if re.search(r'--database\s+_internal', content):
+        warnings.append(
+            "Log queries should use the trigger's database"
+        )
+
+    # Check for incorrect column names specifically in processing_engine_logs queries
+    log_query_pattern = r'processing_engine_logs[^`]*ORDER BY time(?!\w)'
+    if re.search(log_query_pattern, content, re.DOTALL):
+        warnings.append(
+            "Log queries should use 'ORDER BY event_time'"
+        )
+
+    log_message_pattern = r'processing_engine_logs[^`]*message\s+LIKE'
+    if re.search(log_message_pattern, content, re.DOTALL | re.IGNORECASE):
+        warnings.append(
+            "Log queries should use 'log_text' column"
+        )
+
+    return warnings
 
 
 def validate_links(content: str, plugin_path: Path) -> List[str]:
@@ -436,10 +479,18 @@ def validate_readme(readme_path: Path) -> Tuple[List[str], List[str]]:
     errors.extend(validate_emoji_metadata(content))
     errors.extend(validate_sections(content))
     errors.extend(validate_parameter_tables(content))
-    errors.extend(validate_examples(content))
+
+    # validate_examples returns (errors, warnings)
+    example_errors, example_warnings = validate_examples(content)
+    errors.extend(example_errors)
+    warnings.extend(example_warnings)
+
     errors.extend(validate_links(content, readme_path))
     errors.extend(validate_troubleshooting(content))
     errors.extend(validate_code_overview(content))
+
+    # Check for log query issues (warnings only)
+    warnings.extend(validate_log_references(content))
 
     # Check for optional but recommended sections (suppress warnings for sections that exist in different forms)
     for section in OPTIONAL_SECTIONS:

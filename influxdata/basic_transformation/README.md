@@ -254,10 +254,10 @@ This plugin supports using TOML configuration files to specify all plugin argume
 
 ### Logging
 
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
 ```
 
 Log columns:
@@ -385,7 +385,7 @@ chmod +x ~/.plugins/basic_transformation.py
 
    ```bash
    influxdb3 query \
-     --database _internal \
+     --database YOUR_DATABASE \
      "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
    ```
 

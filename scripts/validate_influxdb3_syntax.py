@@ -628,7 +628,6 @@ def find_docs_v2_path(script_dir: Path) -> Path | None:
     # Check common relative paths from the plugins repo
     candidates = [
         script_dir.parent.parent / "docs-v2",
-        script_dir.parent.parent / "docs-v2-fix-influx3-plugins-workflow",
         script_dir.parent.parent.parent / "docs-v2",
     ]
 

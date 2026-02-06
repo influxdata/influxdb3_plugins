@@ -110,9 +110,11 @@ influxdb3 create trigger \
   --database mydb \
   --path "gh:influxdata/stateless_adtk_detector/adtk_anomaly_detection_plugin.py" \
   --trigger-spec "every:10m" \
-  --trigger-arguments "measurement=cpu,field=usage,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9LCAiTGV2ZWxTaGlmdEFKIjogeyJ3aW5kb3ciOiA1fX0=,window=10m,senders=slack,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=cpu,field=usage,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9LCAiTGV2ZWxTaGlmdEFKIjogeyJ3aW5kb3ciOiA1fX0=,window=10m,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   anomaly_detector
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ### Enable trigger
 
@@ -122,37 +124,9 @@ influxdb3 enable trigger --database mydb anomaly_detector
 
 ## Example usage
 
-### Example 1: Basic anomaly detection
+### Example 1: Quantile-based detection
 
-Detect outliers using quantile-based detection:
-
-```bash
-# Write test data with normal and anomalous values
-influxdb3 write \
-  --database sensors \
-  "temperature,location=warehouse value=22.0"
-
-influxdb3 write \
-  --database sensors \
-  "temperature,location=warehouse value=23.1"
-
-influxdb3 write \
-  --database sensors \
-  "temperature,location=warehouse value=85.5"  # Anomaly
-
-# Query to verify data
-influxdb3 query \
-  --database sensors \
-  "SELECT * FROM temperature ORDER BY time DESC LIMIT 5"
-```
-
-**Expected output**
-
-When an anomaly is detected, a notification is sent: "Anomaly detected in temperature.value using QuantileAD. Tags: location=warehouse"
-
-### Example 2: Quantile-based detection
-
-Detect outliers using quantile-based detection:
+Detect outliers using quantile-based detection. This plugin analyzes existing time series data and sends notifications when anomalies are detected.
 
 ```bash
 # Base64 encode detector parameters: {"QuantileAD": {"low": 0.05, "high": 0.95}}
@@ -162,11 +136,13 @@ influxdb3 create trigger \
   --database sensors \
   --path "gh:influxdata/stateless_adtk_detector/adtk_anomaly_detection_plugin.py" \
   --trigger-spec "every:5m" \
-  --trigger-arguments "measurement=temperature,field=value,detectors=QuantileAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9fQ==,window=1h,senders=slack,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=temperature,field=value,detectors=QuantileAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9fQ==,window=1h,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   temp_anomaly_detector
 ```
 
-### Multi-detector consensus
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
+
+### Example 2: Multi-detector consensus
 
 Use multiple detectors with consensus requirement:
 
@@ -178,9 +154,11 @@ influxdb3 create trigger \
   --database monitoring \
   --path "gh:influxdata/stateless_adtk_detector/adtk_anomaly_detection_plugin.py" \
   --trigger-spec "every:15m" \
-  --trigger-arguments "measurement=cpu_metrics,field=utilization,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFEIjogeyJsb3ciOiAwLjEsICJoaWdoIjogMC45fSwgIkxldmVsU2hpZnRBRCI6IHsid2luZG93IjogMTB9fQ==,min_consensus=2,window=30m,senders=discord,discord_webhook_url=https://discord.com/api/webhooks/..." \
+  --trigger-arguments "measurement=cpu_metrics,field=utilization,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFEIjogeyJsb3ciOiAwLjEsICJoaWdoIjogMC45fSwgIkxldmVsU2hpZnRBRCI6IHsid2luZG93IjogMTB9fQ==,min_consensus=2,window=30m,senders=discord,discord_webhook_url=$DISCORD_WEBHOOK_URL" \
   cpu_consensus_detector
 ```
+
+Set `DISCORD_WEBHOOK_URL` to your Discord incoming webhook URL.
 
 ### Volatility shift detection
 
@@ -208,10 +186,10 @@ influxdb3 create trigger \
 
 ### Logging
 
-Logs are stored in the `_internal` database in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'anomaly_detector'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'anomaly_detector'"
 ```
 
 ### Main functions

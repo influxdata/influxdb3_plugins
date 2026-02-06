@@ -110,9 +110,11 @@ influxdb3 create trigger \
   --database mydb \
   --path "gh:influxdata/threshold_deadman_checks/threshold_deadman_checks_plugin.py" \
   --trigger-spec "every:10m" \
-  --trigger-arguments "measurement=cpu,senders=slack,field_aggregation_values=temp:avg@>=30-ERROR,window=10m,trigger_count=3,deadman_check=true,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=cpu,senders=slack,field_aggregation_values=temp:avg@>=30-ERROR,window=10m,trigger_count=3,deadman_check=true,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   threshold_scheduler
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ### Data write trigger
 
@@ -123,9 +125,11 @@ influxdb3 create trigger \
   --database mydb \
   --path "gh:influxdata/threshold_deadman_checks/threshold_deadman_checks_plugin.py" \
   --trigger-spec "all_tables" \
-  --trigger-arguments "measurement=cpu,field_conditions=temp>30-WARN:status==ok-INFO,senders=slack,trigger_count=2,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=cpu,field_conditions=temp>30-WARN:status==ok-INFO,senders=slack,trigger_count=2,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   threshold_datawrite
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ### Enable triggers
 
@@ -155,7 +159,7 @@ influxdb3 create trigger \
   --database sensors \
   --path "gh:influxdata/threshold_deadman_checks/threshold_deadman_checks_plugin.py" \
   --trigger-spec "every:5m" \
-  --trigger-arguments "measurement=heartbeat,senders=slack,window=5m,deadman_check=true,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=heartbeat,senders=slack,window=5m,deadman_check=true,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   heartbeat_monitor
 
 influxdb3 enable trigger --database sensors heartbeat_monitor
@@ -165,6 +169,8 @@ influxdb3 query \
   --database sensors \
   "SELECT * FROM heartbeat ORDER BY time DESC LIMIT 5"
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 **Expected output**
 
@@ -192,9 +198,11 @@ influxdb3 create trigger \
   --database monitoring \
   --path "gh:influxdata/threshold_deadman_checks/threshold_deadman_checks_plugin.py" \
   --trigger-spec "every:5m" \
-  --trigger-arguments "measurement=system_metrics,senders=slack.discord,field_aggregation_values='cpu_usage:avg@>=80-WARN cpu_usage:avg@>=95-ERROR memory_usage:max@>=90-WARN',window=5m,interval=1min,trigger_count=3,slack_webhook_url=https://hooks.slack.com/services/...,discord_webhook_url=https://discord.com/api/webhooks/..." \
+  --trigger-arguments "measurement=system_metrics,senders=slack.discord,field_aggregation_values='cpu_usage:avg@>=80-WARN cpu_usage:avg@>=95-ERROR memory_usage:max@>=90-WARN',window=5m,interval=1min,trigger_count=3,slack_webhook_url=$SLACK_WEBHOOK_URL,discord_webhook_url=$DISCORD_WEBHOOK_URL" \
   system_threshold_monitor
 ```
+
+Set `SLACK_WEBHOOK_URL` and `DISCORD_WEBHOOK_URL` to your webhook URLs.
 
 ### Real-time field condition monitoring
 
@@ -205,9 +213,11 @@ influxdb3 create trigger \
   --database applications \
   --path "gh:influxdata/threshold_deadman_checks/threshold_deadman_checks_plugin.py" \
   --trigger-spec "all_tables" \
-  --trigger-arguments "measurement=response_times,field_conditions=latency>500-WARN:latency>1000-ERROR:error_rate>0.05-CRITICAL,senders=http,trigger_count=1,http_webhook_url=https://alertmanager.example.com/webhook,notification_text=[\$level] Application alert: \$field \$op_sym \$compare_val (actual: \$actual)" \
+  --trigger-arguments "measurement=response_times,field_conditions=latency>500-WARN:latency>1000-ERROR:error_rate>0.05-CRITICAL,senders=http,trigger_count=1,http_webhook_url=$HTTP_WEBHOOK_URL,notification_text=[\$level] Application alert: \$field \$op_sym \$compare_val (actual: \$actual)" \
   app_performance_monitor
 ```
+
+Set `HTTP_WEBHOOK_URL` to your HTTP webhook endpoint.
 
 ### Combined monitoring
 
@@ -233,10 +243,10 @@ influxdb3 create trigger \
 
 ### Logging
 
-Logs are stored in the `_internal` database in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'threshold_scheduler'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'threshold_scheduler'"
 ```
 
 ### Main functions

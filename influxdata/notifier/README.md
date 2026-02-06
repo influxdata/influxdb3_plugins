@@ -220,10 +220,10 @@ curl -X POST http://localhost:8181/api/v3/engine/notify \
 
 ### Logging
 
-Logs are stored in the `_internal` database in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'notification_trigger'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'notification_trigger'"
 ```
 
 ### Main functions
@@ -269,7 +269,7 @@ export TWILIO_TOKEN=your_auth_token
 Check processing logs in the InfluxDB system tables:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE message LIKE '%notifier%' ORDER BY time DESC LIMIT 10"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%notifier%' ORDER BY event_time DESC LIMIT 10"
 ```
 
 ## Questions/Comments

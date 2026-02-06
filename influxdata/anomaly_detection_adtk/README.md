@@ -163,10 +163,10 @@ influxdb3 create trigger \
 
 ### Logging
 
-Logs are stored in the `_internal` database in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'anomaly_detector'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'anomaly_detector'"
 ```
 
 ### Main functions
@@ -222,7 +222,7 @@ influxdb3 install package scikit-learn
 
 3. **Review plugin logs**:
    ```bash
-   influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'anomaly_detector' ORDER BY time DESC LIMIT 10"
+   influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'anomaly_detector' ORDER BY event_time DESC LIMIT 10"
    ```
 
 ## Questions/Comments

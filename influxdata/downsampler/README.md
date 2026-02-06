@@ -210,10 +210,10 @@ curl -X POST http://localhost:8181/api/v3/engine/downsample \
 
 ### Logging
 
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
 ```
 
 Log columns:
@@ -306,7 +306,7 @@ influxdb3 list triggers --database mydb
 1. **Check execution logs** with task ID filtering:
 
    ```bash
-   influxdb3 query --database _internal \
+   influxdb3 query --database YOUR_DATABASE \
      "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%task_id%' ORDER BY event_time DESC LIMIT 10"
    ```
 

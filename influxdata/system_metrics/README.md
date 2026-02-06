@@ -141,7 +141,7 @@ influxdb3 create trigger \
 
 ### Query collected metrics
 
-This plugin collects system metrics automatically. Query to view the collected data:
+This plugin collects system metrics automatically. After the trigger runs, query to view the collected data:
 
 ```bash
 influxdb3 query \
@@ -182,28 +182,6 @@ def process_scheduled_call(influxdb3_local, call_time, args):
         collect_memory_metrics(influxdb3_local, config['hostname'])
     
     # ... additional metric collections
-```
-
-#### `collect_cpu_metrics()`
-
-Collects CPU utilization and performance metrics:
-
-```python
-def collect_cpu_metrics(influxdb3_local, hostname):
-    # Get overall CPU stats
-    cpu_percent = psutil.cpu_percent(interval=1, percpu=False)
-    cpu_times = psutil.cpu_times()
-    
-    # Build and write CPU metrics
-    line = LineBuilder("system_cpu")
-        .tag("host", hostname)
-        .tag("cpu", "total")
-        .float64_field("user", cpu_times.user)
-        .float64_field("system", cpu_times.system)
-        .float64_field("idle", cpu_times.idle)
-        .time_ns(time.time_ns())
-    
-    influxdb3_local.write(line)
 ```
 
 ### Measurements and Fields

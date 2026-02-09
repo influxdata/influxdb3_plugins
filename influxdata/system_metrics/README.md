@@ -16,7 +16,7 @@ If a plugin supports multiple trigger specifications, some parameters may depend
 
 This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the [InfluxDB 3 Explorer](https://docs.influxdata.com/influxdb3/explorer/) UI to display and configure the plugin.
 
-### System monitoring parameters
+### Optional parameters
 
 | Parameter         | Type    | Default     | Description                                                                    |
 |-------------------|---------|-------------|--------------------------------------------------------------------------------|
@@ -26,6 +26,8 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `include_disk`    | boolean | `true`      | Include disk metrics collection (partition usage, I/O statistics, performance) |
 | `include_network` | boolean | `true`      | Include network metrics collection (interface statistics and error counts)     |
 | `max_retries`     | integer | `3`         | Maximum retry attempts on failure with graceful error handling                 |
+
+*Note: This plugin has no required parameters. All parameters have sensible defaults.*
 
 ### TOML configuration
 
@@ -65,14 +67,14 @@ For more information on using TOML configuration files, see the Using TOML Confi
    influxdb3 install package psutil
    ```
 
-## Trigger Setup
+## Trigger setup
 
 ### Basic Scheduled Trigger
 
 ```bash
 influxdb3 create trigger \
   --database system_monitoring \
-  --plugin-filename system_metrics.py \
+  --path "gh:influxdata/system_metrics/system_metrics.py" \
   --trigger-spec "every:30s" \
   system_metrics_trigger
 ```
@@ -82,7 +84,7 @@ influxdb3 create trigger \
 ```bash
 influxdb3 create trigger \
   --database system_monitoring \
-  --plugin-filename system_metrics.py \
+  --path "gh:influxdata/system_metrics/system_metrics.py" \
   --trigger-spec "every:1m" \
   --trigger-arguments config_file_path=system_metrics_config_scheduler.toml \
   system_metrics_config_trigger
@@ -93,13 +95,13 @@ influxdb3 create trigger \
 ```bash
 influxdb3 create trigger \
   --database system_monitoring \
-  --plugin-filename system_metrics.py \
+  --path "gh:influxdata/system_metrics/system_metrics.py" \
   --trigger-spec "every:30s" \
   --trigger-arguments hostname=web-server-01,include_disk=false,max_retries=5 \
   system_metrics_custom_trigger
 ```
 
-## Example Usage
+## Example usage
 
 ### Monitor Web Server Performance
 
@@ -107,7 +109,7 @@ influxdb3 create trigger \
 # Create trigger for web server monitoring every 15 seconds
 influxdb3 create trigger \
   --database web_monitoring \
-  --plugin-filename system_metrics.py \
+  --path "gh:influxdata/system_metrics/system_metrics.py" \
   --trigger-spec "every:15s" \
   --trigger-arguments hostname=web-server-01,include_network=true \
   web_server_metrics
@@ -119,7 +121,7 @@ influxdb3 create trigger \
 # Focus on CPU and disk metrics for database server
 influxdb3 create trigger \
   --database db_monitoring \
-  --plugin-filename system_metrics.py \
+  --path "gh:influxdata/system_metrics/system_metrics.py" \
   --trigger-spec "every:30s" \
   --trigger-arguments hostname=db-primary,include_disk=true,include_cpu=true,include_network=false \
   database_metrics
@@ -131,15 +133,15 @@ influxdb3 create trigger \
 # Collect all metrics every 10 seconds with higher retry tolerance
 influxdb3 create trigger \
   --database system_monitoring \
-  --plugin-filename system_metrics.py \
+  --path "gh:influxdata/system_metrics/system_metrics.py" \
   --trigger-spec "every:10s" \
   --trigger-arguments hostname=critical-server,max_retries=10 \
   high_freq_metrics
 ```
 
-### Expected Output
+### Query collected metrics
 
-After creating a trigger, you can query the collected metrics:
+This plugin collects system metrics automatically. After the trigger runs, query to view the collected data:
 
 ```bash
 influxdb3 query \
@@ -147,7 +149,7 @@ influxdb3 query \
   "SELECT * FROM system_cpu WHERE time >= now() - interval '5 minutes' LIMIT 5"
 ```
 
-#### Sample Output
+**Expected output**
 
  +------+--------+-------+--------+------+--------+-------+--------+-------+-------+------------+------------------+
  | host | cpu    | user  | system | idle | iowait | nice  | irq    | load1 | load5 | load15     | time             |
@@ -159,7 +161,7 @@ influxdb3 query \
  | srv1 | total  | 12.9  | 5.4    | 80.6 | 0.9    | 0.0   | 0.2    | 0.86  | 0.92  | 0.88       | 2024-01-15 10:04 |
  +------+--------+-------+--------+------+--------+-------+--------+-------+-------+------------+------------------+
 
-## Code Overview
+## Code overview
 
 ### Main Functions
 
@@ -180,28 +182,6 @@ def process_scheduled_call(influxdb3_local, call_time, args):
         collect_memory_metrics(influxdb3_local, config['hostname'])
     
     # ... additional metric collections
-```
-
-#### `collect_cpu_metrics()`
-
-Collects CPU utilization and performance metrics:
-
-```python
-def collect_cpu_metrics(influxdb3_local, hostname):
-    # Get overall CPU stats
-    cpu_percent = psutil.cpu_percent(interval=1, percpu=False)
-    cpu_times = psutil.cpu_times()
-    
-    # Build and write CPU metrics
-    line = LineBuilder("system_cpu")
-        .tag("host", hostname)
-        .tag("cpu", "total")
-        .float64_field("user", cpu_times.user)
-        .float64_field("system", cpu_times.system)
-        .float64_field("idle", cpu_times.idle)
-        .time_ns(time.time_ns())
-    
-    influxdb3_local.write(line)
 ```
 
 ### Measurements and Fields
@@ -271,19 +251,13 @@ Network interface statistics:
 
 ## Troubleshooting
 
-### Common Issues
+### Common issues
 
-#### Permission Errors
+#### Issue: Permission errors for disk I/O metrics
 
-Some disk I/O metrics may require elevated permissions:
+**Solution**: The plugin will continue collecting other metrics even if some require elevated permissions. Run InfluxDB with appropriate permissions if disk I/O metrics are required.
 
- ERROR: [Permission denied] Unable to access disk I/O statistics
-
-**Solution**: The plugin will continue collecting other metrics even if some require elevated permissions.
-
-#### Missing psutil Library
-
- ERROR: No module named 'psutil'
+#### Issue: Missing psutil library
 
 **Solution**: Install the psutil package:
 
@@ -291,22 +265,18 @@ Some disk I/O metrics may require elevated permissions:
 influxdb3 install package psutil
 ```
 
-#### High CPU Usage
+#### Issue: High CPU usage from plugin
 
-If the plugin causes high CPU usage, consider:
-
-- Increasing the trigger interval (e.g., from `every:10s` to `every:30s`)
-- Disabling unnecessary metric types
-- Reducing the number of disk partitions monitored
+**Solution**: Increase the trigger interval (for example, from `every:10s` to `every:30s`). Disable unnecessary metric types. Reduce the number of disk partitions monitored.
 
 ### Viewing Logs
 
-Logs are stored in the `_internal` database in the `system.processing_engine_logs` table:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table:
 
 ```bash
 influxdb3 query \
-  --database _internal \
-  "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'system_metrics_trigger' ORDER BY time DESC LIMIT 10"
+  --database YOUR_DATABASE \
+  "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'system_metrics_trigger' ORDER BY event_time DESC LIMIT 10"
 ```
 
 ### Verifying Data Collection

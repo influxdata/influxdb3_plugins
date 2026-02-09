@@ -134,11 +134,13 @@ Run forecast error evaluation periodically:
 ```bash
 influxdb3 create trigger \
   --database weather_forecasts \
-  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --path "gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py" \
   --trigger-spec "every:30m" \
-  --trigger-arguments 'forecast_measurement=temperature_forecast,actual_measurement=temperature_actual,forecast_field=predicted_temp,actual_field=temp,error_metric=rmse,error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0",window=1h,senders=slack,slack_webhook_url="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"' \
+  --trigger-arguments 'forecast_measurement=temperature_forecast,actual_measurement=temperature_actual,forecast_field=predicted_temp,actual_field=temp,error_metric=rmse,error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0",window=1h,senders=slack,slack_webhook_url="$SLACK_WEBHOOK_URL"' \
   forecast_validation
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ## Example usage
 
@@ -150,9 +152,9 @@ Validate temperature forecast accuracy and send Slack notifications:
 # Create the trigger
 influxdb3 create trigger \
   --database weather_db \
-  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --path "gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py" \
   --trigger-spec "every:15m" \
-  --trigger-arguments 'forecast_measurement=temp_forecast,actual_measurement=temp_actual,forecast_field=predicted,actual_field=temperature,error_metric=rmse,error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0":CRITICAL-"3.0",window=30m,senders=slack,slack_webhook_url="https://hooks.slack.com/services/YOUR/WEBHOOK/URL",min_condition_duration=10m' \
+  --trigger-arguments 'forecast_measurement=temp_forecast,actual_measurement=temp_actual,forecast_field=predicted,actual_field=temperature,error_metric=rmse,error_thresholds=INFO-"0.5":WARN-"1.0":ERROR-"2.0":CRITICAL-"3.0",window=30m,senders=slack,slack_webhook_url="$SLACK_WEBHOOK_URL",min_condition_duration=10m' \
   temp_forecast_check
 
 # Write forecast data
@@ -167,16 +169,18 @@ influxdb3 write \
 
 # Check logs after trigger runs
 influxdb3 query \
-  --database _internal \
+  --database YOUR_DATABASE \
   "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'temp_forecast_check'"
 ```
 
-### Expected behavior
+**Expected output**
 
 - Plugin computes RMSE between forecast and actual values
 - If RMSE > 0.5, sends INFO-level notification
 - If RMSE > 1.0, sends WARN-level notification
 - Only triggers if condition persists for 10+ minutes (debounce)
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 **Notification example:**
 
@@ -190,11 +194,13 @@ Monitor multiple forecast metrics with different notification channels:
 # Create trigger with Discord and HTTP notifications
 influxdb3 create trigger \
   --database analytics \
-  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --path "gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py" \
   --trigger-spec "every:1h" \
-  --trigger-arguments 'forecast_measurement=sales_forecast,actual_measurement=sales_actual,forecast_field=predicted_sales,actual_field=sales_amount,error_metric=mae,error_thresholds=WARN-"1000":ERROR-"5000":CRITICAL-"10000",window=6h,senders=discord.http,discord_webhook_url="https://discord.com/api/webhooks/YOUR/WEBHOOK",http_webhook_url="https://your-api.com/alerts",notification_text="[$$level] Sales forecast error: $$metric=$$error (threshold exceeded)",rounding_freq=5min' \
+  --trigger-arguments 'forecast_measurement=sales_forecast,actual_measurement=sales_actual,forecast_field=predicted_sales,actual_field=sales_amount,error_metric=mae,error_thresholds=WARN-"1000":ERROR-"5000":CRITICAL-"10000",window=6h,senders=discord.http,discord_webhook_url="$DISCORD_WEBHOOK_URL",http_webhook_url="$HTTP_WEBHOOK_URL",notification_text="[$$level] Sales forecast error: $$metric=$$error (threshold exceeded)",rounding_freq=5min' \
   sales_forecast_monitor
 ```
+
+Set `DISCORD_WEBHOOK_URL` and `HTTP_WEBHOOK_URL` to your webhook URLs.
 
 ### Example 3: SMS alerts for critical forecast failures
 
@@ -208,7 +214,7 @@ export TWILIO_TOKEN="your_twilio_token"
 # Create trigger with SMS notifications
 influxdb3 create trigger \
   --database production_forecasts \
-  --plugin-filename gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py \
+  --path "gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py" \
   --trigger-spec "every:5m" \
   --trigger-arguments 'forecast_measurement=demand_forecast,actual_measurement=demand_actual,forecast_field=predicted_demand,actual_field=actual_demand,error_metric=mse,error_thresholds=CRITICAL-"100000",window=15m,senders=sms,twilio_from_number="+1234567890",twilio_to_number="+0987654321",notification_text="CRITICAL: Production demand forecast error exceeded threshold. MSE: $$error",min_condition_duration=2m' \
   critical_forecast_alert
@@ -242,7 +248,7 @@ error_metric = "rmse"
 error_thresholds = 'INFO-"0.5":WARN-"1.0":ERROR-"2.0":CRITICAL-"3.0"'
 window = "1h"
 senders = "slack"
-slack_webhook_url = "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+slack_webhook_url = "$SLACK_WEBHOOK_URL"
 min_condition_duration = "10m"
 rounding_freq = "1min"
 notification_text = "[$$level] Forecast validation alert: $$metric=$$error in $$measurement.$$field"
@@ -251,12 +257,14 @@ notification_text = "[$$level] Forecast validation alert: $$metric=$$error in $$
 influxdb3_auth_token = "your_token_here"
 ```
 
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
+
 ### Create trigger using TOML config
 
 ```bash
 influxdb3 create trigger \
   --database weather_db \
-  --plugin-filename forecast_error_evaluator.py \
+  --path "gh:influxdata/forecast_error_evaluator/forecast_error_evaluator.py" \
   --trigger-spec "every:30m" \
   --trigger-arguments config_file_path=forecast_error_config_scheduler.toml \
   forecast_validation_trigger
@@ -271,10 +279,10 @@ influxdb3 create trigger \
 
 ### Logging
 
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
 ```
 
 Log columns:
@@ -397,7 +405,7 @@ influxdb3 serve --plugin-dir ~/.plugins
 4. **Monitor notification delivery** in logs:
 
  ```bash
- influxdb3 query --database _internal \
+ influxdb3 query --database YOUR_DATABASE \
   "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%notification%'"
  ```
 

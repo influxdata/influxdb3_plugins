@@ -9,9 +9,7 @@ The Notifier Plugin provides multi-channel notification capabilities for InfluxD
 
 ## Configuration
 
-Plugin parameters may be specified as key-value pairs in the `--trigger-arguments` flag (CLI) or in the `trigger_arguments` field (API) when creating a trigger. Some plugins support TOML configuration files, which can be specified using the plugin's `config_file_path` parameter.
-
-If a plugin supports multiple trigger specifications, some parameters may depend on the trigger specification that you use.
+This HTTP plugin receives all configuration via the request body. No trigger arguments are required.
 
 ### Plugin metadata
 
@@ -19,14 +17,16 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Request body parameters
 
+Send these parameters as JSON in the HTTP POST request body:
+
 | Parameter           | Type   | Default  | Description                                 |
 |---------------------|--------|----------|---------------------------------------------|
 | `notification_text` | string | required | Text content of the notification message    |
 | `senders_config`    | object | required | Configuration for each notification channel |
 
-### Sender-specific configuration
+### Sender-specific configuration (in request body)
 
-The `senders_config` parameter accepts channel configurations where keys are sender names and values contain channel-specific settings:
+The `senders_config` object accepts channel configurations where keys are sender names and values contain channel-specific settings:
 
 #### Slack notifications
 
@@ -93,14 +93,16 @@ The `senders_config` parameter accepts channel configurations where keys are sen
    influxdb3 install package twilio
    ```
 
-### Create trigger
+## Trigger setup
+
+### HTTP trigger
 
 Create an HTTP trigger to handle notification requests:
 
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename notifier_plugin.py \
+  --path "gh:influxdata/notifier/notifier_plugin.py" \
   --trigger-spec "request:notify" \
   notification_trigger
 ```
@@ -113,89 +115,118 @@ This registers an HTTP endpoint at `/api/v3/engine/notify`.
 influxdb3 enable trigger --database mydb notification_trigger
 ```
 
-## Examples
+## Example usage
 
-### Slack notification
+### Example 1: Slack notification
 
 Send a notification to Slack:
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/notify \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "notification_text": "Database alert: High CPU usage detected",
+    "notification_text": "Alert: High CPU usage detected on server1",
     "senders_config": {
       "slack": {
-        "slack_webhook_url": "https://hooks.slack.com/services/..."
+        "slack_webhook_url": "'"$SLACK_WEBHOOK_URL"'"
       }
     }
   }'
 ```
 
-### SMS notification
+Set `INFLUXDB3_AUTH_TOKEN` and `SLACK_WEBHOOK_URL` to your credentials.
+
+**Expected output**
+
+Notification sent to Slack channel with message: "Alert: High CPU usage detected on server1"
+
+### Example 2: SMS notification
 
 Send an SMS via Twilio:
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/notify \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "notification_text": "Critical alert: System down",
     "senders_config": {
       "sms": {
-        "twilio_from_number": "+1234567890",
-        "twilio_to_number": "+0987654321"
+        "twilio_from_number": "'"$TWILIO_FROM_NUMBER"'",
+        "twilio_to_number": "'"$TWILIO_TO_NUMBER"'"
       }
     }
   }'
 ```
 
-### Multi-channel notification
+Set `TWILIO_FROM_NUMBER` and `TWILIO_TO_NUMBER` to your phone numbers. Twilio credentials can be set via `TWILIO_SID` and `TWILIO_TOKEN` environment variables.
+
+### Example 3: Multi-channel notification
 
 Send notifications via multiple channels simultaneously:
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/notify \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "notification_text": "Performance warning: Memory usage above threshold",
     "senders_config": {
       "slack": {
-        "slack_webhook_url": "https://hooks.slack.com/services/..."
+        "slack_webhook_url": "'"$SLACK_WEBHOOK_URL"'"
       },
       "discord": {
-        "discord_webhook_url": "https://discord.com/api/webhooks/..."
-      },
-      "whatsapp": {
-        "twilio_from_number": "+1234567890",
-        "twilio_to_number": "+0987654321"
+        "discord_webhook_url": "'"$DISCORD_WEBHOOK_URL"'"
       }
     }
   }'
 ```
 
+Set `SLACK_WEBHOOK_URL` and `DISCORD_WEBHOOK_URL` to your webhook URLs.
+
+## Code overview
+
+### Files
+
+- `notifier_plugin.py`: The main plugin code containing the HTTP handler for notification dispatch
+
+### Logging
+
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
+
+```bash
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'notification_trigger'"
+```
+
+### Main functions
+
+#### `process_http_request(influxdb3_local, request_body, args)`
+
+Handles incoming HTTP notification requests. Parses the request body, extracts notification text and sender configurations, and dispatches notifications to configured channels.
+
+Key operations:
+
+1. Validates request body for required `notification_text` and `senders_config`
+2. Iterates through sender configurations (Slack, Discord, HTTP, SMS, WhatsApp)
+3. Dispatches notifications with built-in retry logic and error handling
+4. Returns success/failure status for each channel
+
 ## Troubleshooting
 
 ### Common issues
 
-**Notification not delivered**
+#### Issue: Notification not delivered
 
-- Verify webhook URLs are correct and accessible
-- Check Twilio credentials and phone number formats
-- Review logs for specific error messages
+**Solution**: Verify webhook URLs are correct and accessible. Check Twilio credentials and phone number formats. Review logs for specific error messages.
 
-**Authentication errors**
+#### Issue: Authentication errors
 
-- Ensure Twilio credentials are set via environment variables or request parameters
-- Verify webhook URLs have proper authentication if required
+**Solution**: Ensure Twilio credentials are set via environment variables or request parameters. Verify webhook URLs have proper authentication if required.
 
-**Rate limiting**
+#### Issue: Rate limiting
 
-- Plugin includes built-in retry logic with exponential backoff
-- Consider implementing client-side rate limiting for high-frequency notifications
+**Solution**: Plugin includes built-in retry logic with exponential backoff. Consider implementing client-side rate limiting for high-frequency notifications.
 
 ### Environment variables
 
@@ -211,7 +242,7 @@ export TWILIO_TOKEN=your_auth_token
 Check processing logs in the InfluxDB system tables:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE message LIKE '%notifier%' ORDER BY time DESC LIMIT 10"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%notifier%' ORDER BY event_time DESC LIMIT 10"
 ```
 
 ## Questions/Comments

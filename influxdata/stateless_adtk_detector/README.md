@@ -71,13 +71,16 @@ For more information on using TOML configuration files, see the Using TOML Confi
 | `PersistAD`            | Detects persistent anomalous values   | None                     |
 | `SeasonalAD`           | Detects seasonal pattern deviations   | None                     |
 
-## Requirements
+## Software Requirements
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled.
 - **Python packages**:
- 	- `adtk` (for anomaly detection)
- 	- `pandas` (for data manipulation)
- 	- `requests` (for HTTP notifications)
+  - `adtk` (for anomaly detection)
+  - `pandas` (for data manipulation)
+  - `requests` (for HTTP notifications)
+- **Notification Sender Plugin** *(optional)*: Required if using the `senders` parameter. See the [influxdata/notifier plugin](../notifier/README.md).
+
+### Installation steps
 
 1. Start InfluxDB 3 with the Processing Engine enabled (`--plugin-dir /path/to/plugins`):
 
@@ -97,18 +100,24 @@ For more information on using TOML configuration files, see the Using TOML Confi
    influxdb3 install package pandas
    ```
 
-### Create trigger
+3. *(Optional)* For notifications, install the [influxdata/notifier plugin](../notifier/README.md) and create an HTTP trigger for it.
+
+## Trigger setup
+
+### Scheduled trigger
 
 Create a scheduled trigger for anomaly detection:
 
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename adtk_anomaly_detection_plugin.py \
+  --path "gh:influxdata/stateless_adtk_detector/adtk_anomaly_detection_plugin.py" \
   --trigger-spec "every:10m" \
-  --trigger-arguments "measurement=cpu,field=usage,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9LCAiTGV2ZWxTaGlmdEFKIjogeyJ3aW5kb3ciOiA1fX0=,window=10m,senders=slack,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=cpu,field=usage,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9LCAiTGV2ZWxTaGlmdEFKIjogeyJ3aW5kb3ciOiA1fX0=,window=10m,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   anomaly_detector
 ```
+
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
 
 ### Enable trigger
 
@@ -116,11 +125,11 @@ influxdb3 create trigger \
 influxdb3 enable trigger --database mydb anomaly_detector
 ```
 
-## Examples
+## Example usage
 
-### Basic anomaly detection
+### Example 1: Quantile-based detection
 
-Detect outliers using quantile-based detection:
+Detect outliers using quantile-based detection. This plugin analyzes existing time series data and sends notifications when anomalies are detected.
 
 ```bash
 # Base64 encode detector parameters: {"QuantileAD": {"low": 0.05, "high": 0.95}}
@@ -128,13 +137,15 @@ echo '{"QuantileAD": {"low": 0.05, "high": 0.95}}' | base64
 
 influxdb3 create trigger \
   --database sensors \
-  --plugin-filename adtk_anomaly_detection_plugin.py \
+  --path "gh:influxdata/stateless_adtk_detector/adtk_anomaly_detection_plugin.py" \
   --trigger-spec "every:5m" \
-  --trigger-arguments "measurement=temperature,field=value,detectors=QuantileAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9fQ==,window=1h,senders=slack,slack_webhook_url=https://hooks.slack.com/services/..." \
+  --trigger-arguments "measurement=temperature,field=value,detectors=QuantileAD,detector_params=eyJRdWFudGlsZUFKIjogeyJsb3ciOiAwLjA1LCAiaGlnaCI6IDAuOTV9fQ==,window=1h,senders=slack,slack_webhook_url=$SLACK_WEBHOOK_URL" \
   temp_anomaly_detector
 ```
 
-### Multi-detector consensus
+Set `SLACK_WEBHOOK_URL` to your Slack incoming webhook URL.
+
+### Example 2: Multi-detector consensus
 
 Use multiple detectors with consensus requirement:
 
@@ -144,11 +155,13 @@ echo '{"QuantileAD": {"low": 0.1, "high": 0.9}, "LevelShiftAD": {"window": 10}}'
 
 influxdb3 create trigger \
   --database monitoring \
-  --plugin-filename adtk_anomaly_detection_plugin.py \
+  --path "gh:influxdata/stateless_adtk_detector/adtk_anomaly_detection_plugin.py" \
   --trigger-spec "every:15m" \
-  --trigger-arguments "measurement=cpu_metrics,field=utilization,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFEIjogeyJsb3ciOiAwLjEsICJoaWdoIjogMC45fSwgIkxldmVsU2hpZnRBRCI6IHsid2luZG93IjogMTB9fQ==,min_consensus=2,window=30m,senders=discord,discord_webhook_url=https://discord.com/api/webhooks/..." \
+  --trigger-arguments "measurement=cpu_metrics,field=utilization,detectors=QuantileAD.LevelShiftAD,detector_params=eyJRdWFudGlsZUFEIjogeyJsb3ciOiAwLjEsICJoaWdoIjogMC45fSwgIkxldmVsU2hpZnRBRCI6IHsid2luZG93IjogMTB9fQ==,min_consensus=2,window=30m,senders=discord,discord_webhook_url=$DISCORD_WEBHOOK_URL" \
   cpu_consensus_detector
 ```
+
+Set `DISCORD_WEBHOOK_URL` to your Discord incoming webhook URL.
 
 ### Volatility shift detection
 
@@ -160,39 +173,61 @@ echo '{"VolatilityShiftAD": {"window": 20}}' | base64
 
 influxdb3 create trigger \
   --database trading \
-  --plugin-filename adtk_anomaly_detection_plugin.py \
+  --path "gh:influxdata/stateless_adtk_detector/adtk_anomaly_detection_plugin.py" \
   --trigger-spec "every:1m" \
   --trigger-arguments "measurement=stock_prices,field=price,detectors=VolatilityShiftAD,detector_params=eyJWb2xhdGlsaXR5U2hpZnRBRCI6IHsid2luZG93IjogMjB9fQ==,window=1h,min_condition_duration=5m,senders=sms,twilio_from_number=+1234567890,twilio_to_number=+0987654321" \
   volatility_detector
 ```
 
 
+## Code overview
+
+### Files
+
+- `adtk_anomaly_detection_plugin.py`: The main plugin code containing the scheduled handler for anomaly detection
+- `adtk_anomaly_config_scheduler.toml`: Example TOML configuration file
+
+### Logging
+
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
+
+```bash
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'anomaly_detector'"
+```
+
+### Main functions
+
+#### `process_scheduled_call(influxdb3_local, call_time, args)`
+
+Handles scheduled anomaly detection tasks. Queries data within the specified window, applies ADTK detectors, and sends notifications for detected anomalies.
+
+Key operations:
+
+1. Parses configuration and decodes detector parameters
+2. Queries data from source measurement
+3. Applies configured ADTK detectors
+4. Evaluates consensus across detectors
+5. Sends notifications when anomalies are confirmed
+
 ## Troubleshooting
 
 ### Common issues
 
-**Detector parameter encoding**
+#### Issue: Detector parameter encoding errors
 
-- Ensure detector_params is valid Base64-encoded JSON
-- Use command line Base64 encoding: `echo '{"QuantileAD": {"low": 0.05}}' | base64`
-- Verify JSON structure matches detector requirements
+**Solution**: Ensure detector_params is valid Base64-encoded JSON. Use command line Base64 encoding: `echo '{"QuantileAD": {"low": 0.05}}' | base64`. Verify JSON structure matches detector requirements.
 
-**False positive notifications**
+#### Issue: False positive notifications
 
-- Increase `min_consensus` to require more detectors to agree
-- Add `min_condition_duration` to require anomalies to persist
-- Adjust detector-specific thresholds in `detector_params`
+**Solution**: Increase `min_consensus` to require more detectors to agree. Add `min_condition_duration` to require anomalies to persist. Adjust detector-specific thresholds in `detector_params`.
 
-**Missing dependencies**
+#### Issue: Missing dependencies
 
-- Install required packages: `adtk`, `pandas`, `requests`
-- Ensure the Notifier Plugin is installed for notifications
+**Solution**: Install required packages: `adtk`, `pandas`, `requests`. Ensure the Notifier Plugin is installed for notifications.
 
-**Data quality issues**
+#### Issue: Data quality issues
 
-- Verify sufficient data points in the specified window
-- Check for null values or data gaps that affect detection
-- Ensure field contains numeric data suitable for analysis
+**Solution**: Verify sufficient data points in the specified window. Check for null values or data gaps that affect detection. Ensure field contains numeric data suitable for analysis.
 
 ### Base64 parameter encoding
 

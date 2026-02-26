@@ -85,7 +85,7 @@
             "example": "import_config.toml",
             "description": "Path to TOML config file to override args.",
             "required": false
-        },
+        }
     ]
 }
 """

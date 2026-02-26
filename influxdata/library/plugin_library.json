@@ -163,6 +163,17 @@
                 "required_libraries": [],
                 "last_update": "2025-12-04",
                 "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "InfluxDB Import",
+                "path": "influxdata/import/import.py",
+                "description": "Enables seamless data import from InfluxDB v1, v2, or v3 instances to InfluxDB 3 Core/Enterprise",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/import/README.md",
+                "required_plugins": [],
+                "required_libraries": ["requests"],
+                "last_update": "2026-02-26",
+                "trigger_types_supported": ["http"]
             }
         ]
     }

@@ -167,7 +167,7 @@
             {
                 "name": "InfluxDB Import",
                 "path": "influxdata/import/import.py",
-                "description": "Enables seamless data import from InfluxDB v1, v2, or v3 instances to InfluxDB 3 Core/Enterprise",
+                "description": "[BETA] Enables seamless data import from InfluxDB v1, v2, or v3 instances to InfluxDB 3 Core/Enterprise",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/import/README.md",
                 "required_plugins": [],

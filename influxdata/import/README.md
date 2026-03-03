@@ -11,6 +11,7 @@ Key features:
 - Automatic data sampling for optimal batch sizing
 - Resume interrupted imports from the last checkpoint
 - Pause and cancel running imports
+- Crash recovery with stale import detection
 - Progress tracking and statistics
 - Tag/field conflict detection and resolution
 - Data type mismatch handling
@@ -162,7 +163,7 @@ Pause a running import to resume later.
 
 **Request**: `POST /api/v3/engine/import?action=pause&import_id=<import_id>`
 
-> **Note**: Returns error if import is not found, already paused, or already cancelled.
+> **Note**: Returns error if import is not found, already paused, already cancelled, or already completed.
 
 ### Resume Import
 
@@ -188,7 +189,17 @@ Resume a paused or interrupted import.
 `POST /api/v3/engine/import?action=resume&import_id=<import_id>&source_token=your_token`
 ```
 
-> **Note**: Authentication credentials are not stored for security reasons and must be provided when resuming. Returns error if import is not found, already cancelled, or already running.
+> **Note**: Authentication credentials are not stored for security reasons and must be provided when resuming. Returns error if import is not found, already cancelled, already completed, or actively running.
+
+#### Crash recovery
+
+If the plugin or the server crashes during an import, the import state may be left as "running" even though nothing is actually running. The resume action handles this with **stale import detection**:
+
+- When the import state is "running", the plugin checks the timestamp of the last `import_state` record.
+- If the last update is older than **5 minutes**, the import is considered stale (crashed) and resume is allowed.
+- If no `import_state` records exist at all (the import crashed before processing any tables), the import is restarted from the beginning.
+
+If the plugin itself crashes (e.g., source database becomes unavailable), it writes a paused state before exiting, so the import can be resumed with a regular resume call after fixing the issue.
 
 ### Cancel Import
 
@@ -196,7 +207,7 @@ Cancel a running import. Cancelled imports cannot be resumed.
 
 **Request**: `POST /api/v3/engine/import?action=cancel&import_id=<import_id>`
 
-> **Note**: Returns error if import is not found or already cancelled.
+> **Note**: Returns error if import is not found, already cancelled, or already completed.
 
 ### Test Connection
 
@@ -644,7 +655,7 @@ influxdb3 query --database mydb "SELECT * FROM import_state WHERE import_id = 'y
 ```
 
 #### `import_pause_state`
-Stores pause/cancel state for controlling running imports.
+Stores pause/cancel/completed state for controlling running imports.
 
 ```bash
 influxdb3 query --database mydb "SELECT * FROM import_pause_state WHERE import_id = 'your-import-id' ORDER BY time DESC LIMIT 1"
@@ -663,6 +674,7 @@ Starts a new import process:
 2. Estimates import time based on data sampling
 3. Creates import configuration and state records
 4. Initiates table-by-table import
+5. On any unhandled error, writes paused state so the import can be resumed after fixing the issue
 
 #### `import_table(influxdb3_local, config, import_id, measurement, start_time, end_time, task_id, ...)`
 
@@ -677,10 +689,12 @@ Imports a single table:
 #### `resume_import(influxdb3_local, import_id, task_id, ...)`
 
 Resumes an interrupted import:
-1. Loads saved import configuration
-2. Identifies incomplete tables and their last checkpoint
-3. Continues import from checkpoint positions
-4. Handles tables without checkpoint (e.g., after crash) by restarting from beginning
+1. Detects stale imports — if the import state is "running" but the last update is older than 5 minutes, treats it as crashed and allows resume
+2. If no `import_state` records exist (crashed before processing any tables), restarts from the beginning
+3. Loads saved import configuration
+4. Identifies incomplete tables and their last checkpoint
+5. Continues import from checkpoint positions
+6. On any unhandled error, writes paused state so the import can be resumed again
 
 #### `get_import_stats(influxdb3_local, import_id, task_id)`
 
@@ -773,6 +787,19 @@ During import, the plugin saves checkpoints:
 - For token: Provide only `source_token`
 - For username/password: Provide both `source_username` AND `source_password` together
 - Do not mix authentication methods
+
+#### Issue: "Import is already running" after server crash
+
+**Solution**:
+
+1. Wait at least 5 minutes after the crash — the plugin uses a 5-minute stale import threshold
+2. Call the resume endpoint with credentials:
+   ```bash
+   curl -X POST "http://localhost:8181/api/v3/engine/import?action=resume&import_id=$IMPORT_ID" \
+     -H "Content-Type: application/json" \
+     -d '{"source_token": "my-token"}'
+   ```
+3. The plugin detects the stale state and resumes from the last checkpoint (or restarts from the beginning if no checkpoint exists)
 
 #### Issue: "Import already completed" when trying to resume
 

@@ -1,0 +1,57 @@
+# Schema Validator Plugin - Trigger Configuration Template
+# Copy this file to your PLUGIN_DIR and reference it with:
+#   --trigger-arguments config_file_path=schema_validator_trigger_config.toml
+
+########## Required Parameters ##########
+
+# Path to the JSON schema definition file (relative to PLUGIN_DIR)
+schema_file = "schema_validator_config.json"
+
+
+########## Optional Parameters ##########
+
+# Target database to write validated data to
+# If omitted, validated data is written back to the same database
+#target_database = "clean_db"
+
+# Prefix/suffix to add to measurement names when writing to the target
+# Example: with prefix "validated_" and source table "weather", target becomes "validated_weather"
+#target_table_prefix = ""
+#target_table_suffix = "_clean"
+
+# Logging options
+# Log rejected rows (default: true)
+log_rejected = "true"
+
+# Log accepted rows (default: false) - can be noisy, use for debugging
+log_accepted = "false"
+
+# Write rejection details to '_schema_rejections' measurement (default: false)
+#write_rejection_log = "true"
+
+
+###### Example: Create Trigger Using This Config ######
+#
+# Write to a different database (raw_db -> clean_db):
+#   influxdb3 create trigger \
+#     --database raw_db \
+#     --plugin-filename schema_validator.py \
+#     --trigger-spec "all_tables" \
+#     --trigger-arguments config_file_path=schema_validator_trigger_config.toml \
+#     schema_validator_trigger
+#
+# Or pass arguments directly:
+#   influxdb3 create trigger \
+#     --database raw_db \
+#     --plugin-filename schema_validator.py \
+#     --trigger-spec "all_tables" \
+#     --trigger-arguments schema_file=schema_validator_config.json,target_database=clean_db \
+#     schema_validator_trigger
+#
+# For a specific table only:
+#   influxdb3 create trigger \
+#     --database raw_db \
+#     --plugin-filename schema_validator.py \
+#     --trigger-spec "table:weather" \
+#     --trigger-arguments schema_file=schema_validator_config.json,target_database=clean_db \
+#     schema_validator_weather

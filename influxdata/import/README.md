@@ -2,6 +2,8 @@
 
 ⚡ http 🏷️ import, data-transfer, influxdb-v1, influxdb-v2 🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
+> **Note:** This plugin requires InfluxDB 3.8.2 or later.
+
 ## Description
 
 The InfluxDB Import Plugin enables seamless data import from InfluxDB v1, v2, or v3 instances to InfluxDB 3 Core/Enterprise. It provides comprehensive import capabilities with pause/resume functionality, progress tracking, conflict detection, and robust error handling. The plugin operates via HTTP endpoints, allowing you to start, pause, resume, cancel, and monitor imports through simple HTTP requests.

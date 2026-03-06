@@ -1,0 +1,195 @@
+# =============================================================================
+# MQTT Subscriber Plugin - Configuration Examples
+# =============================================================================
+# This file contains three separate configuration examples for different
+# message formats: JSON, Line Protocol, and Text (regex-based).
+#
+# To use one of these examples:
+# 1. Copy this file to your PLUGIN_DIR directory
+# 2. Keep only the [mqtt] and [mapping.*] sections you need
+# 3. Adjust the settings to match your MQTT broker and message format
+#
+# File path resolution:
+# - Absolute paths (e.g., /etc/mqtt/ca.crt) are used as-is
+# - Relative paths (e.g., certs/ca.crt) are resolved from PLUGIN_DIR
+# =============================================================================
+
+
+# #############################################################################
+# EXAMPLE 1: JSON Format - IoT Sensor Data
+# #############################################################################
+# Use this configuration for structured JSON messages from IoT devices.
+#
+# Example MQTT message:
+# {
+#   "device_id": "sensor_001",
+#   "location": "warehouse_a",
+#   "readings": {
+#     "temperature": 22.5,
+#     "humidity": 65.2
+#   },
+#   "battery_level": 87,
+#   "online": true,
+#   "timestamp": 1704067200000
+# }
+# #############################################################################
+
+[mqtt]
+broker_host = "broker.hivemq.com"
+broker_port = 1883
+topics = ["sensors/temperature", "sensors/humidity"]
+qos = 1
+client_id = "influxdb3_iot_collector"
+format = "json"
+
+# Optional authentication (uncomment if needed)
+# [mqtt.auth]
+# username = "your_username"
+# password = "your_password"
+
+# Optional TLS configuration (uncomment if needed)
+# [mqtt.tls]
+# ca_cert = "certs/ca.crt"
+# client_cert = "certs/client.crt"
+# client_key = "certs/client.key"
+
+[mapping.json]
+table_name = "sensor_data"
+
+# Timestamp from message (milliseconds since epoch)
+timestamp_field = "$.timestamp:ms"
+
+# Tags: indexed fields for efficient filtering
+[mapping.json.tags]
+device_id = "$.device_id"
+location = "$.location"
+
+# Fields: measurement values with type specification
+# Supported types: int, uint, float, string, bool
+[mapping.json.fields]
+temperature = ["$.readings.temperature", "float"]
+humidity = ["$.readings.humidity", "float"]
+battery_level = ["$.battery_level", "int"]
+online = ["$.online", "bool"]
+
+
+# #############################################################################
+# EXAMPLE 2: Line Protocol Format - Passthrough Mode
+# #############################################################################
+# Use this configuration when MQTT messages are already in InfluxDB line protocol.
+# No field mapping needed - messages are validated and written directly.
+#
+# Example MQTT message:
+# weather,location=us-west,station=SF01 temperature=18.5,humidity=72i,pressure=1013.25 1704067200000000000
+# #############################################################################
+
+# [mqtt]
+# broker_host = "mqtt.example.com"
+# broker_port = 1883
+# topics = ["influxdb/weather/#"]
+# qos = 1
+# client_id = "influxdb3_lineprotocol"
+# format = "lineprotocol"
+
+
+# #############################################################################
+# EXAMPLE 3: Text Format - Legacy Log Parsing
+# #############################################################################
+# Use this configuration for plain text messages that require regex parsing.
+# Each tag and field uses a regex pattern with a capturing group.
+#
+# Example MQTT message:
+# [2024-01-01T12:00:00Z] device=pump_003 location=plant_b flow_rate=125.7 pressure=45 status=running ts=1704110400000000000
+# #############################################################################
+
+# [mqtt]
+# broker_host = "internal-broker.local"
+# broker_port = 1883
+# topics = ["legacy/equipment/#"]
+# qos = 1
+# client_id = "influxdb3_legacy_parser"
+# format = "text"
+
+# [mapping.text]
+# table_name = "equipment_logs"
+
+# Timestamp extraction (nanoseconds)
+# Format: "regex_pattern:format" - split by last colon
+# timestamp_field = "ts=(\\d+):ns"
+
+# Tag patterns with capturing groups
+# [mapping.text.tags]
+# device = "device=(\\w+)"
+# location = "location=(\\w+)"
+
+# Field patterns with type specification
+# [mapping.text.fields]
+# flow_rate = ["flow_rate=([\\d.]+)", "float"]
+# pressure = ["pressure=(\\d+)", "int"]
+# status = ["status=(\\w+)", "string"]
+
+
+# #############################################################################
+# EXAMPLE 4: Secure Connection with Mutual TLS
+# #############################################################################
+# Use this configuration for production environments with authentication
+# and encrypted connections.
+# #############################################################################
+
+# [mqtt]
+# broker_host = "secure-broker.company.com"
+# broker_port = 8883
+# topics = ["production/metrics/#"]
+# qos = 2
+# client_id = "influxdb3_secure_client"
+# format = "json"
+
+# [mqtt.auth]
+# username = "influxdb_service"
+# password = "secure_password_here"
+
+# [mqtt.tls]
+# ca_cert = "/etc/influxdb/certs/ca.crt"
+# client_cert = "/etc/influxdb/certs/client.crt"
+# client_key = "/etc/influxdb/certs/client.key"
+
+# [mapping.json]
+# table_name = "production_metrics"
+# timestamp_field = "$.ts:ms"
+
+# [mapping.json.tags]
+# host = "$.host"
+# service = "$.service"
+
+# [mapping.json.fields]
+# cpu_usage = ["$.cpu", "float"]
+# memory_mb = ["$.memory", "int"]
+# requests_per_sec = ["$.rps", "float"]
+
+
+# #############################################################################
+# EXAMPLE 5: Dynamic Table Name from Message
+# #############################################################################
+# Use table_name_field to extract the table name from each message.
+# Useful when different message types should go to different tables.
+#
+# Example MQTT message:
+# {"measurement": "cpu_metrics", "host": "server01", "usage": 45.2}
+# This will write to table "cpu_metrics"
+# #############################################################################
+
+# [mqtt]
+# broker_host = "broker.example.com"
+# broker_port = 1883
+# topics = ["metrics/#"]
+# qos = 1
+# format = "json"
+
+# [mapping.json]
+# table_name_field = "$.measurement"
+
+# [mapping.json.tags]
+# host = "$.host"
+
+# [mapping.json.fields]
+# value = ["$.usage", "float"]

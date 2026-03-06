@@ -187,6 +187,28 @@
                 "trigger_types_supported": ["data_writes"]
             },
             {
+                "name": "MQTT Subscriber",
+                "path": "influxdata/mqtt_subscriber/mqtt_subscriber.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables real-time ingestion of MQTT messages into InfluxDB 3. Subscribe to MQTT broker topics and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/mqtt_subscriber/README.md",
+                "required_plugins": [],
+                "required_libraries": ["paho-mqtt", "jsonpath-ng"],
+                "last_update": "2026-03-06",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Kafka Subscriber",
+                "path": "influxdata/kafka_subscriber/kafka_subscriber.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/kafka_subscriber/README.md",
+                "required_plugins": [],
+                "required_libraries": ["confluent-kafka", "jsonpath-ng"],
+                "last_update": "2026-03-06",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
                 "name": "AMQP Subscriber",
                 "path": "influxdata/amqp_subscriber/amqp_subscriber.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Enables real-time ingestion of AMQP messages (RabbitMQ and other AMQP-compatible brokers) into InfluxDB 3. Subscribe to queues and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats.",

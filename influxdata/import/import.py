@@ -9,24 +9,6 @@
             "required": true
         },
         {
-            "name": "source_token",
-            "example": "my-token",
-            "description": "Source InfluxDB authentication token.",
-            "required": false
-        },
-        {
-            "name": "source_username",
-            "example": "admin",
-            "description": "Source InfluxDB authentication username.",
-            "required": false
-        },
-        {
-            "name": "source_password",
-            "example": "my-password",
-            "description": "Source InfluxDB authentication password.",
-            "required": false
-        },
-        {
             "name": "influxdb_version",
             "example": 1,
             "description": "Source InfluxDB version: 1, 2, or 3.",

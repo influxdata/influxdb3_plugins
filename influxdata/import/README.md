@@ -576,7 +576,7 @@ When a import starts, the plugin loads configuration in this order:
 
 ```python
 # 1. Start with environment variables (lowest priority)
-IMPORT_SOURCE_URL, IMPORT_SOURCE_TOKEN, etc.
+IMPORT_SOURCE_URL, IMPORT_SOURCE_DATABASE, etc.
 
 # 2. Override with trigger arguments (--trigger-arguments)
 config_file_path=import_config.toml, source_url=http://localhost:8086, etc.
@@ -589,6 +589,9 @@ config_file_path=import_config.toml, source_url=http://localhost:8086, etc.
   "source_url": "http://localhost:8086",
   ...
 }
+
+# IMPORTANT: Credentials are ALWAYS extracted from HTTP headers (not from above sources)
+# Headers: Source-Token, Source-Username, Source-Password
 ```
 
 ### Environment Variables Supported

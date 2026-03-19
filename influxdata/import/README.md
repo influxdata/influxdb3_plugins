@@ -535,15 +535,14 @@ This plugin supports using TOML configuration files to specify all plugin argume
    influxdb_version = 1
    source_database = "telegraf"
 
-   # Authentication (choose one method)
-   source_token = "my-token"
-
    # Optional parameters
    dest_database = "imported_data"
    start_timestamp = "2024-01-01T00:00:00Z"
    end_timestamp = "2024-12-31T23:59:59Z"
    table_filter = "cpu.mem.disk"
    ```
+
+> **Note**: Credentials are NOT stored in TOML files. Provide them via HTTP headers on each request.
 
 4. **Create a trigger using the `config_file_path` argument**:
 

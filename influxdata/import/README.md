@@ -326,10 +326,10 @@ influxdb3 enable trigger --database mydb import_trigger
 
 # Start import via HTTP
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Token: my-super-secret-token" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://localhost:8086",
-    "source_token": "my-super-secret-token",
     "influxdb_version": 1,
     "source_database": "telegraf",
     "dest_database": "imported_data"

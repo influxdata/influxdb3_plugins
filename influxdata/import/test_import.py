@@ -474,3 +474,54 @@ class TestQuerySourceInfluxdbV3Auth:
 
         with pytest.raises(ValueError, match="InfluxDB v3 requires source_token"):
             query_source_influxdb(mock_influxdb3_local, config, "SHOW MEASUREMENTS", "test-task")
+
+
+class TestExtractCredentials:
+    """Tests for extract_credentials function"""
+
+    def test_extracts_token_from_headers(self):
+        extract_credentials = import_module.extract_credentials
+        headers = {"Source-Token": "my-secret-token"}
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": "my-secret-token",
+            "source_username": None,
+            "source_password": None,
+        }
+
+    def test_extracts_username_password_from_headers(self):
+        extract_credentials = import_module.extract_credentials
+        headers = {
+            "Source-Username": "admin",
+            "Source-Password": "secret123",
+        }
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": None,
+            "source_username": "admin",
+            "source_password": "secret123",
+        }
+
+    def test_returns_none_for_missing_headers(self):
+        extract_credentials = import_module.extract_credentials
+        headers = {}
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": None,
+            "source_username": None,
+            "source_password": None,
+        }
+
+    def test_extracts_all_credentials_when_present(self):
+        extract_credentials = import_module.extract_credentials
+        headers = {
+            "Source-Token": "token",
+            "Source-Username": "user",
+            "Source-Password": "pass",
+        }
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": "token",
+            "source_username": "user",
+            "source_password": "pass",
+        }

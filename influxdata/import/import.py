@@ -126,6 +126,24 @@ REQUEST_TIMEOUT_SECONDS = 30
 MICROSECOND_OFFSET = 1
 
 
+def extract_credentials(request_headers: Dict[str, str]) -> Dict[str, Optional[str]]:
+    """
+    Extract credentials from HTTP headers.
+
+    Args:
+        request_headers: HTTP request headers dict
+
+    Returns:
+        Dict with keys: source_token, source_username, source_password
+        Values are None if header not present
+    """
+    return {
+        "source_token": request_headers.get("Source-Token"),
+        "source_username": request_headers.get("Source-Username"),
+        "source_password": request_headers.get("Source-Password"),
+    }
+
+
 class ImportPauseState(Enum):
     """Possible states returned from querying the import_pause_state table."""
 

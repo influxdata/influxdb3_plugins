@@ -413,6 +413,70 @@ class TestGetSourceDatabasesListV3:
         assert call_args[1]["params"] == {"format": "json"}
 
 
+class TestGetSourceDatabasesListV2:
+    """Tests for get_source_databases_list v2 support using InfluxQL."""
+
+    def test_v2_returns_databases_using_influxql_endpoint(self):
+        """Test that v2 uses /query endpoint with SHOW DATABASES, not /api/v2/buckets."""
+        mock_session = Mock()
+        mock_response = Mock()
+        # InfluxQL response format (same as v1)
+        mock_response.json.return_value = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "name": "databases",
+                            "columns": ["name"],
+                            "values": [["mydb"], ["testdb"], ["_internal"]],
+                        }
+                    ]
+                }
+            ]
+        }
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        result = get_source_databases_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_token": "my-token",
+            },
+            session=mock_session,
+        )
+
+        # _internal should be filtered out
+        assert result == {"databases": ["mydb", "testdb"]}
+        mock_session.get.assert_called_once()
+        call_args = mock_session.get.call_args
+        # Verify it uses /query endpoint, not /api/v2/buckets
+        assert "/query" in call_args[0][0]
+        assert "/api/v2/buckets" not in call_args[0][0]
+        assert call_args[1]["params"] == {"q": "SHOW DATABASES"}
+
+    def test_v2_uses_token_auth_header(self):
+        """Test that v2 uses Token authorization header."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        get_source_databases_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_token": "my-secret-token",
+            },
+            session=mock_session,
+        )
+
+        call_args = mock_session.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers.get("Authorization") == "Token my-secret-token"
+
+
 class TestGetSourceTablesListV3:
     """Tests for get_source_tables_list v3 support."""
 

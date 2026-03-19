@@ -361,12 +361,22 @@ class TestValidateSourceParams:
         })
         assert result == {"error": "Unsupported influxdb_version: 4. Must be 1, 2, or 3."}
 
-    def test_string_version_is_invalid(self):
+    def test_non_numeric_string_version_is_invalid(self):
         result = _validate_source_params({
             "source_url": "http://localhost:8086",
-            "influxdb_version": "3",
+            "influxdb_version": "abc",
         })
-        assert result == {"error": "Unsupported influxdb_version: 3. Must be 1, 2, or 3."}
+        assert result == {"error": "Unsupported influxdb_version: abc. Must be 1, 2, or 3."}
+
+    def test_numeric_string_version_is_coerced_to_int(self):
+        """Numeric strings like '3' should be accepted and coerced to int."""
+        body_data = {
+            "source_url": "http://localhost:8086",
+            "influxdb_version": "3",
+        }
+        result = _validate_source_params(body_data)
+        assert result is None  # Valid
+        assert body_data["influxdb_version"] == 3  # Coerced to int
 
 
 class TestGetSourceDatabasesListV3:
@@ -453,33 +463,61 @@ class TestQuerySourceInfluxdbV3Auth:
 
         mock_influxdb3_local = Mock()
 
+        # Create config WITHOUT credential fields
         config = ImportConfig(
             source_url="http://localhost",
             source_database="mydb",
             influxdb_version=3,
-            source_token="my-v3-token",
         )
 
-        query_source_influxdb(mock_influxdb3_local, config, "SHOW MEASUREMENTS", "test-task")
+        # Create credentials separately
+        credentials = {
+            "source_token": "my-v3-token",
+            "source_username": None,
+            "source_password": None,
+        }
+
+        # Pass credentials to function
+        query_source_influxdb(mock_influxdb3_local, config, credentials, "SHOW MEASUREMENTS", "test-task")
 
         # Verify the Authorization header uses Bearer format
         call_kwargs = mock_session.get.call_args
         headers = call_kwargs.kwargs.get("headers", call_kwargs[1].get("headers", {}))
         assert headers.get("Authorization") == "Bearer my-v3-token"
 
-    def test_v3_without_token_raises_error(self):
-        """Verify v3 without token raises ValueError."""
+    @patch("import.get_http_session")
+    def test_v3_without_token_no_auth_header(self, mock_get_session):
+        """Verify v3 without token results in no Authorization header."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{"series": []}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
         mock_influxdb3_local = Mock()
 
+        # Create config WITHOUT credential fields
         config = ImportConfig(
             source_url="http://localhost",
             source_database="mydb",
             influxdb_version=3,
-            source_token=None,
         )
 
-        with pytest.raises(ValueError, match="InfluxDB v3 requires source_token"):
-            query_source_influxdb(mock_influxdb3_local, config, "SHOW MEASUREMENTS", "test-task")
+        # Create credentials with no token
+        credentials = {
+            "source_token": None,
+            "source_username": None,
+            "source_password": None,
+        }
+
+        # Pass credentials to function
+        query_source_influxdb(mock_influxdb3_local, config, credentials, "SHOW MEASUREMENTS", "test-task")
+
+        # Verify no Authorization header is present
+        call_kwargs = mock_session.get.call_args
+        headers = call_kwargs.kwargs.get("headers", call_kwargs[1].get("headers", {}))
+        assert "Authorization" not in headers
 
 
 class TestExtractCredentials:

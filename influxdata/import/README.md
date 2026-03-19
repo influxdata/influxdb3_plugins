@@ -589,9 +589,6 @@ config_file_path=import_config.toml, source_url=http://localhost:8086, etc.
   "source_url": "http://localhost:8086",
   ...
 }
-
-# IMPORTANT: Credentials are ALWAYS extracted from HTTP headers (not from above sources)
-# Headers: Source-Token, Source-Username, Source-Password
 ```
 
 ### Environment Variables Supported
@@ -599,9 +596,6 @@ config_file_path=import_config.toml, source_url=http://localhost:8086, etc.
 The following environment variables can be used:
 
 - `IMPORT_SOURCE_URL` → `source_url`
-- `IMPORT_SOURCE_TOKEN` → `source_token`
-- `IMPORT_SOURCE_USERNAME` → `source_username`
-- `IMPORT_SOURCE_PASSWORD` → `source_password`
 - `IMPORT_SOURCE_DATABASE` → `source_database`
 - `IMPORT_DEST_DATABASE` → `dest_database`
 - `IMPORT_START_TIMESTAMP` → `start_timestamp`

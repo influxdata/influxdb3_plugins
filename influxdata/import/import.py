@@ -3006,7 +3006,6 @@ def get_source_tables_list(
     source_url = body_data.get("source_url")
     influxdb_version = body_data.get("influxdb_version")
     source_database = body_data.get("source_database")
-    source_org = body_data.get("source_org")
 
     if not source_database:
         return {"error": "source_database is required"}

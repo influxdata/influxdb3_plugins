@@ -201,25 +201,12 @@ Resume a paused or interrupted import.
 
 **Request**: `POST /api/v3/engine/import?action=resume&import_id=<import_id>`
 
-**Request body** (JSON):
-```json
-{
-  "source_token": "my-token"
-}
-```
-*or*
-```json
-{
-  "source_username": "admin",
-  "source_password": "my-password"
-}
-```
-*or*
-```
-`POST /api/v3/engine/import?action=resume&import_id=<import_id>&source_token=your_token`
-```
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
 
-> **Note**: Authentication credentials are not stored for security reasons and must be provided when resuming. Returns error if import is not found, already cancelled, or already running.
+> **Note**: Credentials must be provided via headers when resuming.
+
+> **Note**: Returns error if import is not found, already cancelled, or already running.
 
 ### Cancel Import
 

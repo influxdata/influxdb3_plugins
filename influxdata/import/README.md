@@ -784,12 +784,13 @@ During import, the plugin saves checkpoints:
 3. Verify credentials are correct
 4. For InfluxDB v2/v3, ensure you're using token authentication
 
-#### Issue: "Authentication error: Must provide either..." error
+#### Issue: Authentication errors from source InfluxDB
 
-**Solution**: Choose one authentication method:
-- For token: Provide only `source_token`
-- For username/password: Provide both `source_username` AND `source_password` together
-- Do not mix authentication methods
+**Solution**: Pass credentials via HTTP headers:
+1. For token auth: Add header `-H "Source-Token: your-token"`
+2. For username/password: Add headers `-H "Source-Username: user" -H "Source-Password: pass"`
+3. Verify credentials work directly against source InfluxDB
+4. Check that headers are not being stripped by proxies
 
 #### Issue: "Import already completed" when trying to resume
 

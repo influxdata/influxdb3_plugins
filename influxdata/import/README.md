@@ -275,12 +275,15 @@ Get list of databases from source InfluxDB instance.
 
 **Request**: `POST /api/v3/engine/import?action=databases`
 
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
+- `Content-Type: application/json`
+
 **Request body** (JSON):
 ```json
 {
   "source_url": "http://localhost:8086",
-  "influxdb_version": 1,
-  "source_token": "my-token"
+  "influxdb_version": 1
 }
 ```
 

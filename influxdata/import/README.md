@@ -351,11 +351,11 @@ Import specific tables within a date range:
 ```bash
 # Start import with time range and table filter
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Username: admin" \
+  -H "Source-Password: my-password" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://influxdb-source.example.com:8086",
-    "source_username": "admin",
-    "source_password": "my-password",
     "influxdb_version": 1,
     "source_database": "telegraf",
     "dest_database": "production_metrics",

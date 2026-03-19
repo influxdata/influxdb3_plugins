@@ -381,10 +381,10 @@ Monitor and control a long-running import:
 ```bash
 # Start import (logs import_id, does not return it immediately)
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Token: my-token" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://localhost:8086",
-    "source_token": "my-token",
     "influxdb_version": 2,
     "source_database": "large_database",
     "dest_database": "imported"
@@ -404,10 +404,7 @@ curl "http://localhost:8181/api/v3/engine/import?action=status&import_id=$IMPORT
 
 # Resume later
 curl -X POST "http://localhost:8181/api/v3/engine/import?action=resume&import_id=$IMPORT_ID" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source_token": "my-token"
-  }'
+  -H "Source-Token: my-token"
 ```
 
 ### Expected results

@@ -2408,11 +2408,6 @@ def resume_import(
         )
 
         # 4. Resume the import using resume_incomplete_import
-        credentials = {
-            "source_token": source_token,
-            "source_username": source_username,
-            "source_password": source_password,
-        }
         return resume_incomplete_import(
             influxdb3_local,
             config,

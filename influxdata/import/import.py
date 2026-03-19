@@ -203,9 +203,6 @@ def load_config(
     # 1. Start with environment variables (lowest priority)
     env_mappings = {
         "IMPORT_SOURCE_URL": "source_url",
-        "IMPORT_SOURCE_TOKEN": "source_token",
-        "IMPORT_SOURCE_USERNAME": "source_username",
-        "IMPORT_SOURCE_PASSWORD": "source_password",
         "IMPORT_SOURCE_DATABASE": "source_database",
         "IMPORT_DEST_DATABASE": "dest_database",
         "IMPORT_START_TIMESTAMP": "start_timestamp",
@@ -262,30 +259,6 @@ def load_config(
         config_data["table_filter"] = [
             t.strip() for t in config_data["table_filter"].split(".")
         ]
-
-    # Validate authentication parameters
-    has_username = config_data.get("source_username")
-    has_password = config_data.get("source_password")
-    has_token = config_data.get("source_token")
-
-    # Check that either (username AND password together) OR (only token) is provided
-    if has_username or has_password:
-        # If username or password is provided, both must be provided
-        if not (has_username and has_password):
-            raise ValueError(
-                "Authentication error: source_username and source_password must be provided together"
-            )
-        # If both username and password are provided, token should NOT be provided
-        if has_token:
-            raise ValueError(
-                "Authentication error: Cannot use both (source_username/source_password) and source_token. "
-                "Please provide either (source_username and source_password) OR (source_token only)"
-            )
-    elif not has_token:
-        # Neither username/password nor token is provided
-        raise ValueError(
-            "Authentication error: Must provide either (source_username and source_password) OR (source_token)"
-        )
 
     return ImportConfig(**config_data)
 

@@ -112,6 +112,9 @@ def extract_credentials(request_headers: Dict[str, str]) -> Dict[str, Optional[s
     """
     Extract credentials from HTTP headers.
 
+    Note: InfluxDB3 normalizes header keys to lowercase, so we look up
+    lowercase keys directly.
+
     Args:
         request_headers: HTTP request headers dict
 
@@ -120,9 +123,9 @@ def extract_credentials(request_headers: Dict[str, str]) -> Dict[str, Optional[s
         Values are None if header not present
     """
     return {
-        "source_token": request_headers.get("Source-Token"),
-        "source_username": request_headers.get("Source-Username"),
-        "source_password": request_headers.get("Source-Password"),
+        "source_token": request_headers.get("source-token"),
+        "source_username": request_headers.get("source-username"),
+        "source_password": request_headers.get("source-password"),
     }
 
 

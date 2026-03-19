@@ -525,7 +525,8 @@ class TestExtractCredentials:
 
     def test_extracts_token_from_headers(self):
         extract_credentials = import_module.extract_credentials
-        headers = {"Source-Token": "my-secret-token"}
+        # InfluxDB3 normalizes headers to lowercase
+        headers = {"source-token": "my-secret-token"}
         result = extract_credentials(headers)
         assert result == {
             "source_token": "my-secret-token",
@@ -535,9 +536,10 @@ class TestExtractCredentials:
 
     def test_extracts_username_password_from_headers(self):
         extract_credentials = import_module.extract_credentials
+        # InfluxDB3 normalizes headers to lowercase
         headers = {
-            "Source-Username": "admin",
-            "Source-Password": "secret123",
+            "source-username": "admin",
+            "source-password": "secret123",
         }
         result = extract_credentials(headers)
         assert result == {
@@ -558,10 +560,11 @@ class TestExtractCredentials:
 
     def test_extracts_all_credentials_when_present(self):
         extract_credentials = import_module.extract_credentials
+        # InfluxDB3 normalizes headers to lowercase
         headers = {
-            "Source-Token": "token",
-            "Source-Username": "user",
-            "Source-Password": "pass",
+            "source-token": "token",
+            "source-username": "user",
+            "source-password": "pass",
         }
         result = extract_credentials(headers)
         assert result == {

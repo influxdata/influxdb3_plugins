@@ -36,22 +36,48 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `influxdb_version`  | integer | required | Source InfluxDB version: 1, 2, or 3                                |
 | `source_database`   | string  | required | Source database name to import from                               |
 
-### Authentication parameters (required - choose one method)
+### Authentication
 
-**Method 1: Token-based authentication** (InfluxDB v2 or v1 with token support)
+Credentials are passed via HTTP headers on each request.
 
-| Parameter      | Type   | Required | Description                                      |
-|----------------|--------|----------|--------------------------------------------------|
-| `source_token` | string | Yes      | Authentication token for the source InfluxDB     |
+| Header | Purpose |
+|--------|---------|
+| `Source-Token` | Bearer/API token authentication (InfluxDB v1/v2/v3) |
+| `Source-Username` | Basic auth username (InfluxDB v1) |
+| `Source-Password` | Basic auth password (InfluxDB v1) |
 
-**Method 2: Username/Password authentication** (InfluxDB v1)
+**Method 1: Token-based authentication**
 
-| Parameter         | Type   | Required | Description                                                |
-|-------------------|--------|----------|------------------------------------------------------------|
-| `source_username` | string | Yes      | Username for basic authentication (must use with password) |
-| `source_password` | string | Yes      | Password for basic authentication (must use with username) |
+Use the `Source-Token` header for token-based authentication:
 
-> **Note**: You must provide EITHER `source_token` OR (`source_username` AND `source_password` together). Using both methods simultaneously will result in an error.
+```bash
+curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Content-Type: application/json" \
+  -H "Source-Token: my-secret-token" \
+  -d '{
+    "source_url": "http://localhost:8086",
+    "influxdb_version": 2,
+    "source_database": "telegraf"
+  }'
+```
+
+**Method 2: Username/Password authentication**
+
+Use the `Source-Username` and `Source-Password` headers for basic authentication:
+
+```bash
+curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Content-Type: application/json" \
+  -H "Source-Username: admin" \
+  -H "Source-Password: my-password" \
+  -d '{
+    "source_url": "http://localhost:8086",
+    "influxdb_version": 1,
+    "source_database": "telegraf"
+  }'
+```
+
+> **Note**: Authentication errors from the source InfluxDB are returned directly. The plugin does not validate credentials upfront.
 
 ### Optional parameters
 

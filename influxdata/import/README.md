@@ -671,9 +671,13 @@ influxdb3 query --database mydb "SELECT * FROM import_pause_state WHERE import_i
 
 #### `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 
-HTTP request handler that routes to appropriate import actions based on the `action` query parameter.
+HTTP request handler that routes to appropriate import actions based on the `action` query parameter. Extracts credentials from `request_headers` using `extract_credentials()` and passes them to action handlers.
 
-#### `start_import(influxdb3_local, config, task_id)`
+#### `extract_credentials(request_headers)`
+
+Extracts authentication credentials from HTTP headers. Returns a dict with keys `source_token`, `source_username`, `source_password` (values are `None` if header not present).
+
+#### `start_import(influxdb3_local, config, credentials, task_id)`
 
 Starts a new import process:
 1. Performs pre-flight checks (connectivity, measurements discovery)
@@ -681,7 +685,7 @@ Starts a new import process:
 3. Creates import configuration and state records
 4. Initiates table-by-table import
 
-#### `import_table(influxdb3_local, config, import_id, measurement, start_time, end_time, task_id, ...)`
+#### `import_table(influxdb3_local, config, credentials, import_id, measurement, start_time, end_time, task_id, ...)`
 
 Imports a single table:
 1. Finds actual data boundaries within specified range
@@ -691,7 +695,7 @@ Imports a single table:
 5. Writes to destination database
 6. Tracks progress and checks for pause/cancel signals
 
-#### `resume_import(influxdb3_local, import_id, task_id, ...)`
+#### `resume_import(influxdb3_local, import_id, credentials, task_id)`
 
 Resumes an interrupted import:
 1. Loads saved import configuration
@@ -713,7 +717,7 @@ Tests connectivity to a URL and identifies if it's an InfluxDB instance (5-secon
 5. Falls back to `cluster-uuid` header detection for v3 (returns `version: "3.x.x"`)
 6. Returns failure with message if not InfluxDB or unreachable
 
-#### `get_source_databases_list(body_data, session)`
+#### `get_source_databases_list(body_data, credentials, session)`
 
 Lists databases from source InfluxDB instance:
 1. Validates required parameters
@@ -721,7 +725,7 @@ Lists databases from source InfluxDB instance:
 3. For v2: Queries `/api/v2/buckets` API, filters out system buckets (prefixed with `_`)
 4. Returns sorted list of database names
 
-#### `get_source_tables_list(body_data, session)`
+#### `get_source_tables_list(body_data, credentials, session)`
 
 Lists tables/measurements from a source database:
 1. Validates required parameters including `source_database`

@@ -512,6 +512,94 @@ class TestGetSourceTablesListV3:
         assert call_args[1]["params"] == {"db": "mydb", "q": "SHOW TABLES", "format": "json"}
 
 
+class TestGetSourceTablesListV2:
+    """Tests for get_source_tables_list v2 support using InfluxQL."""
+
+    def test_v2_returns_tables_using_influxql_endpoint(self):
+        """Test that v2 uses /query endpoint with SHOW MEASUREMENTS, not Flux API."""
+        mock_session = Mock()
+        mock_response = Mock()
+        # InfluxQL response format (same as v1)
+        mock_response.json.return_value = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "name": "measurements",
+                            "columns": ["name"],
+                            "values": [["cpu"], ["memory"], ["disk"]],
+                        }
+                    ]
+                }
+            ]
+        }
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        result = get_source_tables_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_database": "mybucket",
+                "source_token": "my-token",
+                # Note: no source_org provided
+            },
+            session=mock_session,
+        )
+
+        assert result == {"tables": ["cpu", "disk", "memory"]}
+        mock_session.get.assert_called_once()
+        call_args = mock_session.get.call_args
+        # Verify it uses /query endpoint, not /api/v2/query
+        assert "/query" in call_args[0][0]
+        assert "/api/v2/query" not in call_args[0][0]
+        assert call_args[1]["params"] == {"db": "mybucket", "q": "SHOW MEASUREMENTS"}
+
+    def test_v2_does_not_require_org(self):
+        """Test that v2 works without source_org parameter."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{"series": [{"values": [["test"]]}]}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        # Should not return an error about missing org
+        result = get_source_tables_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_database": "mybucket",
+                "source_token": "my-token",
+            },
+            session=mock_session,
+        )
+
+        assert "error" not in result
+        assert "tables" in result
+
+    def test_v2_uses_token_auth_header(self):
+        """Test that v2 uses Token authorization header."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        get_source_tables_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_database": "mybucket",
+                "source_token": "my-secret-token",
+            },
+            session=mock_session,
+        )
+
+        call_args = mock_session.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers.get("Authorization") == "Token my-secret-token"
+
+
 class TestQuerySourceInfluxdbV3Auth:
     """Tests for query_source_influxdb v3 authentication."""
 

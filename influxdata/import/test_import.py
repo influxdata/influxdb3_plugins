@@ -441,7 +441,11 @@ class TestGetSourceDatabasesListV2:
             {
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 2,
+            },
+            credentials={
                 "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )
@@ -467,7 +471,11 @@ class TestGetSourceDatabasesListV2:
             {
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 2,
+            },
+            credentials={
                 "source_token": "my-secret-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )
@@ -541,8 +549,12 @@ class TestGetSourceTablesListV2:
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 2,
                 "source_database": "mybucket",
-                "source_token": "my-token",
                 # Note: no source_org provided
+            },
+            credentials={
+                "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )
@@ -569,7 +581,11 @@ class TestGetSourceTablesListV2:
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 2,
                 "source_database": "mybucket",
+            },
+            credentials={
                 "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )
@@ -590,7 +606,11 @@ class TestGetSourceTablesListV2:
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 2,
                 "source_database": "mybucket",
+            },
+            credentials={
                 "source_token": "my-secret-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )

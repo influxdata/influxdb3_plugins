@@ -1247,15 +1247,13 @@ def save_import_config(
 def load_import_config(
     influxdb3_local,
     import_id: str,
+    credentials: Dict[str, Optional[str]],
     task_id: str,
-    source_token: str = None,
-    source_username: str = None,
-    source_password: str = None,
 ) -> Optional[ImportConfig]:
     """
     Load import configuration from database
     Returns ImportConfig or None if not found
-    Authentication credentials must be provided as parameters since they're not stored in DB for security
+    Authentication credentials must be provided in credentials dict since they're not stored in DB for security
     """
     try:
         query = f"""
@@ -1286,9 +1284,9 @@ def load_import_config(
         # Reconstruct ImportConfig from saved data
         config = ImportConfig(
             source_url=row.get("source_url"),
-            source_token=source_token,
-            source_username=source_username,
-            source_password=source_password,
+            source_token=credentials.get("source_token"),
+            source_username=credentials.get("source_username"),
+            source_password=credentials.get("source_password"),
             source_database=row.get("source_database"),
             dest_database=row.get("dest_database"),
             influxdb_version=int(row.get("influxdb_version", 1)),
@@ -2282,15 +2280,13 @@ def pause_import(influxdb3_local, import_id: str, task_id: str) -> Dict[str, Any
 def resume_import(
     influxdb3_local,
     import_id: str,
+    credentials: Dict[str, Optional[str]],
     task_id: str,
-    source_token: str = None,
-    source_username: str = None,
-    source_password: str = None,
 ) -> Dict[str, Any]:
     """
     Resume a paused or incomplete import
     Checks import status and continues from where it stopped
-    Requires either source_token OR (source_username AND source_password)
+    Requires either source_token OR (source_username AND source_password) in credentials dict
     """
     try:
         influxdb3_local.info(
@@ -2354,10 +2350,8 @@ def resume_import(
         config = load_import_config(
             influxdb3_local,
             import_id,
+            credentials,
             task_id,
-            source_token,
-            source_username,
-            source_password,
         )
         if not config:
             return {
@@ -2914,12 +2908,14 @@ def check_source_connection(
 
 def get_source_databases_list(
     body_data: Dict[str, Any],
+    credentials: Dict[str, Optional[str]],
     session: requests.Session = None,
 ) -> Dict[str, Any]:
     """Get list of databases from source InfluxDB instance.
 
     Args:
-        body_data: Dict containing source_url, influxdb_version, and auth credentials
+        body_data: Dict containing source_url and influxdb_version
+        credentials: Dict containing auth credentials (source_token, source_username, source_password)
         session: Optional requests.Session for dependency injection (testing)
 
     Returns:
@@ -2934,18 +2930,10 @@ def get_source_databases_list(
 
     source_url = body_data.get("source_url")
     influxdb_version = body_data.get("influxdb_version")
-    source_token = body_data.get("source_token")
-    source_username = body_data.get("source_username")
-    source_password = body_data.get("source_password")
 
     base_url = _parse_url_with_port_inference(source_url)
 
     try:
-        credentials = {
-            "source_token": source_token,
-            "source_username": source_username,
-            "source_password": source_password,
-        }
 
         if influxdb_version == 1:
             headers = _build_v1_headers(credentials)
@@ -3002,12 +2990,14 @@ def get_source_databases_list(
 
 def get_source_tables_list(
     body_data: Dict[str, Any],
+    credentials: Dict[str, Optional[str]],
     session: requests.Session = None,
 ) -> Dict[str, Any]:
     """Get list of tables/measurements from source database.
 
     Args:
-        body_data: Dict containing source_url, influxdb_version, source_database, and auth credentials
+        body_data: Dict containing source_url, influxdb_version, and source_database
+        credentials: Dict containing auth credentials (source_token, source_username, source_password)
         session: Optional requests.Session for dependency injection (testing)
 
     Returns:
@@ -3023,21 +3013,12 @@ def get_source_tables_list(
     source_url = body_data.get("source_url")
     influxdb_version = body_data.get("influxdb_version")
     source_database = body_data.get("source_database")
-    source_token = body_data.get("source_token")
-    source_username = body_data.get("source_username")
-    source_password = body_data.get("source_password")
     source_org = body_data.get("source_org")
 
     if not source_database:
         return {"error": "source_database is required"}
 
     base_url = _parse_url_with_port_inference(source_url)
-
-    credentials = {
-        "source_token": source_token,
-        "source_username": source_username,
-        "source_password": source_password,
-    }
 
     try:
         if influxdb_version == 1:
@@ -3159,47 +3140,11 @@ def process_request(
             if not import_id:
                 return {"status": "error", "error": "import_id required"}
 
-            # Get authentication credentials from query parameters or request body for resume
-            # Parse request body if JSON
-            body_data: dict = json.loads(request_body) if request_body else {}
-
-            # Try to get credentials from body first, then from query parameters
-            source_token = body_data.get("source_token") or query_parameters.get(
-                "source_token"
-            )
-            source_username = body_data.get("source_username") or query_parameters.get(
-                "source_username"
-            )
-            source_password = body_data.get("source_password") or query_parameters.get(
-                "source_password"
-            )
-
-            # Validate that either (username AND password) OR (token) is provided
-            if source_username or source_password:
-                if not (source_username and source_password):
-                    return {
-                        "status": "error",
-                        "error": "source_username and source_password must be provided together",
-                    }
-                if source_token:
-                    return {
-                        "status": "error",
-                        "error": "Cannot use both (source_username/source_password) and source_token. "
-                        "Please provide either (source_username and source_password) OR (source_token only)",
-                    }
-            elif not source_token:
-                return {
-                    "status": "error",
-                    "error": "Must provide either (source_username and source_password) OR (source_token) for resume action",
-                }
-
             return resume_import(
                 influxdb3_local,
                 import_id,
+                credentials,
                 task_id,
-                source_token,
-                source_username,
-                source_password,
             )
 
         elif action == "cancel":
@@ -3216,14 +3161,14 @@ def process_request(
 
         elif action == "databases":
             body_data = json.loads(request_body) if request_body else {}
-            result = get_source_databases_list(body_data)
+            result = get_source_databases_list(body_data, credentials)
             if result.get("error"):
                 influxdb3_local.error(f"[{task_id}] databases failed: {result.get('error')}")
             return result
 
         elif action == "tables":
             body_data = json.loads(request_body) if request_body else {}
-            result = get_source_tables_list(body_data)
+            result = get_source_tables_list(body_data, credentials)
             if result.get("error"):
                 influxdb3_local.error(f"[{task_id}] tables failed: {result.get('error')}")
             return result

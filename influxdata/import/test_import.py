@@ -387,7 +387,11 @@ class TestGetSourceDatabasesListV3:
             {
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 3,
+            },
+            credentials={
                 "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )
@@ -418,7 +422,11 @@ class TestGetSourceTablesListV3:
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 3,
                 "source_database": "mydb",
+            },
+            credentials={
                 "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )

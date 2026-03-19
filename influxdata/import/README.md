@@ -163,11 +163,14 @@ Start a new import from source InfluxDB to InfluxDB 3.
 
 **Request**: `POST /api/v3/engine/import?action=start`
 
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
+- `Content-Type: application/json`
+
 **Request body** (JSON):
 ```json
 {
   "source_url": "http://localhost:8086",
-  "source_token": "my-token",
   "influxdb_version": 1,
   "source_database": "telegraf",
   "dest_database": "imported_data",

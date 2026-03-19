@@ -293,13 +293,16 @@ Get list of tables/measurements from a source database.
 
 **Request**: `POST /api/v3/engine/import?action=tables`
 
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
+- `Content-Type: application/json`
+
 **Request body** (JSON):
 ```json
 {
   "source_url": "http://localhost:8086",
   "influxdb_version": 1,
-  "source_database": "telegraf",
-  "source_token": "my-token"
+  "source_database": "telegraf"
 }
 ```
 

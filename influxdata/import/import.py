@@ -274,6 +274,7 @@ def get_http_session() -> requests.Session:
 def query_source_influxdb(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     query: str,
     task_id: str,
 ) -> Dict[str, Any]:
@@ -291,29 +292,16 @@ def query_source_influxdb(
 
     headers = {"Content-Type": "application/vnd.influxql"}
 
-    # Determine authentication method based on InfluxDB version
+    # Build auth headers based on version
     if config.influxdb_version == 1:
-        # InfluxDB v1 authentication
-        if config.source_username and config.source_password:
-            # Basic Authentication with username:password
-            credentials = f"{config.source_username}:{config.source_password}"
-            encoded_credentials = base64.b64encode(credentials.encode()).decode()
-            headers["Authorization"] = f"Basic {encoded_credentials}"
-        elif config.source_token:
-            # Bearer token authentication for v1
-            headers["Authorization"] = f"Bearer {config.source_token}"
+        auth_headers = _build_v1_headers(credentials)
+        headers.update(auth_headers)
     elif config.influxdb_version == 2:
-        # InfluxDB v2 authentication (requires token)
-        if config.source_token:
-            headers["Authorization"] = f"Token {config.source_token}"
-        else:
-            raise ValueError("InfluxDB v2 requires source_token for authentication")
+        auth_headers = _build_v2_headers(credentials)
+        headers.update(auth_headers)
     elif config.influxdb_version == 3:
-        # InfluxDB v3 authentication (Bearer token)
-        if config.source_token:
-            headers["Authorization"] = f"Bearer {config.source_token}"
-        else:
-            raise ValueError("InfluxDB v3 requires source_token for authentication")
+        auth_headers = _build_v3_headers(credentials)
+        headers.update(auth_headers)
 
     retry_count = 0
     backoff = INITIAL_BACKOFF_SECONDS
@@ -348,11 +336,11 @@ def query_source_influxdb(
 
 
 def get_source_measurements(
-    influxdb3_local, config: ImportConfig, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str
 ) -> List[str]:
     """Get list of measurements (tables) from source database"""
     result = query_source_influxdb(
-        influxdb3_local, config, "SHOW MEASUREMENTS", task_id
+        influxdb3_local, config, credentials, "SHOW MEASUREMENTS", task_id
     )
 
     measurements = []
@@ -369,11 +357,11 @@ def get_source_measurements(
 
 
 def get_field_keys(
-    influxdb3_local, config: ImportConfig, measurement: str, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], measurement: str, task_id: str
 ) -> Dict[str, str]:
     """Get field keys and their types for a measurement"""
     query = f'SHOW FIELD KEYS FROM "{measurement}"'
-    result = query_source_influxdb(influxdb3_local, config, query, task_id)
+    result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
 
     fields = {}
     if "results" in result and len(result["results"]) > 0:
@@ -387,11 +375,11 @@ def get_field_keys(
 
 
 def get_tag_keys(
-    influxdb3_local, config: ImportConfig, measurement: str, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], measurement: str, task_id: str
 ) -> List[str]:
     """Get tag keys for a measurement"""
     query = f'SHOW TAG KEYS FROM "{measurement}"'
-    result = query_source_influxdb(influxdb3_local, config, query, task_id)
+    result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
 
     tags = []
     if "results" in result and len(result["results"]) > 0:
@@ -414,6 +402,7 @@ def check_tag_field_conflicts(tags: List[str], fields: Dict[str, str]) -> List[s
 def estimate_import_time(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     measurements: List[str],
     start_dt: datetime,
     end_dt: datetime,
@@ -442,7 +431,7 @@ def estimate_import_time(
         try:
             # Get actual data boundaries
             actual_start, actual_end = find_actual_data_boundaries(
-                influxdb3_local, config, measurement, start_dt, end_dt, task_id
+                influxdb3_local, config, credentials, measurement, start_dt, end_dt, task_id
             )
 
             if not actual_start or not actual_end:
@@ -469,7 +458,7 @@ def estimate_import_time(
             """
 
             result = query_source_influxdb(
-                influxdb3_local, config, count_query, task_id
+                influxdb3_local, config, credentials, count_query, task_id
             )
 
             row_count = 0
@@ -536,7 +525,7 @@ def estimate_import_time(
 
 
 def perform_preflight_checks(
-    influxdb3_local, config: ImportConfig, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str
 ) -> Tuple[bool, List[str], Dict[str, Any]]:
     """
     Perform pre-flight validation checks
@@ -554,7 +543,7 @@ def perform_preflight_checks(
 
     # Check source connectivity
     try:
-        measurements = get_source_measurements(influxdb3_local, config, task_id)
+        measurements = get_source_measurements(influxdb3_local, config, credentials, task_id)
         metadata["measurements"] = measurements
         metadata["total_tables"] = len(measurements)
         influxdb3_local.info(
@@ -612,6 +601,7 @@ def parse_timestamp(ts_str: str) -> datetime:
 def find_actual_data_boundaries(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     measurement: str,
     user_start: Optional[datetime],
     user_end: Optional[datetime],
@@ -676,7 +666,7 @@ def find_actual_data_boundaries(
 
     try:
         # --- Query for actual_start ---
-        result = query_source_influxdb(influxdb3_local, config, start_query, task_id)
+        result = query_source_influxdb(influxdb3_local, config, credentials, start_query, task_id)
         if "results" in result and result["results"][0].get("series"):
             series = result["results"][0]["series"][0]
             if "values" in series and series["values"]:
@@ -686,7 +676,7 @@ def find_actual_data_boundaries(
                 )
 
         # --- Query for actual_end ---
-        result = query_source_influxdb(influxdb3_local, config, end_query, task_id)
+        result = query_source_influxdb(influxdb3_local, config, credentials, end_query, task_id)
         if "results" in result and result["results"][0].get("series"):
             series = result["results"][0]["series"][0]
             if "values" in series and series["values"]:
@@ -708,6 +698,7 @@ def find_actual_data_boundaries(
 def sample_data_density(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     measurement: str,
     start: datetime,
     end: datetime,
@@ -764,7 +755,7 @@ def sample_data_density(
             """
 
             try:
-                result = query_source_influxdb(influxdb3_local, config, query, task_id)
+                result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
                 if "results" in result and result["results"][0].get("series"):
                     series = result["results"][0]["series"][0]
                     if "values" in series and series["values"]:
@@ -1413,6 +1404,7 @@ def check_pause_state(
 def import_table(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     import_id: str,
     measurement: str,
     start_time: datetime,
@@ -1431,7 +1423,7 @@ def import_table(
 
     # Find actual data boundaries
     actual_start, actual_end = find_actual_data_boundaries(
-        influxdb3_local, config, measurement, start_time, end_time, task_id
+        influxdb3_local, config, credentials, measurement, start_time, end_time, task_id
     )
 
     if not actual_start or not actual_end:
@@ -1458,12 +1450,12 @@ def import_table(
 
     # Calculate optimal batch window
     optimal_window_seconds = sample_data_density(
-        influxdb3_local, config, measurement, actual_start, actual_end, task_id
+        influxdb3_local, config, credentials, measurement, actual_start, actual_end, task_id
     )
 
     # Get schema info for conflict detection
-    fields = get_field_keys(influxdb3_local, config, measurement, task_id)
-    tags = get_tag_keys(influxdb3_local, config, measurement, task_id)
+    fields = get_field_keys(influxdb3_local, config, credentials, measurement, task_id)
+    tags = get_tag_keys(influxdb3_local, config, credentials, measurement, task_id)
     conflicts = check_tag_field_conflicts(tags, fields)
 
     # Add schema issues to metadata if conflicts found
@@ -1601,7 +1593,7 @@ def import_table(
             influxdb3_local.info(
                 f"[{task_id}] Querying data for '{measurement}' from {window_start} to {window_end}"
             )
-            result = query_source_influxdb(influxdb3_local, config, query, task_id)
+            result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
 
             if "results" in result and result["results"][0].get("series"):
                 series = result["results"][0]["series"][0]
@@ -1697,6 +1689,7 @@ def import_table(
 def resume_incomplete_import(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     import_id: str,
     incomplete_tables: List[Dict[str, Any]],
     task_id: str,
@@ -1754,6 +1747,7 @@ def resume_incomplete_import(
             table_result = import_table(
                 influxdb3_local,
                 config,
+                credentials,
                 import_id,
                 measurement,
                 start_dt,
@@ -1777,6 +1771,7 @@ def resume_incomplete_import(
             table_result = import_table(
                 influxdb3_local,
                 config,
+                credentials,
                 import_id,
                 measurement,
                 resume_start,
@@ -1810,6 +1805,7 @@ def resume_incomplete_import(
             table_result = import_table(
                 influxdb3_local,
                 config,
+                credentials,
                 import_id,
                 measurement,
                 start_dt,
@@ -1967,7 +1963,7 @@ def generate_import_plan(
     return import_plan
 
 
-def start_import(influxdb3_local, config: ImportConfig, task_id: str) -> Dict[str, Any]:
+def start_import(influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str) -> Dict[str, Any]:
     """
     Start a new import process
     Returns import_id and initial status
@@ -2023,7 +2019,7 @@ def start_import(influxdb3_local, config: ImportConfig, task_id: str) -> Dict[st
 
     # Perform pre-flight checks
     success, errors, metadata = perform_preflight_checks(
-        influxdb3_local, config, task_id
+        influxdb3_local, config, credentials, task_id
     )
 
     if not success:
@@ -2055,7 +2051,7 @@ def start_import(influxdb3_local, config: ImportConfig, task_id: str) -> Dict[st
         f"[{task_id}] Estimating import time based on data sampling..."
     )
     time_estimate = estimate_import_time(
-        influxdb3_local, config, measurements, start_dt, end_dt, task_id
+        influxdb3_local, config, credentials, measurements, start_dt, end_dt, task_id
     )
     metadata["time_estimate"] = time_estimate
 
@@ -2110,6 +2106,7 @@ def start_import(influxdb3_local, config: ImportConfig, task_id: str) -> Dict[st
         table_result = import_table(
             influxdb3_local,
             config,
+            credentials,
             import_id,
             measurement,
             start_dt,
@@ -2420,9 +2417,15 @@ def resume_import(
         )
 
         # 4. Resume the import using resume_incomplete_import
+        credentials = {
+            "source_token": source_token,
+            "source_username": source_username,
+            "source_password": source_password,
+        }
         return resume_incomplete_import(
             influxdb3_local,
             config,
+            credentials,
             import_id,
             incomplete_tables,
             task_id,
@@ -3125,6 +3128,9 @@ def process_request(
     action = query_parameters.get("action", "start")
     import_id = query_parameters.get("import_id")
 
+    # Extract credentials from request headers (available for all actions)
+    credentials = extract_credentials(request_headers)
+
     try:
         # Handle different actions
         if action == "start":
@@ -3137,7 +3143,7 @@ def process_request(
                 return {"status": "error", "error": f"Configuration error: {e}"}
 
             # Start import
-            return start_import(influxdb3_local, config, task_id)
+            return start_import(influxdb3_local, config, credentials, task_id)
 
         elif action == "status":
             if not import_id:

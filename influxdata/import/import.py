@@ -2771,25 +2771,16 @@ def _parse_url_with_port_inference(source_url: str) -> str:
         return source_url
 
 
-def _build_v1_headers(
-    username: str = None,
-    password: str = None,
-    token: str = None,
-) -> Dict[str, str]:
-    """Build headers for InfluxDB v1 API requests.
-
-    Args:
-        username: Optional username for Basic auth
-        password: Optional password for Basic auth
-        token: Optional token for Bearer auth
-
-    Returns:
-        Headers dict with Content-Type and optional Authorization
-    """
+def _build_v1_headers(credentials: Dict[str, Optional[str]]) -> Dict[str, str]:
+    """Build headers for InfluxDB v1 API requests."""
     headers = {"Content-Type": "application/json"}
+    username = credentials.get("source_username")
+    password = credentials.get("source_password")
+    token = credentials.get("source_token")
+
     if username and password:
-        credentials = f"{username}:{password}"
-        encoded = base64.b64encode(credentials.encode()).decode()
+        creds = f"{username}:{password}"
+        encoded = base64.b64encode(creds.encode()).decode()
         headers["Authorization"] = f"Basic {encoded}"
     elif token:
         headers["Authorization"] = f"Bearer {token}"
@@ -2797,36 +2788,23 @@ def _build_v1_headers(
 
 
 def _build_v2_headers(
-    token: str = None,
+    credentials: Dict[str, Optional[str]],
     extra_headers: Dict[str, str] = None,
 ) -> Dict[str, str]:
-    """Build headers for InfluxDB v2 API requests.
-
-    Args:
-        token: Optional token for Token auth
-        extra_headers: Optional additional headers to include
-
-    Returns:
-        Headers dict with optional Authorization and extra headers
-    """
+    """Build headers for InfluxDB v2 API requests."""
     headers = {}
     if extra_headers:
         headers.update(extra_headers)
+    token = credentials.get("source_token")
     if token:
         headers["Authorization"] = f"Token {token}"
     return headers
 
 
-def _build_v3_headers(token: str = None) -> Dict[str, str]:
-    """Build headers for InfluxDB v3 API requests.
-
-    Args:
-        token: Optional token for Bearer auth
-
-    Returns:
-        Headers dict with Content-Type and optional Authorization
-    """
+def _build_v3_headers(credentials: Dict[str, Optional[str]]) -> Dict[str, str]:
+    """Build headers for InfluxDB v3 API requests."""
     headers = {"Content-Type": "application/json"}
+    token = credentials.get("source_token")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
@@ -2960,8 +2938,14 @@ def get_source_databases_list(
     base_url = _parse_url_with_port_inference(source_url)
 
     try:
+        credentials = {
+            "source_token": source_token,
+            "source_username": source_username,
+            "source_password": source_password,
+        }
+
         if influxdb_version == 1:
-            headers = _build_v1_headers(source_username, source_password, source_token)
+            headers = _build_v1_headers(credentials)
 
             response = session.get(
                 f"{base_url}/query",
@@ -2976,7 +2960,7 @@ def get_source_databases_list(
             return {"databases": sorted(databases)}
 
         elif influxdb_version == 2:
-            headers = _build_v2_headers(source_token)
+            headers = _build_v2_headers(credentials)
 
             response = session.get(
                 f"{base_url}/api/v2/buckets",
@@ -2994,7 +2978,7 @@ def get_source_databases_list(
             return {"databases": sorted(databases)}
 
         elif influxdb_version == 3:
-            headers = _build_v3_headers(source_token)
+            headers = _build_v3_headers(credentials)
 
             response = session.get(
                 f"{base_url}/api/v3/configure/database",
@@ -3046,9 +3030,15 @@ def get_source_tables_list(
 
     base_url = _parse_url_with_port_inference(source_url)
 
+    credentials = {
+        "source_token": source_token,
+        "source_username": source_username,
+        "source_password": source_password,
+    }
+
     try:
         if influxdb_version == 1:
-            headers = _build_v1_headers(source_username, source_password, source_token)
+            headers = _build_v1_headers(credentials)
 
             response = session.get(
                 f"{base_url}/query",
@@ -3066,7 +3056,7 @@ def get_source_tables_list(
                 return {"error": "source_org is required for InfluxDB v2"}
 
             headers = _build_v2_headers(
-                source_token,
+                credentials,
                 extra_headers={
                     "Content-Type": "application/vnd.flux",
                     "Accept": "application/csv",
@@ -3096,7 +3086,7 @@ def get_source_tables_list(
             return {"tables": sorted(tables)}
 
         elif influxdb_version == 3:
-            headers = _build_v3_headers(source_token)
+            headers = _build_v3_headers(credentials)
 
             response = session.get(
                 f"{base_url}/api/v3/query_sql",

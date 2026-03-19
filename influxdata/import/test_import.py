@@ -271,20 +271,18 @@ class TestCheckSourceConnection:
 class TestBuildV3Headers:
     """Tests for _build_v3_headers."""
 
-    def test_with_token_returns_bearer_auth(self):
-        result = _build_v3_headers("my-token")
-        assert result == {
+    def test_with_token(self):
+        credentials = {"source_token": "my-token", "source_username": None, "source_password": None}
+        headers = _build_v3_headers(credentials)
+        assert headers == {
             "Content-Type": "application/json",
             "Authorization": "Bearer my-token",
         }
 
-    def test_without_token_returns_content_type_only(self):
-        result = _build_v3_headers(None)
-        assert result == {"Content-Type": "application/json"}
-
-    def test_empty_token_returns_content_type_only(self):
-        result = _build_v3_headers("")
-        assert result == {"Content-Type": "application/json"}
+    def test_without_token(self):
+        credentials = {"source_token": None, "source_username": None, "source_password": None}
+        headers = _build_v3_headers(credentials)
+        assert headers == {"Content-Type": "application/json"}
 
 
 class TestParseV3Databases:

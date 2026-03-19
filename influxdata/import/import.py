@@ -1284,9 +1284,6 @@ def load_import_config(
         # Reconstruct ImportConfig from saved data
         config = ImportConfig(
             source_url=row.get("source_url"),
-            source_token=credentials.get("source_token"),
-            source_username=credentials.get("source_username"),
-            source_password=credentials.get("source_password"),
             source_database=row.get("source_database"),
             dest_database=row.get("dest_database"),
             influxdb_version=int(row.get("influxdb_version", 1)),

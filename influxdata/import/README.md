@@ -419,10 +419,10 @@ curl -X POST "http://localhost:8181/api/v3/engine/import?action=resume&import_id
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Token: my-token" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://localhost:8086",
-    "source_token": "my-token",
     "influxdb_version": 1,
     "source_database": "telegraf",
     "dry_run": true

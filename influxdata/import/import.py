@@ -2947,20 +2947,18 @@ def get_source_databases_list(
 
         elif influxdb_version == 2:
             headers = _build_v2_headers(credentials)
+            headers["Content-Type"] = "application/json"
 
             response = session.get(
-                f"{base_url}/api/v2/buckets",
+                f"{base_url}/query",
+                params={"q": "SHOW DATABASES"},
                 headers=headers,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
-            result = response.json()
-            databases = []
-            if "buckets" in result:
-                databases = [bucket["name"] for bucket in result["buckets"]]
-
-            databases = [db for db in databases if not db.startswith("_")]
+            databases = _parse_v1_series_values(response.json())
+            databases = [db for db in databases if db not in ["_internal"]]
             return {"databases": sorted(databases)}
 
         elif influxdb_version == 3:

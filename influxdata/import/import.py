@@ -3029,37 +3029,18 @@ def get_source_tables_list(
             return {"tables": sorted(tables)}
 
         elif influxdb_version == 2:
-            if not source_org:
-                return {"error": "source_org is required for InfluxDB v2"}
+            headers = _build_v2_headers(credentials)
+            headers["Content-Type"] = "application/json"
 
-            headers = _build_v2_headers(
-                credentials,
-                extra_headers={
-                    "Content-Type": "application/vnd.flux",
-                    "Accept": "application/csv",
-                }
-            )
-
-            escaped_bucket = source_database.replace('"', '\\"')
-            flux_query = f'''import "influxdata/influxdb/schema" schema.measurements(bucket: "{escaped_bucket}")'''
-
-            response = session.post(
-                f"{base_url}/api/v2/query",
-                params={"org": source_org},
+            response = session.get(
+                f"{base_url}/query",
+                params={"db": source_database, "q": "SHOW MEASUREMENTS"},
                 headers=headers,
-                data=flux_query,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
-            tables = []
-            lines = response.text.strip().split("\n")
-            for line in lines[1:]:
-                if line.strip() and "," in line:
-                    parts = line.split(",")
-                    if len(parts) >= 4 and parts[3]:
-                        tables.append(parts[3].strip())
-
+            tables = _parse_v1_series_values(response.json())
             return {"tables": sorted(tables)}
 
         elif influxdb_version == 3:

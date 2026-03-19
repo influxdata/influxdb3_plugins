@@ -168,9 +168,6 @@ class ImportConfig:
     target_batch_size: int = 2000
     table_filter: Optional[List[str]] = None
     config_file_path: Optional[str] = None
-    source_token: Optional[str] = None
-    source_username: Optional[str] = None
-    source_password: Optional[str] = None
     dry_run: bool = False
 
 

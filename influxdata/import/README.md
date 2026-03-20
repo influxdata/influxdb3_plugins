@@ -36,22 +36,48 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `influxdb_version`  | integer | required | Source InfluxDB version: 1, 2, or 3                                |
 | `source_database`   | string  | required | Source database name to import from                               |
 
-### Authentication parameters (required - choose one method)
+### Authentication
 
-**Method 1: Token-based authentication** (InfluxDB v2 or v1 with token support)
+Credentials are passed via HTTP headers on each request.
 
-| Parameter      | Type   | Required | Description                                      |
-|----------------|--------|----------|--------------------------------------------------|
-| `source_token` | string | Yes      | Authentication token for the source InfluxDB     |
+| Header | Purpose |
+|--------|---------|
+| `Source-Token` | Bearer/API token authentication (InfluxDB v1/v2/v3) |
+| `Source-Username` | Basic auth username (InfluxDB v1) |
+| `Source-Password` | Basic auth password (InfluxDB v1) |
 
-**Method 2: Username/Password authentication** (InfluxDB v1)
+**Method 1: Token-based authentication**
 
-| Parameter         | Type   | Required | Description                                                |
-|-------------------|--------|----------|------------------------------------------------------------|
-| `source_username` | string | Yes      | Username for basic authentication (must use with password) |
-| `source_password` | string | Yes      | Password for basic authentication (must use with username) |
+Use the `Source-Token` header for token-based authentication:
 
-> **Note**: You must provide EITHER `source_token` OR (`source_username` AND `source_password` together). Using both methods simultaneously will result in an error.
+```bash
+curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Content-Type: application/json" \
+  -H "Source-Token: my-secret-token" \
+  -d '{
+    "source_url": "http://localhost:8086",
+    "influxdb_version": 2,
+    "source_database": "telegraf"
+  }'
+```
+
+**Method 2: Username/Password authentication**
+
+Use the `Source-Username` and `Source-Password` headers for basic authentication:
+
+```bash
+curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Content-Type: application/json" \
+  -H "Source-Username: admin" \
+  -H "Source-Password: my-password" \
+  -d '{
+    "source_url": "http://localhost:8086",
+    "influxdb_version": 1,
+    "source_database": "telegraf"
+  }'
+```
+
+> **Note**: Authentication errors from the source InfluxDB are returned directly. The plugin does not validate credentials upfront.
 
 ### Optional parameters
 
@@ -137,11 +163,14 @@ Start a new import from source InfluxDB to InfluxDB 3.
 
 **Request**: `POST /api/v3/engine/import?action=start`
 
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
+- `Content-Type: application/json`
+
 **Request body** (JSON):
 ```json
 {
   "source_url": "http://localhost:8086",
-  "source_token": "my-token",
   "influxdb_version": 1,
   "source_database": "telegraf",
   "dest_database": "imported_data",
@@ -172,25 +201,12 @@ Resume a paused or interrupted import.
 
 **Request**: `POST /api/v3/engine/import?action=resume&import_id=<import_id>`
 
-**Request body** (JSON):
-```json
-{
-  "source_token": "my-token"
-}
-```
-*or*
-```json
-{
-  "source_username": "admin",
-  "source_password": "my-password"
-}
-```
-*or*
-```
-`POST /api/v3/engine/import?action=resume&import_id=<import_id>&source_token=your_token`
-```
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
 
-> **Note**: Authentication credentials are not stored for security reasons and must be provided when resuming. Returns error if import is not found, already cancelled, or already running.
+> **Note**: Credentials must be provided via headers when resuming.
+
+> **Note**: Returns error if import is not found, already cancelled, or already running.
 
 ### Cancel Import
 
@@ -259,12 +275,15 @@ Get list of databases from source InfluxDB instance.
 
 **Request**: `POST /api/v3/engine/import?action=databases`
 
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
+- `Content-Type: application/json`
+
 **Request body** (JSON):
 ```json
 {
   "source_url": "http://localhost:8086",
-  "influxdb_version": 1,
-  "source_token": "my-token"
+  "influxdb_version": 1
 }
 ```
 
@@ -274,13 +293,16 @@ Get list of tables/measurements from a source database.
 
 **Request**: `POST /api/v3/engine/import?action=tables`
 
+**Headers**:
+- `Source-Token: my-token` (or `Source-Username` + `Source-Password`)
+- `Content-Type: application/json`
+
 **Request body** (JSON):
 ```json
 {
   "source_url": "http://localhost:8086",
   "influxdb_version": 1,
-  "source_database": "telegraf",
-  "source_token": "my-token"
+  "source_database": "telegraf"
 }
 ```
 
@@ -304,10 +326,10 @@ influxdb3 enable trigger --database mydb import_trigger
 
 # Start import via HTTP
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Token: my-super-secret-token" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://localhost:8086",
-    "source_token": "my-super-secret-token",
     "influxdb_version": 1,
     "source_database": "telegraf",
     "dest_database": "imported_data"
@@ -329,11 +351,11 @@ Import specific tables within a date range:
 ```bash
 # Start import with time range and table filter
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Username: admin" \
+  -H "Source-Password: my-password" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://influxdb-source.example.com:8086",
-    "source_username": "admin",
-    "source_password": "my-password",
     "influxdb_version": 1,
     "source_database": "telegraf",
     "dest_database": "production_metrics",
@@ -359,10 +381,10 @@ Monitor and control a long-running import:
 ```bash
 # Start import (logs import_id, does not return it immediately)
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Token: my-token" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://localhost:8086",
-    "source_token": "my-token",
     "influxdb_version": 2,
     "source_database": "large_database",
     "dest_database": "imported"
@@ -382,10 +404,7 @@ curl "http://localhost:8181/api/v3/engine/import?action=status&import_id=$IMPORT
 
 # Resume later
 curl -X POST "http://localhost:8181/api/v3/engine/import?action=resume&import_id=$IMPORT_ID" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "source_token": "my-token"
-  }'
+  -H "Source-Token: my-token"
 ```
 
 ### Expected results
@@ -400,10 +419,10 @@ curl -X POST "http://localhost:8181/api/v3/engine/import?action=resume&import_id
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
+  -H "Source-Token: my-token" \
   -H "Content-Type: application/json" \
   -d '{
     "source_url": "http://localhost:8086",
-    "source_token": "my-token",
     "influxdb_version": 1,
     "source_database": "telegraf",
     "dry_run": true
@@ -516,15 +535,14 @@ This plugin supports using TOML configuration files to specify all plugin argume
    influxdb_version = 1
    source_database = "telegraf"
 
-   # Authentication (choose one method)
-   source_token = "my-token"
-
    # Optional parameters
    dest_database = "imported_data"
    start_timestamp = "2024-01-01T00:00:00Z"
    end_timestamp = "2024-12-31T23:59:59Z"
    table_filter = "cpu.mem.disk"
    ```
+
+> **Note**: Credentials are NOT stored in TOML files. Provide them via HTTP headers on each request.
 
 4. **Create a trigger using the `config_file_path` argument**:
 
@@ -558,7 +576,7 @@ When a import starts, the plugin loads configuration in this order:
 
 ```python
 # 1. Start with environment variables (lowest priority)
-IMPORT_SOURCE_URL, IMPORT_SOURCE_TOKEN, etc.
+IMPORT_SOURCE_URL, IMPORT_SOURCE_DATABASE, etc.
 
 # 2. Override with trigger arguments (--trigger-arguments)
 config_file_path=import_config.toml, source_url=http://localhost:8086, etc.
@@ -578,9 +596,6 @@ config_file_path=import_config.toml, source_url=http://localhost:8086, etc.
 The following environment variables can be used:
 
 - `IMPORT_SOURCE_URL` → `source_url`
-- `IMPORT_SOURCE_TOKEN` → `source_token`
-- `IMPORT_SOURCE_USERNAME` → `source_username`
-- `IMPORT_SOURCE_PASSWORD` → `source_password`
 - `IMPORT_SOURCE_DATABASE` → `source_database`
 - `IMPORT_DEST_DATABASE` → `dest_database`
 - `IMPORT_START_TIMESTAMP` → `start_timestamp`
@@ -656,9 +671,13 @@ influxdb3 query --database mydb "SELECT * FROM import_pause_state WHERE import_i
 
 #### `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 
-HTTP request handler that routes to appropriate import actions based on the `action` query parameter.
+HTTP request handler that routes to appropriate import actions based on the `action` query parameter. Extracts credentials from `request_headers` using `extract_credentials()` and passes them to action handlers.
 
-#### `start_import(influxdb3_local, config, task_id)`
+#### `extract_credentials(request_headers)`
+
+Extracts authentication credentials from HTTP headers. Returns a dict with keys `source_token`, `source_username`, `source_password` (values are `None` if header not present).
+
+#### `start_import(influxdb3_local, config, credentials, task_id)`
 
 Starts a new import process:
 1. Performs pre-flight checks (connectivity, measurements discovery)
@@ -666,7 +685,7 @@ Starts a new import process:
 3. Creates import configuration and state records
 4. Initiates table-by-table import
 
-#### `import_table(influxdb3_local, config, import_id, measurement, start_time, end_time, task_id, ...)`
+#### `import_table(influxdb3_local, config, credentials, import_id, measurement, start_time, end_time, task_id, ...)`
 
 Imports a single table:
 1. Finds actual data boundaries within specified range
@@ -676,7 +695,7 @@ Imports a single table:
 5. Writes to destination database
 6. Tracks progress and checks for pause/cancel signals
 
-#### `resume_import(influxdb3_local, import_id, task_id, ...)`
+#### `resume_import(influxdb3_local, import_id, credentials, task_id)`
 
 Resumes an interrupted import:
 1. Loads saved import configuration
@@ -698,7 +717,7 @@ Tests connectivity to a URL and identifies if it's an InfluxDB instance (5-secon
 5. Falls back to `cluster-uuid` header detection for v3 (returns `version: "3.x.x"`)
 6. Returns failure with message if not InfluxDB or unreachable
 
-#### `get_source_databases_list(body_data, session)`
+#### `get_source_databases_list(body_data, credentials, session)`
 
 Lists databases from source InfluxDB instance:
 1. Validates required parameters
@@ -706,7 +725,7 @@ Lists databases from source InfluxDB instance:
 3. For v2: Queries `/api/v2/buckets` API, filters out system buckets (prefixed with `_`)
 4. Returns sorted list of database names
 
-#### `get_source_tables_list(body_data, session)`
+#### `get_source_tables_list(body_data, credentials, session)`
 
 Lists tables/measurements from a source database:
 1. Validates required parameters including `source_database`
@@ -769,12 +788,13 @@ During import, the plugin saves checkpoints:
 3. Verify credentials are correct
 4. For InfluxDB v2/v3, ensure you're using token authentication
 
-#### Issue: "Authentication error: Must provide either..." error
+#### Issue: Authentication errors from source InfluxDB
 
-**Solution**: Choose one authentication method:
-- For token: Provide only `source_token`
-- For username/password: Provide both `source_username` AND `source_password` together
-- Do not mix authentication methods
+**Solution**: Pass credentials via HTTP headers:
+1. For token auth: Add header `-H "Source-Token: your-token"`
+2. For username/password: Add headers `-H "Source-Username: user" -H "Source-Password: pass"`
+3. Verify credentials work directly against source InfluxDB
+4. Check that headers are not being stripped by proxies
 
 #### Issue: "Import already completed" when trying to resume
 

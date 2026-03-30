@@ -1,0 +1,566 @@
+# =============================================================================
+# OPC UA Plugin - Configuration Examples
+# =============================================================================
+# This file contains configuration examples for different OPC UA scenarios.
+#
+# To use one of these examples:
+# 1. Copy this file to your PLUGIN_DIR directory
+# 2. Keep only the sections you need
+# 3. Adjust the settings to match your OPC UA server and node structure
+#
+# File path resolution:
+# - Absolute paths (e.g., /etc/opcua/client.der) are used as-is
+# - Relative paths (e.g., certs/client.der) are resolved from PLUGIN_DIR
+# =============================================================================
+
+
+# #############################################################################
+# EXAMPLE 1: Basic - CNC Machine Monitoring
+# #############################################################################
+# Use this configuration for reading scalar values from an OPC UA server
+# without authentication or encryption.
+#
+# Each scheduled trigger call:
+# 1. Connects to the OPC UA server
+# 2. Reads current values of all configured nodes
+# 3. Writes a single data point with all node values as fields
+# 4. Disconnects
+#
+# Resulting InfluxDB point:
+# cnc_machine,location=factory_1,machine_id=CNC-001 spindle_temp=42.5,coolant_pressure=3.2,spindle_rpm=12000,tool_id="T01",is_running=true <timestamp>
+# #############################################################################
+
+[opcua]
+server_url = "opc.tcp://192.168.1.100:4840"
+table_name = "cnc_machine"
+
+# Static tags added to every data point
+[opcua.default_tags]
+location = "factory_1"
+machine_id = "CNC-001"
+
+# Optional: dynamic tags read from OPC UA nodes at each trigger call.
+# Useful when identifiers (serial number, firmware version) are exposed as OPC UA variables.
+# Values are always stored as strings. Dynamic tags override static tags with the same key.
+# [opcua.tag_nodes]
+# serial = "ns=2;s=SerialNumber"
+
+# Node mappings: field_name = "node_id" (type auto-detected from OPC UA DataType)
+# Supported node ID formats:
+#   ns=<namespace>;<identifier_type>=<identifier>
+#   nsu=<namespace_uri>;<identifier_type>=<identifier>
+#   Identifier types: s (string), i (numeric), g (GUID), b (opaque/base64)
+[opcua.nodes]
+spindle_temp = "ns=2;s=SpindleTemperature"
+coolant_pressure = "ns=2;s=CoolantPressure"
+spindle_rpm = "ns=2;s=SpindleRPM"
+tool_id = "ns=2;s=CurrentToolID"
+is_running = "ns=2;s=MachineRunning"
+
+
+# #############################################################################
+# EXAMPLE 2: Explicit Type Override
+# #############################################################################
+# Use ["node_id", "type"] format when you need to override the auto-detected
+# type. Useful when OPC UA reports a type that doesn't match your needs
+# (e.g., server reports UInt16 but you want to store as float).
+#
+# Supported types: int, uint, float, string, bool
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "sensor_data"
+
+# [opcua.default_tags]
+# plant = "north"
+
+# [opcua.nodes]
+# # Auto-detected types (string format)
+# temperature = "ns=2;s=Temperature"
+# humidity = "ns=2;s=Humidity"
+#
+# # Explicit type override (list format: ["node_id", "type"])
+# pressure = ["ns=2;s=Pressure", "float"]      # Force float even if server reports int
+# error_code = ["ns=2;s=ErrorCode", "string"]   # Store numeric error code as string
+# counter = ["ns=2;i=1001", "uint"]             # Numeric node ID with explicit type
+
+
+# #############################################################################
+# EXAMPLE 3: Username/Password Authentication
+# #############################################################################
+# Use this configuration for OPC UA servers that require user credentials.
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://plc-controller.local:4840"
+# table_name = "plc_data"
+
+# [opcua.auth]
+# username = "operator"
+# password = "secure_password"
+
+# [opcua.default_tags]
+# controller = "PLC-01"
+
+# [opcua.nodes]
+# motor_speed = "ns=3;s=Motor.Speed"
+# motor_current = "ns=3;s=Motor.Current"
+# conveyor_state = "ns=3;s=Conveyor.State"
+
+
+# #############################################################################
+# EXAMPLE 4: Secure Connection with Certificates (Sign & Encrypt)
+# #############################################################################
+# Use this configuration for production environments with encrypted
+# and signed OPC UA communication.
+#
+# Security policies:
+#   Basic128Rsa15, Basic256, Basic256Sha256,
+#   Aes128Sha256RsaOaep, Aes256Sha256RsaPss
+#
+# Security modes:
+#   Sign, SignAndEncrypt
+#
+# Certificate requirements:
+#   - Client certificate: DER format (.der)
+#   - Private key: PEM format (.pem)
+#   - The server must trust the client certificate
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://secure-plc.company.com:4840"
+# table_name = "secure_plc_data"
+
+# [opcua.security]
+# security_policy = "Basic256Sha256"
+# security_mode = "SignAndEncrypt"
+# certificate = "certs/client.der"
+# private_key = "certs/client.pem"
+
+# [opcua.auth]
+# username = "influxdb_service"
+# password = "secure_password_here"
+
+# [opcua.default_tags]
+# site = "main_plant"
+# area = "assembly_line_3"
+
+# [opcua.nodes]
+# robot_position_x = "ns=4;s=Robot1.Position.X"
+# robot_position_y = "ns=4;s=Robot1.Position.Y"
+# robot_position_z = "ns=4;s=Robot1.Position.Z"
+# gripper_force = ["ns=4;s=Robot1.Gripper.Force", "float"]
+# cycle_count = ["ns=4;s=Robot1.CycleCount", "uint"]
+# alarm_active = "ns=4;s=Robot1.AlarmActive"
+
+
+# #############################################################################
+# EXAMPLE 5: Namespace URI Aliases
+# #############################################################################
+# Use namespace URIs instead of numeric indexes for stable configuration
+# that survives OPC UA server restarts (numeric indexes can change).
+# Define aliases in [opcua.namespaces], then use "nsu=<uri>;..." in node IDs.
+# The plugin resolves URIs to numeric indexes at connection time.
+#
+# Note: In TOML config, use the full "nsu=<uri>;..." format in node IDs.
+# Namespace aliases (short names) are only supported in CLI arguments mode.
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://10.0.1.50:4840"
+# table_name = "multi_source_data"
+
+# [opcua.default_tags]
+# source = "mixed_plc"
+
+# [opcua.nodes]
+# # Numeric namespace index (may change on server restart)
+# tank_level = "ns=2;i=1001"
+# tank_temp = "ns=2;i=1002"
+# valve_position = ["ns=2;i=1003", "float"]
+#
+# # Namespace URI (stable across restarts, resolved at connection time)
+# motor_rpm = "nsu=urn:beckhoff:twincat;s=GVL.Motor1.RPM"
+# motor_torque = "nsu=urn:beckhoff:twincat;s=GVL.Motor1.Torque"
+#
+# # Custom application namespace
+# batch_id = ["nsu=urn:myapp:production;s=CurrentBatchID", "string"]
+# quality_score = ["nsu=urn:myapp:production;s=QualityScore", "float"]
+
+
+# #############################################################################
+# EXAMPLE 6: Browse Mode - Auto-Discovery of Devices and Variables
+# #############################################################################
+# Use browse mode when you have many devices (e.g., 1000 IoT devices) with
+# the same parameters. Instead of listing every node ID manually, the plugin
+# browses the OPC UA address space from a root node and automatically discovers
+# all Variable nodes grouped by their parent Object (device).
+#
+# path_tags maps Object hierarchy levels to InfluxDB tags:
+#   - First entry maps to depth-1 Objects, second to depth-2, etc.
+#   - Length must be strictly less than browse_depth (last level has Variables)
+#   - Objects beyond path_tags length become field name prefixes
+#
+# Expected OPC UA address space hierarchy:
+#   browse_root (ns=2;s=Devices)
+#     +-- Device_001 (Object, depth 1) -> tag: device=Device_001
+#     |   +-- Temperature (Variable, depth 2)
+#     |   +-- Pressure (Variable, depth 2)
+#     |   +-- Status (Variable, depth 2)
+#     +-- Device_002 (Object, depth 1) -> tag: device=Device_002
+#     |   +-- Temperature (Variable, depth 2)
+#     |   +-- Pressure (Variable, depth 2)
+#     |   +-- Status (Variable, depth 2)
+#     +-- ... (hundreds/thousands of devices)
+#
+# The plugin writes one data point per device per trigger call:
+#   cnc_data,location=factory_1,device=Device_001 Temperature=42.5,Pressure=3.2,Status="running" <timestamp>
+#   cnc_data,location=factory_1,device=Device_002 Temperature=38.1,Pressure=2.8,Status="idle" <timestamp>
+#
+# The browse structure is cached for 1 hour -- no repeated browsing overhead.
+# Only values are re-read on each trigger call.
+#
+# NOTE: Browse mode and explicit nodes mode are mutually exclusive.
+#       Use [opcua.browse] OR [opcua.nodes], not both.
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "cnc_data"
+
+# [opcua.browse]
+# browse_root = "ns=2;s=Devices"       # Starting node for auto-discovery
+# browse_depth = 2                      # Browse depth (default: 2)
+#                                       #   1 = only direct children of browse_root
+#                                       #   2 = children of children (device -> variables)
+#                                       #   3 = deeper nesting (device -> subgroup -> variables)
+# path_tags = ["device"]                # Depth-1 Objects -> "device" tag
+# # filter = "Temperature|Pressure"     # Optional: regex to include only matching variable names
+# # exclude_branches = "debug_.*|test_bench"  # Optional: regex to exclude Object branches by name
+
+# [opcua.default_tags]
+# location = "factory_1"
+
+
+# #############################################################################
+# EXAMPLE 7: Browse Mode with Filter and Authentication
+# #############################################################################
+# Combine browse mode with authentication and a variable name filter.
+# The filter uses Python regex syntax (re.search) -- only variables whose
+# browse name matches the pattern are included.
+#
+# With this config, from an address space like:
+#   ns=3;s=Floor2
+#     +-- PLC_001 (depth 1)             -> tag: device=PLC_001
+#     |   +-- Temperature  (matches filter)
+#     |   +-- Pressure     (matches filter)
+#     |   +-- Status       (matches filter)
+#     |   +-- InternalLog  (filtered out)
+#     +-- PLC_002 (depth 1)             -> tag: device=PLC_002
+#     |   +-- Temperature  (matches)
+#     |   +-- Pressure     (matches)
+#     |   +-- Status       (matches)
+#     |   +-- DebugFlag    (filtered out)
+#
+# Result:
+#   plc_data,area=floor_2,device=PLC_001 Temperature=42.5,Pressure=3.2,Status="running"
+#   plc_data,area=floor_2,device=PLC_002 Temperature=38.1,Pressure=2.8,Status="idle"
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://10.0.2.50:4840"
+# table_name = "plc_data"
+
+# [opcua.auth]
+# username = "monitor"
+# password = "monitor_pass"
+
+# [opcua.browse]
+# browse_root = "ns=3;s=Floor2"
+# browse_depth = 2
+# path_tags = ["device"]
+# filter = "Temperature|Pressure|Status"
+
+# [opcua.default_tags]
+# area = "floor_2"
+
+
+# #############################################################################
+# EXAMPLE 8: Browse Mode with Nested Hierarchy (path_tags + field prefixes)
+# #############################################################################
+# Some OPC UA servers organize variables in sub-groups within each device.
+# Use browse_depth=3 with path_tags=["device"] to map depth-1 Objects to
+# the "device" tag. Objects at depth 2 (beyond path_tags) become field
+# name prefixes.
+#
+# Address space:
+#   ns=2;s=Machines
+#     +-- Robot_001 (Object, depth 1)   -> tag: device=Robot_001
+#     |   +-- Position (Object, depth 2) -> field prefix: "Position_"
+#     |   |   +-- X (Variable, depth 3)  -> field: "Position_X"
+#     |   |   +-- Y (Variable, depth 3)  -> field: "Position_Y"
+#     |   |   +-- Z (Variable, depth 3)  -> field: "Position_Z"
+#     |   +-- Speed (Variable, depth 2)  -> field: "Speed"
+#     |   +-- Gripper (Object, depth 2)  -> field prefix: "Gripper_"
+#     |       +-- Force (Variable, depth 3) -> field: "Gripper_Force"
+#
+# Result:
+#   robot_data,device=Robot_001 Position_X=1.5,Position_Y=2.3,Position_Z=0.8,Speed=100,Gripper_Force=5.2
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.200:4840"
+# table_name = "robot_data"
+
+# [opcua.browse]
+# browse_root = "ns=2;s=Machines"
+# browse_depth = 3
+# path_tags = ["device"]               # Only depth-1 Objects become tags
+# # NOTE: filter matches the original Variable browse name, NOT the prefixed field name.
+# #   filter = "X|Y|Z|Speed|Force"    # matches "X" under Position, not "Position_X"
+
+
+# #############################################################################
+# EXAMPLE 9: Browse Mode with Multi-Level path_tags
+# #############################################################################
+# Use multiple path_tags to map several hierarchy levels to separate tags.
+# Each entry in path_tags corresponds to a depth level. Objects beyond
+# path_tags length still become field name prefixes.
+#
+# Address space:
+#   ns=2;s=Factory
+#     +-- Line_A (Object, depth 1)       -> tag: line=Line_A
+#     |   +-- Station_01 (Object, depth 2) -> tag: station=Station_01
+#     |   |   +-- Temperature (Variable)
+#     |   |   +-- Pressure (Variable)
+#     |   +-- Station_02 (Object, depth 2) -> tag: station=Station_02
+#     |       +-- Temperature (Variable)
+#     |       +-- Pressure (Variable)
+#     +-- Line_B (Object, depth 1)       -> tag: line=Line_B
+#         +-- Station_01 (Object, depth 2) -> tag: station=Station_01
+#             +-- Temperature (Variable)
+#
+# Result:
+#   factory_data,line=Line_A,station=Station_01 Temperature=42.5,Pressure=3.2
+#   factory_data,line=Line_A,station=Station_02 Temperature=38.1,Pressure=2.8
+#   factory_data,line=Line_B,station=Station_01 Temperature=40.0
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "factory_data"
+
+# [opcua.browse]
+# browse_root = "ns=2;s=Factory"
+# browse_depth = 3                     # 3 levels: line -> station -> variables
+# path_tags = ["line", "station"]      # 2 tags (must be < browse_depth)
+
+# [opcua.default_tags]
+# plant = "north"
+
+
+# #############################################################################
+# EXAMPLE 10: Browse Mode with browse_tags (Variables as Tags)
+# #############################################################################
+# Use browse_tags to store specific discovered variables as InfluxDB tags
+# instead of fields. Useful when some OPC UA variables are identifiers
+# (room name, zone, asset ID) rather than measurements.
+#
+# Address space:
+#   ns=2;s=Sensors
+#     +-- Sensor_001 (depth 1)           -> tag: device=Sensor_001
+#     |   +-- room (Variable, value="Building_A") -> stored as TAG
+#     |   +-- zone (Variable, value="Zone_3")     -> stored as TAG
+#     |   +-- temperature (Variable, value=22.5)   -> stored as field
+#     |   +-- humidity (Variable, value=45.0)       -> stored as field
+#     +-- Sensor_002 (depth 1)           -> tag: device=Sensor_002
+#     |   +-- room (Variable, value="Building_B") -> stored as TAG
+#     |   +-- zone (Variable, value="Zone_1")     -> stored as TAG
+#     |   +-- temperature (Variable, value=20.1)   -> stored as field
+#     |   +-- humidity (Variable, value=50.2)       -> stored as field
+#
+# Result:
+#   sensor_data,location=factory_1,device=Sensor_001,room=Building_A,zone=Zone_3 temperature=22.5,humidity=45.0
+#   sensor_data,location=factory_1,device=Sensor_002,room=Building_B,zone=Zone_1 temperature=20.1,humidity=50.2
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "sensor_data"
+
+# [opcua.browse]
+# browse_root = "ns=2;s=Sensors"
+# browse_depth = 2
+# path_tags = ["device"]
+# browse_tags = ["room", "zone"]       # These variables will be stored as tags, not fields
+# # NOTE: if using filter with browse_tags, the filter must also match browse_tags names.
+# #   filter = "room|zone|temperature|humidity"   # "room" and "zone" must be in the pattern
+# # NOTE: if ALL variables in a group are browse_tags (no regular fields left),
+# #   no data point is written — InfluxDB requires at least one field per point.
+
+# [opcua.default_tags]
+# location = "factory_1"
+
+
+# #############################################################################
+# EXAMPLE 11: Browse Mode with name_tags (Flat Namespace Tag Extraction)
+# #############################################################################
+# Use name_tags when Variable browse names encode hierarchy in a flat format
+# (e.g., "BuildingA.Zone3.Temperature"). The plugin splits each Variable name
+# by name_separator, extracts leading segments as InfluxDB tags, and uses
+# remaining segments as the field name.
+#
+# Variables that don't have enough segments are skipped with a warning.
+#
+# Address space (flat — all Variables directly under browse_root):
+#   ns=2;s=FlatSensors
+#     +-- BuildingA.Zone3.Temperature (Variable, value=22.5)
+#     +-- BuildingA.Zone3.Humidity    (Variable, value=45.0)
+#     +-- BuildingB.Zone1.Temperature (Variable, value=20.1)
+#     +-- BuildingB.Zone1.Humidity    (Variable, value=50.2)
+#
+# After splitting by "." with name_tags = ["building", "zone"]:
+#   "BuildingA.Zone3.Temperature" -> tags: building=BuildingA, zone=Zone3; field: Temperature
+#   "BuildingA.Zone3.Humidity"    -> tags: building=BuildingA, zone=Zone3; field: Humidity
+#   "BuildingB.Zone1.Temperature" -> tags: building=BuildingB, zone=Zone1; field: Temperature
+#
+# Variables are grouped by extracted tag combinations, one point per group:
+#   flat_sensors,building=BuildingA,zone=Zone3 Temperature=22.5,Humidity=45.0
+#   flat_sensors,building=BuildingB,zone=Zone1 Temperature=20.1,Humidity=50.2
+#
+# NOTE: name_tags and path_tags tag names must not overlap.
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "flat_sensors"
+
+# [opcua.browse]
+# browse_root = "ns=2;s=FlatSensors"
+# browse_depth = 1                     # Variables are direct children
+# path_tags = []                       # No Object hierarchy to map
+# name_separator = "."                 # Split Variable names by "."
+# name_tags = ["building", "zone"]     # First 2 segments -> tags, rest -> field name
+
+
+# #############################################################################
+# EXAMPLE 12: Dynamic Tags from OPC UA Nodes (tag_nodes)
+# #############################################################################
+# Use tag_nodes when device identifiers (serial number, model, firmware version)
+# are stored as OPC UA variables and should be read dynamically at runtime,
+# rather than hardcoded as static tags.
+#
+# How it works:
+#   1. On each trigger call, the plugin reads the configured tag_nodes
+#   2. Values are converted to strings and used as InfluxDB tags
+#   3. Dynamic tags are merged with static tags (dynamic values take precedence
+#      if the same key appears in both)
+#
+# Use case: same TOML config deployed against multiple OPC UA servers -- the
+# machine_id and serial_number are read from each server's own nodes, so no
+# per-machine config files are needed.
+#
+# Resulting InfluxDB point:
+#   cnc_machine,location=factory_1,machine_id=CNC-001,serial=SN-987654 spindle_temp=42.5,rpm=12000 <timestamp>
+#
+# Note: the format for tag_nodes entries is the same as for nodes:
+#   string value -> node ID, type is auto-detected but always stored as string
+#   list value   -> ["node_id", "type"], type hint is accepted but ignored
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "cnc_machine"
+
+# # Static tags -- fixed values known at configuration time
+# [opcua.default_tags]
+# location = "factory_1"
+
+# # Dynamic tags -- values read from OPC UA nodes, always stored as strings
+# [opcua.tag_nodes]
+# machine_id = "ns=2;s=MachineID"
+# serial     = "ns=2;s=SerialNumber"
+# # firmware = ["ns=2;s=FirmwareVersion", "string"]   # type hint accepted, ignored
+
+# [opcua.nodes]
+# spindle_temp = "ns=2;s=SpindleTemperature"
+# rpm          = ["ns=2;s=SpindleRPM", "uint"]
+# is_running   = "ns=2;s=MachineRunning"
+
+
+# #############################################################################
+# EXAMPLE 13: Quality Filter - Accept Uncertain Values
+# #############################################################################
+# By default, only "good" quality OPC UA values are written to InfluxDB.
+# Use quality_filter to also accept "uncertain" values (e.g., sensor readings
+# from degraded devices that are still usable).
+#
+# Quality categories:
+#   "good"      - value is reliable (StatusCode 0x00000000..0x3FFFFFFF)
+#   "uncertain" - value may not be accurate (StatusCode 0x40000000..0x7FFFFFFF)
+#   "bad"       - value is not available (StatusCode >= 0x80000000, no value to write)
+#
+# Note: "bad" quality nodes never have values -- including "bad" in the filter
+# will still result in errors for those nodes since there is nothing to write.
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "sensor_data"
+# quality_filter = ["good", "uncertain"]   # Accept both good and uncertain values
+
+# [opcua.default_tags]
+# location = "factory_1"
+
+# [opcua.nodes]
+# temperature = "ns=2;s=Temperature"
+# pressure = "ns=2;s=Pressure"
+
+
+# #############################################################################
+# EXAMPLE 14: Browse Mode with exclude_branches (Skip Entire Subtrees)
+# #############################################################################
+# Use exclude_branches to skip specific Object nodes and their entire subtree
+# during auto-discovery. Useful when the OPC UA address space contains debug,
+# test, or internal branches that should not be collected.
+#
+# The pattern is a Python regex matched against Object browse names using
+# re.search() (partial match). Works at all browse depths — both within
+# path_tags range (skipping entire device groups) and beyond (skipping
+# sub-object branches that would become field prefixes).
+#
+# Address space:
+#   ns=2;s=Factory
+#     +-- Line_A (Object, depth 1)       -> tag: line=Line_A
+#     |   +-- Station_01 (Object, depth 2) -> tag: station=Station_01
+#     |   |   +-- Temperature (Variable)
+#     |   |   +-- Pressure (Variable)
+#     |   +-- Station_02 (Object, depth 2) -> tag: station=Station_02
+#     |   |   +-- Temperature (Variable)
+#     |   |   +-- Pressure (Variable)
+#     |   +-- Debug_Station (Object, depth 2)  -> EXCLUDED by exclude_branches
+#     |       +-- Temperature (Variable)        -> not discovered
+#     |       +-- InternalLog (Variable)        -> not discovered
+#     +-- Line_B (Object, depth 1)       -> tag: line=Line_B
+#         +-- Station_01 (Object, depth 2) -> tag: station=Station_01
+#             +-- Temperature (Variable)
+#
+# Result (Debug_Station entirely excluded):
+#   factory_data,line=Line_A,station=Station_01 Temperature=42.5,Pressure=3.2
+#   factory_data,line=Line_A,station=Station_02 Temperature=38.1,Pressure=2.8
+#   factory_data,line=Line_B,station=Station_01 Temperature=40.0
+# #############################################################################
+
+# [opcua]
+# server_url = "opc.tcp://192.168.1.100:4840"
+# table_name = "factory_data"
+
+# [opcua.browse]
+# browse_root = "ns=2;s=Factory"
+# browse_depth = 3
+# path_tags = ["line", "station"]
+# exclude_branches = "Debug_.*|Test_.*"   # Skip any Object matching this regex
+
+# [opcua.default_tags]
+# plant = "north"

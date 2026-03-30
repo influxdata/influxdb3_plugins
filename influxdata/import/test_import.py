@@ -271,20 +271,18 @@ class TestCheckSourceConnection:
 class TestBuildV3Headers:
     """Tests for _build_v3_headers."""
 
-    def test_with_token_returns_bearer_auth(self):
-        result = _build_v3_headers("my-token")
-        assert result == {
+    def test_with_token(self):
+        credentials = {"source_token": "my-token", "source_username": None, "source_password": None}
+        headers = _build_v3_headers(credentials)
+        assert headers == {
             "Content-Type": "application/json",
             "Authorization": "Bearer my-token",
         }
 
-    def test_without_token_returns_content_type_only(self):
-        result = _build_v3_headers(None)
-        assert result == {"Content-Type": "application/json"}
-
-    def test_empty_token_returns_content_type_only(self):
-        result = _build_v3_headers("")
-        assert result == {"Content-Type": "application/json"}
+    def test_without_token(self):
+        credentials = {"source_token": None, "source_username": None, "source_password": None}
+        headers = _build_v3_headers(credentials)
+        assert headers == {"Content-Type": "application/json"}
 
 
 class TestParseV3Databases:
@@ -363,12 +361,22 @@ class TestValidateSourceParams:
         })
         assert result == {"error": "Unsupported influxdb_version: 4. Must be 1, 2, or 3."}
 
-    def test_string_version_is_invalid(self):
+    def test_non_numeric_string_version_is_invalid(self):
         result = _validate_source_params({
             "source_url": "http://localhost:8086",
-            "influxdb_version": "3",
+            "influxdb_version": "abc",
         })
-        assert result == {"error": "Unsupported influxdb_version: 3. Must be 1, 2, or 3."}
+        assert result == {"error": "Unsupported influxdb_version: abc. Must be 1, 2, or 3."}
+
+    def test_numeric_string_version_is_coerced_to_int(self):
+        """Numeric strings like '3' should be accepted and coerced to int."""
+        body_data = {
+            "source_url": "http://localhost:8086",
+            "influxdb_version": "3",
+        }
+        result = _validate_source_params(body_data)
+        assert result is None  # Valid
+        assert body_data["influxdb_version"] == 3  # Coerced to int
 
 
 class TestGetSourceDatabasesListV3:
@@ -389,7 +397,11 @@ class TestGetSourceDatabasesListV3:
             {
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 3,
+            },
+            credentials={
                 "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )
@@ -399,6 +411,78 @@ class TestGetSourceDatabasesListV3:
         call_args = mock_session.get.call_args
         assert "/api/v3/configure/database" in call_args[0][0]
         assert call_args[1]["params"] == {"format": "json"}
+
+
+class TestGetSourceDatabasesListV2:
+    """Tests for get_source_databases_list v2 support using InfluxQL."""
+
+    def test_v2_returns_databases_using_influxql_endpoint(self):
+        """Test that v2 uses /query endpoint with SHOW DATABASES, not /api/v2/buckets."""
+        mock_session = Mock()
+        mock_response = Mock()
+        # InfluxQL response format (same as v1)
+        mock_response.json.return_value = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "name": "databases",
+                            "columns": ["name"],
+                            "values": [["mydb"], ["testdb"], ["_internal"]],
+                        }
+                    ]
+                }
+            ]
+        }
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        result = get_source_databases_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+            },
+            credentials={
+                "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
+            },
+            session=mock_session,
+        )
+
+        # _internal should be filtered out
+        assert result == {"databases": ["mydb", "testdb"]}
+        mock_session.get.assert_called_once()
+        call_args = mock_session.get.call_args
+        # Verify it uses /query endpoint, not /api/v2/buckets
+        assert "/query" in call_args[0][0]
+        assert "/api/v2/buckets" not in call_args[0][0]
+        assert call_args[1]["params"] == {"q": "SHOW DATABASES"}
+
+    def test_v2_uses_token_auth_header(self):
+        """Test that v2 uses Token authorization header."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        get_source_databases_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+            },
+            credentials={
+                "source_token": "my-secret-token",
+                "source_username": None,
+                "source_password": None,
+            },
+            session=mock_session,
+        )
+
+        call_args = mock_session.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers.get("Authorization") == "Token my-secret-token"
 
 
 class TestGetSourceTablesListV3:
@@ -420,7 +504,11 @@ class TestGetSourceTablesListV3:
                 "source_url": "http://localhost:8086",
                 "influxdb_version": 3,
                 "source_database": "mydb",
+            },
+            credentials={
                 "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
             },
             session=mock_session,
         )
@@ -430,6 +518,106 @@ class TestGetSourceTablesListV3:
         call_args = mock_session.get.call_args
         assert "/api/v3/query_sql" in call_args[0][0]
         assert call_args[1]["params"] == {"db": "mydb", "q": "SHOW TABLES", "format": "json"}
+
+
+class TestGetSourceTablesListV2:
+    """Tests for get_source_tables_list v2 support using InfluxQL."""
+
+    def test_v2_returns_tables_using_influxql_endpoint(self):
+        """Test that v2 uses /query endpoint with SHOW MEASUREMENTS, not Flux API."""
+        mock_session = Mock()
+        mock_response = Mock()
+        # InfluxQL response format (same as v1)
+        mock_response.json.return_value = {
+            "results": [
+                {
+                    "series": [
+                        {
+                            "name": "measurements",
+                            "columns": ["name"],
+                            "values": [["cpu"], ["memory"], ["disk"]],
+                        }
+                    ]
+                }
+            ]
+        }
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        result = get_source_tables_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_database": "mybucket",
+                # Note: no source_org provided
+            },
+            credentials={
+                "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
+            },
+            session=mock_session,
+        )
+
+        assert result == {"tables": ["cpu", "disk", "memory"]}
+        mock_session.get.assert_called_once()
+        call_args = mock_session.get.call_args
+        # Verify it uses /query endpoint, not /api/v2/query
+        assert "/query" in call_args[0][0]
+        assert "/api/v2/query" not in call_args[0][0]
+        assert call_args[1]["params"] == {"db": "mybucket", "q": "SHOW MEASUREMENTS"}
+
+    def test_v2_does_not_require_org(self):
+        """Test that v2 works without source_org parameter."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{"series": [{"values": [["test"]]}]}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        # Should not return an error about missing org
+        result = get_source_tables_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_database": "mybucket",
+            },
+            credentials={
+                "source_token": "my-token",
+                "source_username": None,
+                "source_password": None,
+            },
+            session=mock_session,
+        )
+
+        assert "error" not in result
+        assert "tables" in result
+
+    def test_v2_uses_token_auth_header(self):
+        """Test that v2 uses Token authorization header."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+
+        get_source_tables_list(
+            {
+                "source_url": "http://localhost:8086",
+                "influxdb_version": 2,
+                "source_database": "mybucket",
+            },
+            credentials={
+                "source_token": "my-secret-token",
+                "source_username": None,
+                "source_password": None,
+            },
+            session=mock_session,
+        )
+
+        call_args = mock_session.get.call_args
+        headers = call_args[1]["headers"]
+        assert headers.get("Authorization") == "Token my-secret-token"
 
 
 class TestQuerySourceInfluxdbV3Auth:
@@ -447,30 +635,112 @@ class TestQuerySourceInfluxdbV3Auth:
 
         mock_influxdb3_local = Mock()
 
+        # Create config WITHOUT credential fields
         config = ImportConfig(
             source_url="http://localhost",
             source_database="mydb",
             influxdb_version=3,
-            source_token="my-v3-token",
         )
 
-        query_source_influxdb(mock_influxdb3_local, config, "SHOW MEASUREMENTS", "test-task")
+        # Create credentials separately
+        credentials = {
+            "source_token": "my-v3-token",
+            "source_username": None,
+            "source_password": None,
+        }
+
+        # Pass credentials to function
+        query_source_influxdb(mock_influxdb3_local, config, credentials, "SHOW MEASUREMENTS", "test-task")
 
         # Verify the Authorization header uses Bearer format
         call_kwargs = mock_session.get.call_args
         headers = call_kwargs.kwargs.get("headers", call_kwargs[1].get("headers", {}))
         assert headers.get("Authorization") == "Bearer my-v3-token"
 
-    def test_v3_without_token_raises_error(self):
-        """Verify v3 without token raises ValueError."""
+    @patch("import.get_http_session")
+    def test_v3_without_token_no_auth_header(self, mock_get_session):
+        """Verify v3 without token results in no Authorization header."""
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"results": [{"series": []}]}
+        mock_response.raise_for_status = Mock()
+        mock_session.get.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
         mock_influxdb3_local = Mock()
 
+        # Create config WITHOUT credential fields
         config = ImportConfig(
             source_url="http://localhost",
             source_database="mydb",
             influxdb_version=3,
-            source_token=None,
         )
 
-        with pytest.raises(ValueError, match="InfluxDB v3 requires source_token"):
-            query_source_influxdb(mock_influxdb3_local, config, "SHOW MEASUREMENTS", "test-task")
+        # Create credentials with no token
+        credentials = {
+            "source_token": None,
+            "source_username": None,
+            "source_password": None,
+        }
+
+        # Pass credentials to function
+        query_source_influxdb(mock_influxdb3_local, config, credentials, "SHOW MEASUREMENTS", "test-task")
+
+        # Verify no Authorization header is present
+        call_kwargs = mock_session.get.call_args
+        headers = call_kwargs.kwargs.get("headers", call_kwargs[1].get("headers", {}))
+        assert "Authorization" not in headers
+
+
+class TestExtractCredentials:
+    """Tests for extract_credentials function"""
+
+    def test_extracts_token_from_headers(self):
+        extract_credentials = import_module.extract_credentials
+        # InfluxDB3 normalizes headers to lowercase
+        headers = {"source-token": "my-secret-token"}
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": "my-secret-token",
+            "source_username": None,
+            "source_password": None,
+        }
+
+    def test_extracts_username_password_from_headers(self):
+        extract_credentials = import_module.extract_credentials
+        # InfluxDB3 normalizes headers to lowercase
+        headers = {
+            "source-username": "admin",
+            "source-password": "secret123",
+        }
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": None,
+            "source_username": "admin",
+            "source_password": "secret123",
+        }
+
+    def test_returns_none_for_missing_headers(self):
+        extract_credentials = import_module.extract_credentials
+        headers = {}
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": None,
+            "source_username": None,
+            "source_password": None,
+        }
+
+    def test_extracts_all_credentials_when_present(self):
+        extract_credentials = import_module.extract_credentials
+        # InfluxDB3 normalizes headers to lowercase
+        headers = {
+            "source-token": "token",
+            "source-username": "user",
+            "source-password": "pass",
+        }
+        result = extract_credentials(headers)
+        assert result == {
+            "source_token": "token",
+            "source_username": "user",
+            "source_password": "pass",
+        }

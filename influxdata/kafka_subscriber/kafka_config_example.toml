@@ -1,0 +1,326 @@
+# =============================================================================
+# Kafka Subscriber Plugin - Configuration Examples
+# =============================================================================
+# This file contains configuration examples for different message formats
+# and security configurations.
+#
+# To use one of these examples:
+# 1. Copy this file to your PLUGIN_DIR directory
+# 2. Keep only the [kafka] and [mapping.*] sections you need
+# 3. Adjust the settings to match your Kafka cluster and message format
+#
+# File path resolution:
+# - Absolute paths (e.g., /etc/kafka/ca.crt) are used as-is
+# - Relative paths (e.g., certs/ca.crt) are resolved from PLUGIN_DIR
+#
+# IMPORTANT: Protobuf and Avro formats are NOT supported as they require
+# Schema Registry integration. Use JSON, Line Protocol, or Text formats.
+# =============================================================================
+
+
+# #############################################################################
+# EXAMPLE 1: JSON Format - IoT Sensor Data
+# #############################################################################
+# Use this configuration for structured JSON messages from IoT devices.
+#
+# Example Kafka message:
+# {
+#   "device_id": "sensor_001",
+#   "location": "warehouse_a",
+#   "readings": {
+#     "temperature": 22.5,
+#     "humidity": 65.2
+#   },
+#   "battery_level": 87,
+#   "online": true,
+#   "timestamp": 1704067200000
+# }
+# #############################################################################
+
+[kafka]
+bootstrap_servers = ["kafka1:9092", "kafka2:9092", "kafka3:9092"]
+topics = ["sensors.temperature", "sensors.humidity"]
+group_id = "influxdb3_iot_collector"
+format = "json"
+
+# Offset management
+offset_commit_policy = "on_success"  # "on_success" or "always"
+auto_offset_reset = "earliest"         # "earliest" or "latest"
+
+# Performance tuning
+max_poll_records = 500                 # Max messages per call (0 = unlimited)
+
+# Security (PLAINTEXT for development)
+security_protocol = "PLAINTEXT"
+
+[mapping.json]
+table_name = "sensor_data"
+
+# Timestamp from message (milliseconds since epoch)
+timestamp_field = "$.timestamp:ms"
+
+# Tags: indexed fields for efficient filtering
+[mapping.json.tags]
+device_id = "$.device_id"
+location = "$.location"
+
+# Fields: measurement values with type specification
+# Supported types: int, uint, float, string, bool
+[mapping.json.fields]
+temperature = ["$.readings.temperature", "float"]
+humidity = ["$.readings.humidity", "float"]
+battery_level = ["$.battery_level", "int"]
+online = ["$.online", "bool"]
+
+
+# #############################################################################
+# EXAMPLE 2: Line Protocol Format - Passthrough Mode
+# #############################################################################
+# Use this configuration when Kafka messages are already in InfluxDB line protocol.
+# No field mapping needed - messages are validated and written directly.
+#
+# Example Kafka message:
+# weather,location=us-west,station=SF01 temperature=18.5,humidity=72i,pressure=1013.25 1704067200000000000
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["influxdb.metrics"]
+# group_id = "influxdb3_lineprotocol"
+# format = "lineprotocol"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+
+# #############################################################################
+# EXAMPLE 3: Text Format - Legacy Log Parsing
+# #############################################################################
+# Use this configuration for plain text messages that require regex parsing.
+# Each tag and field uses a regex pattern with a capturing group.
+#
+# Example Kafka message:
+# [2024-01-01T12:00:00Z] device=pump_003 location=plant_b flow_rate=125.7 pressure=45 status=running ts=1704110400000000000
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["legacy.equipment"]
+# group_id = "influxdb3_legacy_parser"
+# format = "text"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# [mapping.text]
+# table_name = "equipment_logs"
+
+# # Timestamp extraction (nanoseconds)
+# # Format: "regex_pattern:format" - split by last colon
+# timestamp_field = "ts=(\\d+):ns"
+
+# # Tag patterns with capturing groups
+# [mapping.text.tags]
+# device = "device=(\\w+)"
+# location = "location=(\\w+)"
+
+# # Field patterns with type specification
+# [mapping.text.fields]
+# flow_rate = ["flow_rate=([\\d.]+)", "float"]
+# pressure = ["pressure=(\\d+)", "int"]
+# status = ["status=(\\w+)", "string"]
+
+
+# #############################################################################
+# EXAMPLE 4: SASL_PLAINTEXT Authentication
+# #############################################################################
+# Use this configuration for Kafka clusters with SASL authentication
+# but without SSL encryption (internal networks only).
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka1:9092", "kafka2:9092"]
+# topics = ["secure.metrics"]
+# group_id = "influxdb3_sasl_consumer"
+# format = "json"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "SASL_PLAINTEXT"
+
+# [kafka.sasl]
+# mechanism = "PLAIN"  # PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+# username = "kafka_user"
+# password = "kafka_password"
+
+# [mapping.json]
+# table_name = "secure_metrics"
+
+# [mapping.json.tags]
+# host = "$.host"
+
+# [mapping.json.fields]
+# value = ["$.value", "float"]
+
+
+# #############################################################################
+# EXAMPLE 5: SASL_SSL - Production Security Configuration
+# #############################################################################
+# Use this configuration for production environments with both
+# SASL authentication and SSL encryption.
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka1.prod:9093", "kafka2.prod:9093", "kafka3.prod:9093"]
+# topics = ["production.metrics", "production.events"]
+# group_id = "influxdb3_production_consumer"
+# format = "json"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "SASL_SSL"
+
+# [kafka.sasl]
+# mechanism = "SCRAM-SHA-512"
+# username = "influxdb_service"
+# password = "secure_password_here"
+
+# [kafka.ssl]
+# ca_cert = "/etc/influxdb/certs/ca.crt"
+# # For mutual TLS (optional):
+# # client_cert = "/etc/influxdb/certs/client.crt"
+# # client_key = "/etc/influxdb/certs/client.key"
+
+# [mapping.json]
+# table_name = "production_metrics"
+# timestamp_field = "$.ts:ms"
+
+# [mapping.json.tags]
+# host = "$.host"
+# service = "$.service"
+# environment = "$.env"
+
+# [mapping.json.fields]
+# cpu_usage = ["$.cpu", "float"]
+# memory_mb = ["$.memory", "int"]
+# requests_per_sec = ["$.rps", "float"]
+# error_count = ["$.errors", "int"]
+
+
+# #############################################################################
+# EXAMPLE 6: SSL Only (No SASL)
+# #############################################################################
+# Use this configuration when Kafka uses SSL for encryption
+# but no SASL authentication (certificate-based auth).
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka-ssl:9093"]
+# topics = ["ssl.metrics"]
+# group_id = "influxdb3_ssl_consumer"
+# format = "json"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "SSL"
+
+# [kafka.ssl]
+# ca_cert = "certs/ca.crt"
+# client_cert = "certs/client.crt"
+# client_key = "certs/client.key"
+
+# [mapping.json]
+# table_name = "ssl_metrics"
+
+# [mapping.json.fields]
+# value = ["$.value", "float"]
+
+
+# #############################################################################
+# EXAMPLE 7: Dynamic Table Name from Message
+# #############################################################################
+# Use table_name_field to extract the table name from each message.
+# Useful when different message types should go to different tables.
+#
+# Example Kafka message:
+# {"measurement": "cpu_metrics", "host": "server01", "usage": 45.2}
+# This will write to table "cpu_metrics"
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["metrics.all"]
+# group_id = "influxdb3_dynamic_table"
+# format = "json"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# [mapping.json]
+# table_name_field = "$.measurement"
+
+# [mapping.json.tags]
+# host = "$.host"
+
+# [mapping.json.fields]
+# value = ["$.usage", "float"]
+
+
+# #############################################################################
+# EXAMPLE 8: Offset Commit Policy - "always"
+# #############################################################################
+# Use offset_commit_policy = "always" when you want to commit offsets
+# even if some messages fail to process. This prevents reprocessing
+# but may result in data loss for failed messages.
+#
+# Use cases:
+# - High-throughput scenarios where occasional data loss is acceptable
+# - When failed messages are logged elsewhere for later recovery
+# - When you don't want processing errors to cause consumer lag
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["high-throughput.events"]
+# group_id = "influxdb3_always_commit"
+# format = "json"
+# offset_commit_policy = "always"  # Commit even on errors
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# [mapping.json]
+# table_name = "events"
+
+# [mapping.json.fields]
+# value = ["$.value", "float"]
+
+
+# #############################################################################
+# EXAMPLE 9: JSON Array Messages
+# #############################################################################
+# The plugin supports JSON arrays - each element is processed as a
+# separate data point. Partial failures are handled gracefully.
+#
+# Example Kafka message:
+# [
+#   {"sensor_id": "001", "temperature": 22.5, "timestamp": 1638360000000},
+#   {"sensor_id": "002", "temperature": 23.1, "timestamp": 1638360001000},
+#   {"sensor_id": "003", "temperature": 21.8, "timestamp": 1638360002000}
+# ]
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["batch.sensors"]
+# group_id = "influxdb3_batch_processor"
+# format = "json"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# [mapping.json]
+# table_name = "batch_sensor_data"
+# timestamp_field = "$.timestamp:ms"
+
+# [mapping.json.tags]
+# sensor_id = "$.sensor_id"
+
+# [mapping.json.fields]
+# temperature = ["$.temperature", "float"]

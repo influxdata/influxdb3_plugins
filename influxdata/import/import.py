@@ -9,24 +9,6 @@
             "required": true
         },
         {
-            "name": "source_token",
-            "example": "my-token",
-            "description": "Source InfluxDB authentication token.",
-            "required": false
-        },
-        {
-            "name": "source_username",
-            "example": "admin",
-            "description": "Source InfluxDB authentication username.",
-            "required": false
-        },
-        {
-            "name": "source_password",
-            "example": "my-password",
-            "description": "Source InfluxDB authentication password.",
-            "required": false
-        },
-        {
             "name": "influxdb_version",
             "example": 1,
             "description": "Source InfluxDB version: 1, 2, or 3.",
@@ -127,6 +109,27 @@ STALE_IMPORT_THRESHOLD_SECONDS = 300  # 5 minutes — if last import_state updat
 MICROSECOND_OFFSET = 1
 
 
+def extract_credentials(request_headers: Dict[str, str]) -> Dict[str, Optional[str]]:
+    """
+    Extract credentials from HTTP headers.
+
+    Note: InfluxDB3 normalizes header keys to lowercase, so we look up
+    lowercase keys directly.
+
+    Args:
+        request_headers: HTTP request headers dict
+
+    Returns:
+        Dict with keys: source_token, source_username, source_password
+        Values are None if header not present
+    """
+    return {
+        "source_token": request_headers.get("source-token"),
+        "source_username": request_headers.get("source-username"),
+        "source_password": request_headers.get("source-password"),
+    }
+
+
 class ImportPauseState(Enum):
     """Possible states returned from querying the import_pause_state table."""
 
@@ -152,9 +155,6 @@ class ImportConfig:
     target_batch_size: int = 2000
     table_filter: Optional[List[str]] = None
     config_file_path: Optional[str] = None
-    source_token: Optional[str] = None
-    source_username: Optional[str] = None
-    source_password: Optional[str] = None
     dry_run: bool = False
 
 
@@ -208,9 +208,6 @@ def load_config(
     # 1. Start with environment variables (lowest priority)
     env_mappings = {
         "IMPORT_SOURCE_URL": "source_url",
-        "IMPORT_SOURCE_TOKEN": "source_token",
-        "IMPORT_SOURCE_USERNAME": "source_username",
-        "IMPORT_SOURCE_PASSWORD": "source_password",
         "IMPORT_SOURCE_DATABASE": "source_database",
         "IMPORT_DEST_DATABASE": "dest_database",
         "IMPORT_START_TIMESTAMP": "start_timestamp",
@@ -268,30 +265,6 @@ def load_config(
             t.strip() for t in config_data["table_filter"].split(".")
         ]
 
-    # Validate authentication parameters
-    has_username = config_data.get("source_username")
-    has_password = config_data.get("source_password")
-    has_token = config_data.get("source_token")
-
-    # Check that either (username AND password together) OR (only token) is provided
-    if has_username or has_password:
-        # If username or password is provided, both must be provided
-        if not (has_username and has_password):
-            raise ValueError(
-                "Authentication error: source_username and source_password must be provided together"
-            )
-        # If both username and password are provided, token should NOT be provided
-        if has_token:
-            raise ValueError(
-                "Authentication error: Cannot use both (source_username/source_password) and source_token. "
-                "Please provide either (source_username and source_password) OR (source_token only)"
-            )
-    elif not has_token:
-        # Neither username/password nor token is provided
-        raise ValueError(
-            "Authentication error: Must provide either (source_username and source_password) OR (source_token)"
-        )
-
     return ImportConfig(**config_data)
 
 
@@ -306,6 +279,7 @@ def get_http_session() -> requests.Session:
 def query_source_influxdb(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     query: str,
     task_id: str,
 ) -> Dict[str, Any]:
@@ -323,29 +297,16 @@ def query_source_influxdb(
 
     headers = {"Content-Type": "application/vnd.influxql"}
 
-    # Determine authentication method based on InfluxDB version
+    # Build auth headers based on version
     if config.influxdb_version == 1:
-        # InfluxDB v1 authentication
-        if config.source_username and config.source_password:
-            # Basic Authentication with username:password
-            credentials = f"{config.source_username}:{config.source_password}"
-            encoded_credentials = base64.b64encode(credentials.encode()).decode()
-            headers["Authorization"] = f"Basic {encoded_credentials}"
-        elif config.source_token:
-            # Bearer token authentication for v1
-            headers["Authorization"] = f"Bearer {config.source_token}"
+        auth_headers = _build_v1_headers(credentials)
+        headers.update(auth_headers)
     elif config.influxdb_version == 2:
-        # InfluxDB v2 authentication (requires token)
-        if config.source_token:
-            headers["Authorization"] = f"Token {config.source_token}"
-        else:
-            raise ValueError("InfluxDB v2 requires source_token for authentication")
+        auth_headers = _build_v2_headers(credentials)
+        headers.update(auth_headers)
     elif config.influxdb_version == 3:
-        # InfluxDB v3 authentication (Bearer token)
-        if config.source_token:
-            headers["Authorization"] = f"Bearer {config.source_token}"
-        else:
-            raise ValueError("InfluxDB v3 requires source_token for authentication")
+        auth_headers = _build_v3_headers(credentials)
+        headers.update(auth_headers)
 
     retry_count = 0
     backoff = INITIAL_BACKOFF_SECONDS
@@ -380,11 +341,11 @@ def query_source_influxdb(
 
 
 def get_source_measurements(
-    influxdb3_local, config: ImportConfig, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str
 ) -> List[str]:
     """Get list of measurements (tables) from source database"""
     result = query_source_influxdb(
-        influxdb3_local, config, "SHOW MEASUREMENTS", task_id
+        influxdb3_local, config, credentials, "SHOW MEASUREMENTS", task_id
     )
 
     measurements = []
@@ -401,11 +362,11 @@ def get_source_measurements(
 
 
 def get_field_keys(
-    influxdb3_local, config: ImportConfig, measurement: str, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], measurement: str, task_id: str
 ) -> Dict[str, str]:
     """Get field keys and their types for a measurement"""
     query = f'SHOW FIELD KEYS FROM "{measurement}"'
-    result = query_source_influxdb(influxdb3_local, config, query, task_id)
+    result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
 
     fields = {}
     if "results" in result and len(result["results"]) > 0:
@@ -419,11 +380,11 @@ def get_field_keys(
 
 
 def get_tag_keys(
-    influxdb3_local, config: ImportConfig, measurement: str, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], measurement: str, task_id: str
 ) -> List[str]:
     """Get tag keys for a measurement"""
     query = f'SHOW TAG KEYS FROM "{measurement}"'
-    result = query_source_influxdb(influxdb3_local, config, query, task_id)
+    result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
 
     tags = []
     if "results" in result and len(result["results"]) > 0:
@@ -446,6 +407,7 @@ def check_tag_field_conflicts(tags: List[str], fields: Dict[str, str]) -> List[s
 def estimate_import_time(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     measurements: List[str],
     start_dt: datetime,
     end_dt: datetime,
@@ -474,7 +436,7 @@ def estimate_import_time(
         try:
             # Get actual data boundaries
             actual_start, actual_end = find_actual_data_boundaries(
-                influxdb3_local, config, measurement, start_dt, end_dt, task_id
+                influxdb3_local, config, credentials, measurement, start_dt, end_dt, task_id
             )
 
             if not actual_start or not actual_end:
@@ -501,7 +463,7 @@ def estimate_import_time(
             """
 
             result = query_source_influxdb(
-                influxdb3_local, config, count_query, task_id
+                influxdb3_local, config, credentials, count_query, task_id
             )
 
             row_count = 0
@@ -568,7 +530,7 @@ def estimate_import_time(
 
 
 def perform_preflight_checks(
-    influxdb3_local, config: ImportConfig, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str
 ) -> Tuple[bool, List[str], Dict[str, Any]]:
     """
     Perform pre-flight validation checks
@@ -586,7 +548,7 @@ def perform_preflight_checks(
 
     # Check source connectivity
     try:
-        measurements = get_source_measurements(influxdb3_local, config, task_id)
+        measurements = get_source_measurements(influxdb3_local, config, credentials, task_id)
         metadata["measurements"] = measurements
         metadata["total_tables"] = len(measurements)
         influxdb3_local.info(
@@ -644,6 +606,7 @@ def parse_timestamp(ts_str: str) -> datetime:
 def find_actual_data_boundaries(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     measurement: str,
     user_start: Optional[datetime],
     user_end: Optional[datetime],
@@ -708,7 +671,7 @@ def find_actual_data_boundaries(
 
     try:
         # --- Query for actual_start ---
-        result = query_source_influxdb(influxdb3_local, config, start_query, task_id)
+        result = query_source_influxdb(influxdb3_local, config, credentials, start_query, task_id)
         if "results" in result and result["results"][0].get("series"):
             series = result["results"][0]["series"][0]
             if "values" in series and series["values"]:
@@ -718,7 +681,7 @@ def find_actual_data_boundaries(
                 )
 
         # --- Query for actual_end ---
-        result = query_source_influxdb(influxdb3_local, config, end_query, task_id)
+        result = query_source_influxdb(influxdb3_local, config, credentials, end_query, task_id)
         if "results" in result and result["results"][0].get("series"):
             series = result["results"][0]["series"][0]
             if "values" in series and series["values"]:
@@ -740,6 +703,7 @@ def find_actual_data_boundaries(
 def sample_data_density(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     measurement: str,
     start: datetime,
     end: datetime,
@@ -796,7 +760,7 @@ def sample_data_density(
             """
 
             try:
-                result = query_source_influxdb(influxdb3_local, config, query, task_id)
+                result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
                 if "results" in result and result["results"][0].get("series"):
                     series = result["results"][0]["series"][0]
                     if "values" in series and series["values"]:
@@ -1300,15 +1264,13 @@ def save_import_config(
 def load_import_config(
     influxdb3_local,
     import_id: str,
+    credentials: Dict[str, Optional[str]],
     task_id: str,
-    source_token: str = None,
-    source_username: str = None,
-    source_password: str = None,
 ) -> Optional[ImportConfig]:
     """
     Load import configuration from database
     Returns ImportConfig or None if not found
-    Authentication credentials must be provided as parameters since they're not stored in DB for security
+    Authentication credentials must be provided in credentials dict since they're not stored in DB for security
     """
     try:
         query = f"""
@@ -1339,9 +1301,6 @@ def load_import_config(
         # Reconstruct ImportConfig from saved data
         config = ImportConfig(
             source_url=row.get("source_url"),
-            source_token=source_token,
-            source_username=source_username,
-            source_password=source_password,
             source_database=row.get("source_database"),
             dest_database=row.get("dest_database"),
             influxdb_version=int(row.get("influxdb_version", 1)),
@@ -1408,6 +1367,7 @@ def write_import_state(
 def import_table(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     import_id: str,
     measurement: str,
     start_time: datetime,
@@ -1426,7 +1386,7 @@ def import_table(
 
     # Find actual data boundaries
     actual_start, actual_end = find_actual_data_boundaries(
-        influxdb3_local, config, measurement, start_time, end_time, task_id
+        influxdb3_local, config, credentials, measurement, start_time, end_time, task_id
     )
 
     if not actual_start or not actual_end:
@@ -1453,12 +1413,12 @@ def import_table(
 
     # Calculate optimal batch window
     optimal_window_seconds = sample_data_density(
-        influxdb3_local, config, measurement, actual_start, actual_end, task_id
+        influxdb3_local, config, credentials, measurement, actual_start, actual_end, task_id
     )
 
     # Get schema info for conflict detection
-    fields = get_field_keys(influxdb3_local, config, measurement, task_id)
-    tags = get_tag_keys(influxdb3_local, config, measurement, task_id)
+    fields = get_field_keys(influxdb3_local, config, credentials, measurement, task_id)
+    tags = get_tag_keys(influxdb3_local, config, credentials, measurement, task_id)
     conflicts = check_tag_field_conflicts(tags, fields)
 
     # Add schema issues to metadata if conflicts found
@@ -1601,7 +1561,7 @@ def import_table(
             influxdb3_local.info(
                 f"[{task_id}] Querying data for '{measurement}' from {window_start} to {window_end}"
             )
-            result = query_source_influxdb(influxdb3_local, config, query, task_id)
+            result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
 
             if "results" in result and result["results"][0].get("series"):
                 series = result["results"][0]["series"][0]
@@ -1701,6 +1661,7 @@ def import_table(
 def resume_incomplete_import(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     import_id: str,
     incomplete_tables: List[Dict[str, Any]],
     task_id: str,
@@ -1758,6 +1719,7 @@ def resume_incomplete_import(
             table_result = import_table(
                 influxdb3_local,
                 config,
+                credentials,
                 import_id,
                 measurement,
                 start_dt,
@@ -1781,6 +1743,7 @@ def resume_incomplete_import(
             table_result = import_table(
                 influxdb3_local,
                 config,
+                credentials,
                 import_id,
                 measurement,
                 resume_start,
@@ -1814,6 +1777,7 @@ def resume_incomplete_import(
             table_result = import_table(
                 influxdb3_local,
                 config,
+                credentials,
                 import_id,
                 measurement,
                 start_dt,
@@ -1977,7 +1941,7 @@ def generate_import_plan(
     return import_plan
 
 
-def start_import(influxdb3_local, config: ImportConfig, task_id: str) -> Dict[str, Any]:
+def start_import(influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str) -> Dict[str, Any]:
     """
     Start a new import process
     Returns import_id and initial status
@@ -2081,7 +2045,7 @@ def _run_import(
     """
     # Perform pre-flight checks
     success, errors, metadata = perform_preflight_checks(
-        influxdb3_local, config, task_id
+        influxdb3_local, config, credentials, task_id
     )
 
     if not success:
@@ -2113,7 +2077,7 @@ def _run_import(
         f"[{task_id}] Estimating import time based on data sampling..."
     )
     time_estimate = estimate_import_time(
-        influxdb3_local, config, measurements, start_dt, end_dt, task_id
+        influxdb3_local, config, credentials, measurements, start_dt, end_dt, task_id
     )
     metadata["time_estimate"] = time_estimate
 
@@ -2168,6 +2132,7 @@ def _run_import(
         table_result = import_table(
             influxdb3_local,
             config,
+            credentials,
             import_id,
             measurement,
             start_dt,
@@ -2351,15 +2316,13 @@ def pause_import(influxdb3_local, import_id: str, task_id: str) -> Dict[str, Any
 def resume_import(
     influxdb3_local,
     import_id: str,
+    credentials: Dict[str, Optional[str]],
     task_id: str,
-    source_token: str = None,
-    source_username: str = None,
-    source_password: str = None,
 ) -> Dict[str, Any]:
     """
     Resume a paused or incomplete import
     Checks import status and continues from where it stopped
-    Requires either source_token OR (source_username AND source_password)
+    Requires either source_token OR (source_username AND source_password) in credentials dict
     """
     try:
         influxdb3_local.info(
@@ -2475,7 +2438,20 @@ def resume_import(
         _write_import_pause_state(influxdb3_local, import_id, paused=False, canceled=False, completed=False)
         influxdb3_local.info(f"[{task_id}] Wrote resume state for import {import_id}")
 
-        # Find paused and in_progress tables for this specific import
+        # 2. Load import configuration with provided credentials
+        config = load_import_config(
+            influxdb3_local,
+            import_id,
+            credentials,
+            task_id,
+        )
+        if not config:
+            return {
+                "status": "error",
+                "error": f"Import config not found for {import_id}. Cannot resume import.",
+            }
+
+        # 3. Find paused and in_progress tables for this specific import
         query = f"""
         SELECT import_id, table_name, status, rows_imported, time, paused_at_time
         FROM 'import_state'
@@ -2530,6 +2506,7 @@ def resume_import(
         return resume_incomplete_import(
             influxdb3_local,
             config,
+            credentials,
             import_id,
             incomplete_tables,
             task_id,
@@ -2879,25 +2856,16 @@ def _parse_url_with_port_inference(source_url: str) -> str:
         return source_url
 
 
-def _build_v1_headers(
-    username: str = None,
-    password: str = None,
-    token: str = None,
-) -> Dict[str, str]:
-    """Build headers for InfluxDB v1 API requests.
-
-    Args:
-        username: Optional username for Basic auth
-        password: Optional password for Basic auth
-        token: Optional token for Bearer auth
-
-    Returns:
-        Headers dict with Content-Type and optional Authorization
-    """
+def _build_v1_headers(credentials: Dict[str, Optional[str]]) -> Dict[str, str]:
+    """Build headers for InfluxDB v1 API requests."""
     headers = {"Content-Type": "application/json"}
+    username = credentials.get("source_username")
+    password = credentials.get("source_password")
+    token = credentials.get("source_token")
+
     if username and password:
-        credentials = f"{username}:{password}"
-        encoded = base64.b64encode(credentials.encode()).decode()
+        creds = f"{username}:{password}"
+        encoded = base64.b64encode(creds.encode()).decode()
         headers["Authorization"] = f"Basic {encoded}"
     elif token:
         headers["Authorization"] = f"Bearer {token}"
@@ -2905,36 +2873,23 @@ def _build_v1_headers(
 
 
 def _build_v2_headers(
-    token: str = None,
+    credentials: Dict[str, Optional[str]],
     extra_headers: Dict[str, str] = None,
 ) -> Dict[str, str]:
-    """Build headers for InfluxDB v2 API requests.
-
-    Args:
-        token: Optional token for Token auth
-        extra_headers: Optional additional headers to include
-
-    Returns:
-        Headers dict with optional Authorization and extra headers
-    """
+    """Build headers for InfluxDB v2 API requests."""
     headers = {}
     if extra_headers:
         headers.update(extra_headers)
+    token = credentials.get("source_token")
     if token:
         headers["Authorization"] = f"Token {token}"
     return headers
 
 
-def _build_v3_headers(token: str = None) -> Dict[str, str]:
-    """Build headers for InfluxDB v3 API requests.
-
-    Args:
-        token: Optional token for Bearer auth
-
-    Returns:
-        Headers dict with Content-Type and optional Authorization
-    """
+def _build_v3_headers(credentials: Dict[str, Optional[str]]) -> Dict[str, str]:
+    """Build headers for InfluxDB v3 API requests."""
     headers = {"Content-Type": "application/json"}
+    token = credentials.get("source_token")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
@@ -3041,12 +2996,14 @@ def check_source_connection(
 
 def get_source_databases_list(
     body_data: Dict[str, Any],
+    credentials: Dict[str, Optional[str]],
     session: requests.Session = None,
 ) -> Dict[str, Any]:
     """Get list of databases from source InfluxDB instance.
 
     Args:
-        body_data: Dict containing source_url, influxdb_version, and auth credentials
+        body_data: Dict containing source_url and influxdb_version
+        credentials: Dict containing auth credentials (source_token, source_username, source_password)
         session: Optional requests.Session for dependency injection (testing)
 
     Returns:
@@ -3061,15 +3018,13 @@ def get_source_databases_list(
 
     source_url = body_data.get("source_url")
     influxdb_version = body_data.get("influxdb_version")
-    source_token = body_data.get("source_token")
-    source_username = body_data.get("source_username")
-    source_password = body_data.get("source_password")
 
     base_url = _parse_url_with_port_inference(source_url)
 
     try:
+
         if influxdb_version == 1:
-            headers = _build_v1_headers(source_username, source_password, source_token)
+            headers = _build_v1_headers(credentials)
 
             response = session.get(
                 f"{base_url}/query",
@@ -3084,25 +3039,23 @@ def get_source_databases_list(
             return {"databases": sorted(databases)}
 
         elif influxdb_version == 2:
-            headers = _build_v2_headers(source_token)
+            headers = _build_v2_headers(credentials)
+            headers["Content-Type"] = "application/json"
 
             response = session.get(
-                f"{base_url}/api/v2/buckets",
+                f"{base_url}/query",
+                params={"q": "SHOW DATABASES"},
                 headers=headers,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
-            result = response.json()
-            databases = []
-            if "buckets" in result:
-                databases = [bucket["name"] for bucket in result["buckets"]]
-
-            databases = [db for db in databases if not db.startswith("_")]
+            databases = _parse_v1_series_values(response.json())
+            databases = [db for db in databases if db not in ["_internal"]]
             return {"databases": sorted(databases)}
 
         elif influxdb_version == 3:
-            headers = _build_v3_headers(source_token)
+            headers = _build_v3_headers(credentials)
 
             response = session.get(
                 f"{base_url}/api/v3/configure/database",
@@ -3123,12 +3076,14 @@ def get_source_databases_list(
 
 def get_source_tables_list(
     body_data: Dict[str, Any],
+    credentials: Dict[str, Optional[str]],
     session: requests.Session = None,
 ) -> Dict[str, Any]:
     """Get list of tables/measurements from source database.
 
     Args:
-        body_data: Dict containing source_url, influxdb_version, source_database, and auth credentials
+        body_data: Dict containing source_url, influxdb_version, and source_database
+        credentials: Dict containing auth credentials (source_token, source_username, source_password)
         session: Optional requests.Session for dependency injection (testing)
 
     Returns:
@@ -3144,10 +3099,6 @@ def get_source_tables_list(
     source_url = body_data.get("source_url")
     influxdb_version = body_data.get("influxdb_version")
     source_database = body_data.get("source_database")
-    source_token = body_data.get("source_token")
-    source_username = body_data.get("source_username")
-    source_password = body_data.get("source_password")
-    source_org = body_data.get("source_org")
 
     if not source_database:
         return {"error": "source_database is required"}
@@ -3156,7 +3107,7 @@ def get_source_tables_list(
 
     try:
         if influxdb_version == 1:
-            headers = _build_v1_headers(source_username, source_password, source_token)
+            headers = _build_v1_headers(credentials)
 
             response = session.get(
                 f"{base_url}/query",
@@ -3170,41 +3121,22 @@ def get_source_tables_list(
             return {"tables": sorted(tables)}
 
         elif influxdb_version == 2:
-            if not source_org:
-                return {"error": "source_org is required for InfluxDB v2"}
+            headers = _build_v2_headers(credentials)
+            headers["Content-Type"] = "application/json"
 
-            headers = _build_v2_headers(
-                source_token,
-                extra_headers={
-                    "Content-Type": "application/vnd.flux",
-                    "Accept": "application/csv",
-                }
-            )
-
-            escaped_bucket = source_database.replace('"', '\\"')
-            flux_query = f'''import "influxdata/influxdb/schema" schema.measurements(bucket: "{escaped_bucket}")'''
-
-            response = session.post(
-                f"{base_url}/api/v2/query",
-                params={"org": source_org},
+            response = session.get(
+                f"{base_url}/query",
+                params={"db": source_database, "q": "SHOW MEASUREMENTS"},
                 headers=headers,
-                data=flux_query,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
-            tables = []
-            lines = response.text.strip().split("\n")
-            for line in lines[1:]:
-                if line.strip() and "," in line:
-                    parts = line.split(",")
-                    if len(parts) >= 4 and parts[3]:
-                        tables.append(parts[3].strip())
-
+            tables = _parse_v1_series_values(response.json())
             return {"tables": sorted(tables)}
 
         elif influxdb_version == 3:
-            headers = _build_v3_headers(source_token)
+            headers = _build_v3_headers(credentials)
 
             response = session.get(
                 f"{base_url}/api/v3/query_sql",
@@ -3243,6 +3175,9 @@ def process_request(
     action = query_parameters.get("action", "start")
     import_id = query_parameters.get("import_id")
 
+    # Extract credentials from request headers (available for all actions)
+    credentials = extract_credentials(request_headers)
+
     try:
         # Handle different actions
         if action == "start":
@@ -3255,7 +3190,7 @@ def process_request(
                 return {"status": "error", "error": f"Configuration error: {e}"}
 
             # Start import
-            return start_import(influxdb3_local, config, task_id)
+            return start_import(influxdb3_local, config, credentials, task_id)
 
         elif action == "status":
             if not import_id:
@@ -3271,47 +3206,11 @@ def process_request(
             if not import_id:
                 return {"status": "error", "error": "import_id required"}
 
-            # Get authentication credentials from query parameters or request body for resume
-            # Parse request body if JSON
-            body_data: dict = json.loads(request_body) if request_body else {}
-
-            # Try to get credentials from body first, then from query parameters
-            source_token = body_data.get("source_token") or query_parameters.get(
-                "source_token"
-            )
-            source_username = body_data.get("source_username") or query_parameters.get(
-                "source_username"
-            )
-            source_password = body_data.get("source_password") or query_parameters.get(
-                "source_password"
-            )
-
-            # Validate that either (username AND password) OR (token) is provided
-            if source_username or source_password:
-                if not (source_username and source_password):
-                    return {
-                        "status": "error",
-                        "error": "source_username and source_password must be provided together",
-                    }
-                if source_token:
-                    return {
-                        "status": "error",
-                        "error": "Cannot use both (source_username/source_password) and source_token. "
-                        "Please provide either (source_username and source_password) OR (source_token only)",
-                    }
-            elif not source_token:
-                return {
-                    "status": "error",
-                    "error": "Must provide either (source_username and source_password) OR (source_token) for resume action",
-                }
-
             return resume_import(
                 influxdb3_local,
                 import_id,
+                credentials,
                 task_id,
-                source_token,
-                source_username,
-                source_password,
             )
 
         elif action == "cancel":
@@ -3328,14 +3227,14 @@ def process_request(
 
         elif action == "databases":
             body_data = json.loads(request_body) if request_body else {}
-            result = get_source_databases_list(body_data)
+            result = get_source_databases_list(body_data, credentials)
             if result.get("error"):
                 influxdb3_local.error(f"[{task_id}] databases failed: {result.get('error')}")
             return result
 
         elif action == "tables":
             body_data = json.loads(request_body) if request_body else {}
-            result = get_source_tables_list(body_data)
+            result = get_source_tables_list(body_data, credentials)
             if result.get("error"):
                 influxdb3_local.error(f"[{task_id}] tables failed: {result.get('error')}")
             return result

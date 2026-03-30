@@ -1254,8 +1254,7 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
         tags: list = get_tag_names(influxdb3_local, measurement, task_id)
         window: timedelta = parse_window(args, task_id)
         interval: tuple = parse_time_interval(args, task_id)
-
-        time_to: datetime = call_time.replace(tzinfo=timezone.utc)
+        time_to = call_time.astimezone(timezone.utc)
         time_from: datetime = time_to - window
         influxdb3_local.info(f"[{task_id}] Querying data in '{measurement}' from {time_from} to {time_to}")
 

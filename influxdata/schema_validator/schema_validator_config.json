@@ -1,0 +1,119 @@
+{
+    "_comment": "Schema Validator Plugin - Example Configuration",
+    "_description": "This file defines the valid schema for incoming line protocol data. Only data conforming to these rules will be written to the target database/table.",
+
+    "allowed_measurements": ["weather", "cpu", "sensor_readings"],
+
+    "tables": {
+        "weather": {
+            "target_table": "weather_clean",
+
+            "tags": {
+                "location": {
+                    "required": true,
+                    "allowed_values": ["us-east", "us-west", "eu-west", "eu-east", "ap-south"]
+                },
+                "station_id": {
+                    "required": true
+                },
+                "region": {
+                    "required": false,
+                    "allowed_values": ["north", "south", "east", "west"]
+                }
+            },
+
+            "fields": {
+                "temperature": {
+                    "required": true,
+                    "type": "float"
+                },
+                "humidity": {
+                    "required": true,
+                    "type": "float"
+                },
+                "wind_speed": {
+                    "required": false,
+                    "type": "float"
+                },
+                "condition": {
+                    "required": false,
+                    "type": "string",
+                    "allowed_values": ["sunny", "cloudy", "rain", "snow", "fog", "storm"]
+                },
+                "pressure": {
+                    "required": false,
+                    "type": "float"
+                }
+            }
+        },
+
+        "cpu": {
+            "tags": {
+                "host": {
+                    "required": true
+                },
+                "cpu_id": {
+                    "required": true
+                }
+            },
+
+            "fields": {
+                "usage_idle": {
+                    "required": true,
+                    "type": "float"
+                },
+                "usage_user": {
+                    "required": true,
+                    "type": "float"
+                },
+                "usage_system": {
+                    "required": false,
+                    "type": "float"
+                },
+                "usage_iowait": {
+                    "required": false,
+                    "type": "float"
+                }
+            }
+        },
+
+        "sensor_readings": {
+            "target_table": "sensors_validated",
+
+            "tags": {
+                "device_id": {
+                    "required": true
+                },
+                "sensor_type": {
+                    "required": true,
+                    "allowed_values": ["temperature", "pressure", "humidity", "vibration", "voltage"]
+                },
+                "facility": {
+                    "required": false
+                }
+            },
+
+            "fields": {
+                "value": {
+                    "required": true,
+                    "type": "float"
+                },
+                "unit": {
+                    "required": false,
+                    "type": "string",
+                    "allowed_values": ["celsius", "fahrenheit", "psi", "bar", "percent", "mm_s", "volts"]
+                },
+                "quality": {
+                    "required": false,
+                    "type": "integer",
+                    "allowed_values": [0, 1, 2, 3]
+                },
+                "status": {
+                    "required": false,
+                    "type": "string",
+                    "allowed_values": ["ok", "warning", "critical", "offline"]
+                }
+            }
+        }
+    }
+}

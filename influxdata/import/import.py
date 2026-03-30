@@ -1837,6 +1837,7 @@ def resume_incomplete_import(
 def generate_import_plan(
     influxdb3_local,
     config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
     import_id: str,
     measurements: List[str],
     time_estimate: Dict[str, Any],
@@ -1864,8 +1865,8 @@ def generate_import_plan(
     schema_conflicts = []
     for measurement in measurements:
         try:
-            fields = get_field_keys(influxdb3_local, config, measurement, task_id)
-            tags = get_tag_keys(influxdb3_local, config, measurement, task_id)
+            fields = get_field_keys(influxdb3_local, config, credentials, measurement, task_id)
+            tags = get_tag_keys(influxdb3_local, config, credentials, measurement, task_id)
             conflicts = check_tag_field_conflicts(tags, fields)
 
             if conflicts:
@@ -2100,6 +2101,7 @@ def _run_import(
         return generate_import_plan(
             influxdb3_local,
             config,
+            credentials,
             import_id,
             measurements,
             time_estimate,

@@ -1129,8 +1129,8 @@ def convert_influxql_to_line_protocol(
     series_data: Dict[str, Any],
     tag_keys: List[str],
     field_types: Dict[str, str],
-    tag_renames: Dict[str, str] = None,
-    task_id: str = None,
+    task_id: str,
+    tag_renames: Dict[str, str] | None = None,
 ) -> List[LineBuilder]:
     """
     Convert InfluxQL query result to LineBuilder objects
@@ -1264,13 +1264,11 @@ def save_import_config(
 def load_import_config(
     influxdb3_local,
     import_id: str,
-    credentials: Dict[str, Optional[str]],
     task_id: str,
 ) -> Optional[ImportConfig]:
     """
     Load import configuration from database
     Returns ImportConfig or None if not found
-    Authentication credentials must be provided in credentials dict since they're not stored in DB for security
     """
     try:
         query = f"""
@@ -1568,7 +1566,7 @@ def import_table(
 
                 # Convert to line protocol with proper tag/field type information
                 line_protocol = convert_influxql_to_line_protocol(
-                    influxdb3_local, measurement, series, tags, fields, tag_renames
+                    influxdb3_local, measurement, series, tags, fields, task_id, tag_renames
                 )
 
                 # Write to destination
@@ -1678,7 +1676,7 @@ def resume_incomplete_import(
     end_dt = parse_timestamp(config.end_timestamp) if config.end_timestamp else None
 
     # Get all measurements to import
-    all_measurements = get_source_measurements(influxdb3_local, config, task_id)
+    all_measurements = get_source_measurements(influxdb3_local, config, credentials, task_id)
 
     # Determine which tables still need import
     tables_to_resume = {}
@@ -1992,7 +1990,7 @@ def start_import(influxdb3_local, config: ImportConfig, credentials: Dict[str, O
 
     # Run the import with error handling — on any unhandled error, set state to paused
     try:
-        return _run_import(influxdb3_local, config, import_id, task_id)
+        return _run_import(influxdb3_local, config, credentials, import_id, task_id)
     except Exception as e:
         influxdb3_local.error(
             f"[{task_id}] Import failed with error: {e}. Setting state to paused for resumption."
@@ -2038,7 +2036,7 @@ def _write_pause_state_on_error(
 
 
 def _run_import(
-    influxdb3_local, config: ImportConfig, import_id: str, task_id: str
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], import_id: str, task_id: str
 ) -> Dict[str, Any]:
     """
     Internal import execution logic.
@@ -2377,14 +2375,11 @@ def resume_import(
                     f"Treating as crashed. Allowing resume."
                 )
 
-        # Load import configuration with provided credentials
+        # Load import configuration
         config = load_import_config(
             influxdb3_local,
             import_id,
             task_id,
-            source_token,
-            source_username,
-            source_password,
         )
         if not config:
             return {
@@ -2414,7 +2409,7 @@ def resume_import(
             # Write resume state (unpause the import)
             _write_import_pause_state(influxdb3_local, import_id, paused=False, canceled=False, completed=False)
 
-            return _run_import(influxdb3_local, config, import_id, task_id)
+            return _run_import(influxdb3_local, config, credentials, import_id, task_id)
 
         # Check latest states to determine if import can be resumed
         latest_states = {}
@@ -2440,11 +2435,10 @@ def resume_import(
         _write_import_pause_state(influxdb3_local, import_id, paused=False, canceled=False, completed=False)
         influxdb3_local.info(f"[{task_id}] Wrote resume state for import {import_id}")
 
-        # 2. Load import configuration with provided credentials
+        # 2. Load import configuration
         config = load_import_config(
             influxdb3_local,
             import_id,
-            credentials,
             task_id,
         )
         if not config:
@@ -2876,7 +2870,7 @@ def _build_v1_headers(credentials: Dict[str, Optional[str]]) -> Dict[str, str]:
 
 def _build_v2_headers(
     credentials: Dict[str, Optional[str]],
-    extra_headers: Dict[str, str] = None,
+    extra_headers: Dict[str, str] | None = None,
 ) -> Dict[str, str]:
     """Build headers for InfluxDB v2 API requests."""
     headers = {}

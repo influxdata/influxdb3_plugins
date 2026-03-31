@@ -94,15 +94,24 @@ from typing import (
 )
 
 import requests
+from influxdb_client import InfluxDBClient
+from influxdb_client.client.flux_table import FluxTable
 
 # Global HTTP session for connection pooling
 _http_session = None
+
+# Cache for v2 org IDs to avoid repeated API calls
+_v2_org_id_cache: Dict[Tuple[str, str], Optional[str]] = {}
+
+# Cache for v2 InfluxDB client instances
+_v2_client_cache: Dict[Tuple[str, str], InfluxDBClient] = {}
 
 # Configuration constants
 MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 1
 MAX_BACKOFF_SECONDS = 16
 REQUEST_TIMEOUT_SECONDS = 30
+MS_PER_SECOND = 1000
 STALE_IMPORT_THRESHOLD_SECONDS = 300  # 5 minutes — if last import_state update is older, import is considered stale
 
 # Timestamp offset constants (for boundary adjustments)
@@ -276,6 +285,235 @@ def get_http_session() -> requests.Session:
     return _http_session
 
 
+def _get_v2_org_id(
+    influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str
+) -> Optional[str]:
+    """Get the orgID for a v2 bucket. Results are cached per (url, bucket) pair."""
+    cache_key = (config.source_url, config.source_database)
+    if cache_key in _v2_org_id_cache:
+        return _v2_org_id_cache[cache_key]
+
+    session = get_http_session()
+    base_url = _parse_url_with_port_inference(config.source_url)
+    headers = _build_v2_headers(credentials)
+
+    try:
+        response = session.get(
+            f"{base_url}/api/v2/buckets",
+            params={"name": config.source_database},
+            headers=headers,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        buckets = response.json().get("buckets", [])
+        if buckets:
+            org_id = buckets[0].get("orgID")
+            _v2_org_id_cache[cache_key] = org_id
+            return org_id
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Failed to get orgID: {e}")
+    _v2_org_id_cache[cache_key] = None
+    return None
+
+
+def _get_v2_client(
+    config: ImportConfig, credentials: Dict[str, Optional[str]], org_id: str
+) -> InfluxDBClient:
+    """Get or create a cached InfluxDB v2 client instance."""
+    token = credentials.get("source_token") or ""
+    cache_key = (config.source_url, token)
+    if cache_key not in _v2_client_cache:
+        base_url = _parse_url_with_port_inference(config.source_url)
+        _v2_client_cache[cache_key] = InfluxDBClient(
+            url=base_url,
+            token=token,
+            org=org_id,
+            timeout=REQUEST_TIMEOUT_SECONDS * MS_PER_SECOND,
+        )
+    return _v2_client_cache[cache_key]
+
+
+def _query_flux(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    org_id: str,
+    flux_query: str,
+    task_id: str,
+) -> List[FluxTable]:
+    """Execute a Flux query and return parsed tables with retry logic."""
+    client = _get_v2_client(config, credentials, org_id)
+    query_api = client.query_api()
+
+    retry_count = 0
+    backoff = INITIAL_BACKOFF_SECONDS
+
+    while retry_count < MAX_RETRIES:
+        try:
+            tables = query_api.query(flux_query, org=org_id)
+            return tables
+        except Exception as e:
+            retry_count += 1
+            if retry_count >= MAX_RETRIES:
+                influxdb3_local.error(
+                    f"[{task_id}] Flux query failed after {MAX_RETRIES} retries: {e}"
+                )
+                raise
+            influxdb3_local.warn(
+                f"[{task_id}] Flux query failed (attempt {retry_count}/{MAX_RETRIES}), retrying in {backoff}s: {e}"
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+
+    raise Exception(f"[{task_id}] Flux query failed after all retries")
+
+
+def _format_flux_time(dt: datetime) -> str:
+    """Format datetime for Flux queries with microsecond precision."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{dt.microsecond:06d}Z"
+
+
+def _escape_flux(s: str) -> str:
+    """Escape string for safe use in Flux query string literals."""
+    # Escape backslashes first, then other special characters
+    s = s.replace('\\', '\\\\')
+    s = s.replace('"', '\\"')
+    s = s.replace('\n', '\\n')
+    s = s.replace('\r', '\\r')
+    s = s.replace('\t', '\\t')
+    return s
+
+
+def _get_flux_column_value(tables: List[FluxTable], column: str) -> Optional[Any]:
+    """Extract first value from a column in Flux query result."""
+    for table in tables:
+        for record in table.records:
+            val = record.values.get(column)
+            if val is not None:
+                return val
+    return None
+
+
+def _get_flux_column_values(tables: List[FluxTable], column: str) -> List[Any]:
+    """Extract all values from a column in Flux query result."""
+    values = []
+    for table in tables:
+        for record in table.records:
+            val = record.values.get(column)
+            if val is not None:
+                values.append(val)
+    return values
+
+
+def _flux_time_param(dt: datetime, inclusive_stop: bool = False) -> str:
+    """Format datetime for Flux range(). Add 1µs for inclusive stop to cover ns precision loss."""
+    if inclusive_stop:
+        dt = dt + timedelta(microseconds=1)
+    return _format_flux_time(dt)
+
+
+def _count_flux_rows(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    org_id: str,
+    measurement: str,
+    start: datetime,
+    end: datetime,
+    task_id: str,
+) -> int:
+    bucket, meas = _escape_flux(config.source_database), _escape_flux(measurement)
+    flux_query = f'''from(bucket: "{bucket}")
+  |> range(start: {_format_flux_time(start)}, stop: {_flux_time_param(end, inclusive_stop=True)})
+  |> filter(fn: (r) => r._measurement == "{meas}")
+  |> group()
+  |> count()'''
+    tables = _query_flux(influxdb3_local, config, credentials, org_id, flux_query, task_id)
+    val = _get_flux_column_value(tables, "_value")
+    try:
+        return int(val) if val is not None else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def _get_flux_time(tables: List[FluxTable]) -> Optional[datetime]:
+    """Extract first timestamp from Flux query result."""
+    val = _get_flux_column_value(tables, "_time")
+    if val is None:
+        return None
+    # The client returns datetime objects directly
+    if isinstance(val, datetime):
+        return val
+    # Fallback for string values
+    return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+
+
+def _query_flux_data(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    org_id: str,
+    measurement: str,
+    window_start: datetime,
+    window_end: datetime,
+    direction: int,
+    task_id: str,
+    is_final_window: bool = False,
+) -> Tuple[List[str], List[List[Any]], Dict[str, str]]:
+    bucket, meas = _escape_flux(config.source_database), _escape_flux(measurement)
+    sort_desc = "false" if direction > 0 else "true"
+    stop_param = _flux_time_param(window_end, inclusive_stop=is_final_window)
+    flux_query = f'''from(bucket: "{bucket}")
+  |> range(start: {_format_flux_time(window_start)}, stop: {stop_param})
+  |> filter(fn: (r) => r._measurement == "{meas}")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> sort(columns: ["_time"], desc: {sort_desc})'''
+    tables = _query_flux(influxdb3_local, config, credentials, org_id, flux_query, task_id)
+    return _parse_flux_tables_to_series(tables)
+
+
+def _parse_flux_tables_to_series(tables: List[FluxTable]) -> Tuple[List[str], List[List[Any]], Dict[str, str]]:
+    """Parse Flux query result into InfluxQL-compatible series format."""
+    if not tables:
+        return [], [], {}
+
+    skip_columns = {"result", "table", "_start", "_stop", "_measurement"}
+
+    # Get columns from first record
+    columns = []
+    for table in tables:
+        if table.records:
+            for key in table.records[0].values.keys():
+                if key not in skip_columns:
+                    columns.append("time" if key == "_time" else key)
+            break
+
+    if not columns:
+        return [], [], {}
+
+    # Extract values from all records (preserve source types as-is)
+    values = []
+    for table in tables:
+        for record in table.records:
+            row = []
+            for col in columns:
+                key = "_time" if col == "time" else col
+                row.append(record.values.get(key))
+            values.append(row)
+
+    return columns, values, {}
+
+
+def _get_influxql_series(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract first series from InfluxQL result."""
+    if "results" in result and result["results"]:
+        series = result["results"][0].get("series", [])
+        if series:
+            return series[0]
+    return None
+
+
 def query_source_influxdb(
     influxdb3_local,
     config: ImportConfig,
@@ -343,65 +581,71 @@ def query_source_influxdb(
 def get_source_measurements(
     influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], task_id: str
 ) -> List[str]:
-    """Get list of measurements (tables) from source database"""
-    result = query_source_influxdb(
-        influxdb3_local, config, credentials, "SHOW MEASUREMENTS", task_id
-    )
-
     measurements = []
-    if "results" in result and len(result["results"]) > 0:
-        series = result["results"][0].get("series", [])
-        if series and "values" in series[0]:
-            measurements = [row[0] for row in series[0]["values"]]
-
-    # Apply table filter if specified
+    if config.influxdb_version == 2:
+        org_id = _get_v2_org_id(influxdb3_local, config, credentials, task_id)
+        if not org_id:
+            return []
+        bucket = _escape_flux(config.source_database)
+        flux_query = f'import "influxdata/influxdb/schema"\nschema.measurements(bucket: "{bucket}")'
+        tables = _query_flux(influxdb3_local, config, credentials, org_id, flux_query, task_id)
+        measurements = _get_flux_column_values(tables, "_value")
+    else:
+        result = query_source_influxdb(influxdb3_local, config, credentials, "SHOW MEASUREMENTS", task_id)
+        series = _get_influxql_series(result)
+        if series and "values" in series:
+            measurements = [row[0] for row in series["values"]]
     if config.table_filter:
         measurements = [m for m in measurements if m in config.table_filter]
-
     return sorted(measurements)
 
 
 def get_field_keys(
     influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], measurement: str, task_id: str
 ) -> Dict[str, str]:
-    """Get field keys and their types for a measurement"""
-    query = f'SHOW FIELD KEYS FROM "{measurement}"'
-    result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
-
     fields = {}
-    if "results" in result and len(result["results"]) > 0:
-        series = result["results"][0].get("series", [])
-        if series and "values" in series[0]:
-            for row in series[0]["values"]:
-                field_name, field_type = row[0], row[1]
-                fields[field_name] = field_type
-
+    if config.influxdb_version == 2:
+        org_id = _get_v2_org_id(influxdb3_local, config, credentials, task_id)
+        if not org_id:
+            return fields
+        bucket, meas = _escape_flux(config.source_database), _escape_flux(measurement)
+        flux_query = f'import "influxdata/influxdb/schema"\nschema.fieldKeys(bucket: "{bucket}", predicate: (r) => r._measurement == "{meas}")'
+        tables = _query_flux(influxdb3_local, config, credentials, org_id, flux_query, task_id)
+        for field_name in _get_flux_column_values(tables, "_value"):
+            fields[field_name] = "unknown"
+    else:
+        result = query_source_influxdb(influxdb3_local, config, credentials, f'SHOW FIELD KEYS FROM "{measurement}"', task_id)
+        series = _get_influxql_series(result)
+        if series and "values" in series:
+            for row in series["values"]:
+                fields[row[0]] = row[1]
     return fields
 
 
 def get_tag_keys(
     influxdb3_local, config: ImportConfig, credentials: Dict[str, Optional[str]], measurement: str, task_id: str
 ) -> List[str]:
-    """Get tag keys for a measurement"""
-    query = f'SHOW TAG KEYS FROM "{measurement}"'
-    result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
-
     tags = []
-    if "results" in result and len(result["results"]) > 0:
-        series = result["results"][0].get("series", [])
-        if series and "values" in series[0]:
-            tags = [row[0] for row in series[0]["values"]]
-
+    if config.influxdb_version == 2:
+        org_id = _get_v2_org_id(influxdb3_local, config, credentials, task_id)
+        if not org_id:
+            return tags
+        bucket, meas = _escape_flux(config.source_database), _escape_flux(measurement)
+        flux_query = f'import "influxdata/influxdb/schema"\nschema.tagKeys(bucket: "{bucket}", predicate: (r) => r._measurement == "{meas}")'
+        internal_tags = {"_start", "_stop", "_measurement", "_field"}
+        tables = _query_flux(influxdb3_local, config, credentials, org_id, flux_query, task_id)
+        tags = [t for t in _get_flux_column_values(tables, "_value") if t not in internal_tags]
+    else:
+        result = query_source_influxdb(influxdb3_local, config, credentials, f'SHOW TAG KEYS FROM "{measurement}"', task_id)
+        series = _get_influxql_series(result)
+        if series and "values" in series:
+            tags = [row[0] for row in series["values"]]
     return tags
 
 
 def check_tag_field_conflicts(tags: List[str], fields: Dict[str, str]) -> List[str]:
     """Identify tags that conflict with field names"""
-    conflicts = []
-    for tag in tags:
-        if tag in fields:
-            conflicts.append(tag)
-    return conflicts
+    return [tag for tag in tags if tag in fields]
 
 
 def estimate_import_time(
@@ -455,22 +699,23 @@ def estimate_import_time(
                 )
                 actual_end = actual_end + timedelta(microseconds=MICROSECOND_OFFSET)
 
-            # Sample data to estimate row count
-            # Use COUNT(*) for quick estimation
-            count_query = f"""
-            SELECT COUNT(*) FROM "{measurement}"
-            WHERE time >= '{actual_start.isoformat()}' AND time <= '{actual_end.isoformat()}'
-            """
-
-            result = query_source_influxdb(
-                influxdb3_local, config, credentials, count_query, task_id
-            )
-
             row_count = 0
-            if "results" in result and result["results"][0].get("series"):
-                series = result["results"][0]["series"][0]
-                if "values" in series and series["values"]:
-                    row_count = series["values"][0][1]
+            if config.influxdb_version == 2:
+                org_id = _get_v2_org_id(influxdb3_local, config, credentials, task_id)
+                if org_id:
+                    row_count = _count_flux_rows(influxdb3_local, config, credentials, org_id, measurement, actual_start, actual_end, task_id)
+            else:
+                count_query = f"""
+                SELECT COUNT(*) FROM "{measurement}"
+                WHERE time >= '{actual_start.isoformat()}' AND time <= '{actual_end.isoformat()}'
+                """
+                result = query_source_influxdb(
+                    influxdb3_local, config, credentials, count_query, task_id
+                )
+                if "results" in result and result["results"][0].get("series"):
+                    series = result["results"][0]["series"][0]
+                    if "values" in series and series["values"]:
+                        row_count = series["values"][0][1]
 
             # Estimate time for this table
             table_seconds = (row_count / ROWS_PER_SECOND) + TABLE_OVERHEAD_SECONDS
@@ -597,10 +842,30 @@ def parse_timestamp(ts_str: str) -> datetime:
         try:
             dt = datetime.strptime(ts_str, fmt)
             return dt.replace(tzinfo=timezone.utc)
-        except:
+        except ValueError:
             continue
 
     raise ValueError(f"Unable to parse timestamp: {ts_str}")
+
+
+def _build_influxql_boundary_query(
+    measurement: str, user_start: Optional[datetime], user_end: Optional[datetime], order: str
+) -> str:
+    clauses = []
+    if user_start:
+        clauses.append(f"time >= '{user_start.isoformat()}'")
+    if user_end:
+        clauses.append(f"time <= '{user_end.isoformat()}'")
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    return f'SELECT * FROM "{measurement}"{where} ORDER BY time {order} LIMIT 1'
+
+
+def _extract_time_from_influxql(result: Dict[str, Any]) -> Optional[datetime]:
+    series = _get_influxql_series(result)
+    if series and "values" in series and series["values"]:
+        time_idx = series["columns"].index("time")
+        return datetime.fromisoformat(series["values"][0][time_idx].replace("Z", "+00:00"))
+    return None
 
 
 def find_actual_data_boundaries(
@@ -612,91 +877,32 @@ def find_actual_data_boundaries(
     user_end: Optional[datetime],
     task_id: str,
 ) -> Tuple[Optional[datetime], Optional[datetime]]:
-    """
-    Find actual data boundaries within user-specified range.
-    Returns: (actual_start, actual_end) or (None, None) if no data.
-
-    Behavior:
-    - If both user_start and user_end are None → use the entire dataset.
-    - If only user_start is provided → find newest record from that time to the end.
-    - If only user_end is provided → find oldest record from the beginning up to that time.
-    - If both provided → restrict queries within that range.
-    """
-    # --- Build start query ---
-    if user_start is None and user_end is None:
-        start_query = f'SELECT * FROM "{measurement}" ORDER BY time ASC LIMIT 1'
-    elif user_start is None:
-        start_query = f"""
-        SELECT * FROM "{measurement}"
-        WHERE time <= '{user_end.isoformat()}'
-        ORDER BY time ASC LIMIT 1
-        """
-    elif user_end is None:
-        start_query = f"""
-        SELECT * FROM "{measurement}"
-        WHERE time >= '{user_start.isoformat()}'
-        ORDER BY time ASC LIMIT 1
-        """
-    else:
-        start_query = f"""
-        SELECT * FROM "{measurement}"
-        WHERE time >= '{user_start.isoformat()}' AND time <= '{user_end.isoformat()}'
-        ORDER BY time ASC LIMIT 1
-        """
-
-    # --- Build end query ---
-    if user_start is None and user_end is None:
-        end_query = f'SELECT * FROM "{measurement}" ORDER BY time DESC LIMIT 1'
-    elif user_start is None:
-        end_query = f"""
-        SELECT * FROM "{measurement}"
-        WHERE time <= '{user_end.isoformat()}'
-        ORDER BY time DESC LIMIT 1
-        """
-    elif user_end is None:
-        end_query = f"""
-        SELECT * FROM "{measurement}"
-        WHERE time >= '{user_start.isoformat()}'
-        ORDER BY time DESC LIMIT 1
-        """
-    else:
-        end_query = f"""
-        SELECT * FROM "{measurement}"
-        WHERE time >= '{user_start.isoformat()}' AND time <= '{user_end.isoformat()}'
-        ORDER BY time DESC LIMIT 1
-        """
-
-    actual_start = None
-    actual_end = None
-
+    actual_start, actual_end = None, None
     try:
-        # --- Query for actual_start ---
-        result = query_source_influxdb(influxdb3_local, config, credentials, start_query, task_id)
-        if "results" in result and result["results"][0].get("series"):
-            series = result["results"][0]["series"][0]
-            if "values" in series and series["values"]:
-                time_col_idx = series["columns"].index("time")
-                actual_start = datetime.fromisoformat(
-                    series["values"][0][time_col_idx].replace("Z", "+00:00")
-                )
-
-        # --- Query for actual_end ---
-        result = query_source_influxdb(influxdb3_local, config, credentials, end_query, task_id)
-        if "results" in result and result["results"][0].get("series"):
-            series = result["results"][0]["series"][0]
-            if "values" in series and series["values"]:
-                time_col_idx = series["columns"].index("time")
-                actual_end = datetime.fromisoformat(
-                    series["values"][0][time_col_idx].replace("Z", "+00:00")
-                )
-                # Add 1 ms to make the upper boundary inclusive
+        if config.influxdb_version == 2:
+            org_id = _get_v2_org_id(influxdb3_local, config, credentials, task_id)
+            if not org_id:
+                return None, None
+            bucket, meas = _escape_flux(config.source_database), _escape_flux(measurement)
+            range_start = _format_flux_time(user_start) if user_start else '0'
+            range_stop = _format_flux_time(user_end) if user_end else 'now()'
+            base = f'from(bucket: "{bucket}") |> range(start: {range_start}, stop: {range_stop}) |> filter(fn: (r) => r._measurement == "{meas}") |> keep(columns: ["_time"])'
+            actual_start = _get_flux_time(_query_flux(influxdb3_local, config, credentials, org_id, f'{base} |> min(column: "_time")', task_id))
+            actual_end = _get_flux_time(_query_flux(influxdb3_local, config, credentials, org_id, f'{base} |> max(column: "_time")', task_id))
+        else:
+            actual_start = _extract_time_from_influxql(
+                query_source_influxdb(influxdb3_local, config, credentials, _build_influxql_boundary_query(measurement, user_start, user_end, "ASC"), task_id)
+            )
+            actual_end = _extract_time_from_influxql(
+                query_source_influxdb(influxdb3_local, config, credentials, _build_influxql_boundary_query(measurement, user_start, user_end, "DESC"), task_id)
+            )
+            if actual_end:
                 actual_end = actual_end + timedelta(microseconds=MICROSECOND_OFFSET)
-
     except Exception as e:
-        influxdb3_local.warn(
-            f"[{task_id}] Error finding data boundaries for '{measurement}': {e}"
-        )
-
+        influxdb3_local.warn(f"[{task_id}] Error finding data boundaries for '{measurement}': {e}")
+    # v2: Only add offset for single-point data (Flux handles boundaries differently)
+    if config.influxdb_version == 2 and actual_start and actual_end and actual_start == actual_end:
+        actual_end = actual_end + timedelta(microseconds=MICROSECOND_OFFSET)
     return actual_start, actual_end
 
 
@@ -753,26 +959,25 @@ def sample_data_density(
                 )
                 continue
 
-            query = f"""
-            SELECT COUNT(*) FROM "{measurement}"
-            WHERE time >= '{sample_start.isoformat()}'
-            AND time < '{sample_end.isoformat()}'
-            """
-
             try:
-                result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
-                if "results" in result and result["results"][0].get("series"):
-                    series = result["results"][0]["series"][0]
-                    if "values" in series and series["values"]:
+                count = 0
+                if config.influxdb_version == 2:
+                    org_id = _get_v2_org_id(influxdb3_local, config, credentials, task_id)
+                    if org_id:
+                        count = _count_flux_rows(influxdb3_local, config, credentials, org_id, measurement, sample_start, sample_end, task_id)
+                else:
+                    query = f'SELECT COUNT(*) FROM "{measurement}" WHERE time >= \'{sample_start.isoformat()}\' AND time < \'{sample_end.isoformat()}\''
+                    series = _get_influxql_series(query_source_influxdb(influxdb3_local, config, credentials, query, task_id))
+                    if series and "values" in series and series["values"]:
                         count = series["values"][0][1]
-                        if count > 0:
-                            # Calculate rows per second
-                            rows_per_second = count / interval_seconds
-                            samples.append(rows_per_second)
-                            influxdb3_local.info(
-                                f"[{task_id}] Sample {interval_name}: {count} rows, "
-                                f"{rows_per_second:.2f} rows/sec"
-                            )
+
+                if count > 0:
+                    rows_per_second = count / interval_seconds
+                    samples.append(rows_per_second)
+                    influxdb3_local.info(
+                        f"[{task_id}] Sample {interval_name}: {count} rows, "
+                        f"{rows_per_second:.2f} rows/sec"
+                    )
             except Exception as e:
                 influxdb3_local.warn(f"[{task_id}] Error sampling {interval_name}: {e}")
 
@@ -1550,21 +1755,32 @@ def import_table(
                 window_start = actual_start
 
         # Query data
-        query = f"""
-        SELECT * FROM "{measurement}"
-        WHERE time >= '{window_start.isoformat()}' AND time <= '{window_end.isoformat()}'
-        ORDER BY time {"ASC" if direction > 0 else "DESC"}
-        """
         try:
             influxdb3_local.info(
                 f"[{task_id}] Querying data for '{measurement}' from {window_start} to {window_end}"
             )
-            result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
 
-            if "results" in result and result["results"][0].get("series"):
-                series = result["results"][0]["series"][0]
+            series = None
+            if config.influxdb_version == 2:
+                org_id = _get_v2_org_id(influxdb3_local, config, credentials, task_id)
+                if org_id:
+                    is_final = (window_end == actual_end)
+                    columns, values, tags_dict = _query_flux_data(
+                        influxdb3_local, config, credentials, org_id, measurement, window_start, window_end, direction, task_id, is_final
+                    )
+                    if values:
+                        series = {"columns": columns, "values": values, "tags": tags_dict}
+            else:
+                query = f"""
+                SELECT * FROM "{measurement}"
+                WHERE time >= '{window_start.isoformat()}' AND time <= '{window_end.isoformat()}'
+                ORDER BY time {"ASC" if direction > 0 else "DESC"}
+                """
+                result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
+                if "results" in result and result["results"][0].get("series"):
+                    series = result["results"][0]["series"][0]
 
-                # Convert to line protocol with proper tag/field type information
+            if series:
                 line_protocol = convert_influxql_to_line_protocol(
                     influxdb3_local, measurement, series, tags, fields, task_id, tag_renames
                 )

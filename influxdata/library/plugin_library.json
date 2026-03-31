@@ -171,8 +171,8 @@
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/import/README.md",
                 "required_plugins": [],
-                "required_libraries": ["requests"],
-                "last_update": "2026-02-26",
+                "required_libraries": ["requests", "influxdb-client"],
+                "last_update": "2026-04-01",
                 "trigger_types_supported": ["http"]
             },
             {

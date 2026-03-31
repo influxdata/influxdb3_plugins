@@ -118,7 +118,7 @@ from datetime import datetime
 from queue import Empty, Queue
 from typing import Any, Protocol, runtime_checkable
 
-from jsonpath_ng import parse as jsonpath_parse
+from jsonpath_ng.ext import parse as jsonpath_parse
 from paho.mqtt.client import CallbackAPIVersion, Client
 
 

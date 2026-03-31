@@ -131,7 +131,7 @@ from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 import pika
-from jsonpath_ng import parse as jsonpath_parse
+from jsonpath_ng.ext import parse as jsonpath_parse
 
 # Internal constants
 _CONNECTION_TIMEOUT = 10

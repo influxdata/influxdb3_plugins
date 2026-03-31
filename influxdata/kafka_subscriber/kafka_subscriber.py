@@ -142,7 +142,7 @@ from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
-from jsonpath_ng import parse as jsonpath_parse
+from jsonpath_ng.ext import parse as jsonpath_parse
 
 # Internal constants
 _POLL_TIMEOUT_MS = 1000

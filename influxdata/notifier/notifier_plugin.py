@@ -57,6 +57,36 @@ def build_sender_args(request: NotificationRequest) -> dict:
     return args
 
 
+def extract_requests_from_rows(
+    influxdb3_local,
+    table_batches: list,
+    sender_type: str,
+    sender_config: dict[str, str],
+    task_id: str,
+) -> list[NotificationRequest]:
+    requests = []
+    for batch in table_batches:
+        for row in batch["rows"]:
+            # Skip rows with missing or empty notification_text
+            notification_text = row.get("notification_text")
+            if not notification_text:
+                row_id = row.get("id", "unknown")
+                alert_name = row.get("alert_name", "unknown")
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping row missing 'notification_text' "
+                    f"(table={batch['table_name']}, id={row_id}, alert_name={alert_name})"
+                )
+                continue
+            requests.append(
+                NotificationRequest(
+                    sender_type=sender_type,
+                    notification_text=notification_text,
+                    sender_config=sender_config,
+                )
+            )
+    return requests
+
+
 def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
     """
     Sends an SMS via the Twilio API.

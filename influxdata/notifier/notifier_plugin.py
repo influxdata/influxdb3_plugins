@@ -151,6 +151,39 @@ def dispatch_notifications(
     return results
 
 
+def process_writes(influxdb3_local, table_batches, args=None):
+    task_id = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting process_writes")
+
+    if not args or "sender_type" not in args:
+        influxdb3_local.error(
+            f"[{task_id}] Missing 'sender_type' in trigger args"
+        )
+        return None
+
+    sender_type = args["sender_type"]
+
+    sender_config = resolve_sender_config(influxdb3_local, args, task_id)
+    if sender_config is None:
+        return None
+
+    requests = extract_requests_from_rows(
+        influxdb3_local, table_batches, sender_type, sender_config, task_id
+    )
+
+    if not requests:
+        influxdb3_local.info(f"[{task_id}] No valid notification requests to dispatch")
+        return None
+
+    results = dispatch_notifications(influxdb3_local, requests, task_id)
+
+    influxdb3_local.info(
+        f"[{task_id}] Dispatched {len(results)} notifications: "
+        + ", ".join(f"{r['sender_type']}={'ok' if r['success'] is True else 'fail'}" for r in results)
+    )
+    return None
+
+
 def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
     """
     Sends an SMS via the Twilio API.

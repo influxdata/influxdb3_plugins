@@ -87,6 +87,70 @@ def extract_requests_from_rows(
     return requests
 
 
+async def _dispatch_async_batch(
+    influxdb3_local,
+    requests: list[NotificationRequest],
+    task_id: str,
+) -> list:
+    tasks = [
+        alert_async(influxdb3_local, req.sender_type, build_sender_args(req), task_id)
+        for req in requests
+    ]
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def dispatch_notifications(
+    influxdb3_local,
+    requests: list[NotificationRequest],
+    task_id: str,
+) -> list[dict]:
+    if not requests:
+        return []
+
+    async_requests = [r for r in requests if r.sender_type in ASYNC_SENDER_TYPES]
+    sync_requests = [r for r in requests if r.sender_type in SYNC_SENDER_TYPES]
+    unknown_requests = [
+        r for r in requests
+        if r.sender_type not in ASYNC_SENDER_TYPES and r.sender_type not in SYNC_SENDER_TYPES
+    ]
+
+    results = []
+
+    # Dispatch async senders concurrently in a single event loop
+    if async_requests:
+        async_results = asyncio.run(
+            _dispatch_async_batch(influxdb3_local, async_requests, task_id)
+        )
+        for req, res in zip(async_requests, async_results):
+            success = not isinstance(res, Exception) and res
+            results.append({
+                "sender_type": req.sender_type,
+                "success": success,
+                "notification_text": req.notification_text,
+            })
+
+    # Dispatch sync senders sequentially
+    for req in sync_requests:
+        sender_fn = send_sms_via_twilio if req.sender_type == "sms" else send_whatsapp_via_twilio
+        success = sender_fn(influxdb3_local, build_sender_args(req), task_id)
+        results.append({
+            "sender_type": req.sender_type,
+            "success": success,
+            "notification_text": req.notification_text,
+        })
+
+    # Handle unknown sender types
+    for req in unknown_requests:
+        influxdb3_local.warn(f"[{task_id}] Invalid sender type: {req.sender_type}")
+        results.append({
+            "sender_type": req.sender_type,
+            "success": "Invalid sender",
+            "notification_text": req.notification_text,
+        })
+
+    return results
+
+
 def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
     """
     Sends an SMS via the Twilio API.

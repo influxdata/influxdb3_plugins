@@ -42,6 +42,21 @@ def resolve_sender_config(influxdb3_local, args: dict, task_id: str) -> dict | N
     return config
 
 
+ASYNC_SENDER_TYPES = {"slack", "discord", "http"}
+SYNC_SENDER_TYPES = {"sms", "whatsapp"}
+
+
+def build_sender_args(request: NotificationRequest) -> dict:
+    args = {}
+    if request.sender_type in ASYNC_SENDER_TYPES:
+        for key, value in request.sender_config.items():
+            args[f"{request.sender_type}_{key}"] = value
+    else:
+        args.update(request.sender_config)
+    args["notification_text"] = request.notification_text
+    return args
+
+
 def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
     """
     Sends an SMS via the Twilio API.

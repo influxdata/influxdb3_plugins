@@ -1012,7 +1012,9 @@ def sample_data_density(
 
 
 def check_influx_type_to_python_type(influx_type: str, value) -> bool:
-    if influx_type == "string":
+    if influx_type == "unknown":
+        return True
+    elif influx_type == "string":
         return isinstance(value, str)
     elif influx_type == "boolean":
         return isinstance(value, bool)
@@ -1144,6 +1146,13 @@ def parse_timestamp_to_nanoseconds(timestamp) -> int:
             epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
             delta = dt - epoch
             timestamp_ns = delta.days * 86400 * 1_000_000_000 + delta.seconds * 1_000_000_000 + delta.microseconds * 1000
+    elif isinstance(timestamp, datetime):
+        # datetime object (e.g., from Flux client) — convert to nanoseconds
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        delta = timestamp - epoch
+        timestamp_ns = delta.days * 86400 * 1_000_000_000 + delta.seconds * 1_000_000_000 + delta.microseconds * 1000
     elif isinstance(timestamp, int):
         # Already in nanoseconds (or assume it is)
         timestamp_ns = timestamp
@@ -1248,9 +1257,9 @@ def analyze_column_schema(
             if f"{col}_1" in columns:
                 # This is a conflicting column, add as field
                 field_columns[i] = (col, field_type)
-        elif col not in tag_keys and field_type is not None:
-            # Regular field (not a tag)
-            field_columns[i] = (col, field_type)
+        elif col not in tag_keys:
+            # Regular field (not a tag) — use "unknown" if not in field_types
+            field_columns[i] = (col, field_type if field_type is not None else "unknown")
 
     return tag_columns, field_columns
 

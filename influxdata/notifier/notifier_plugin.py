@@ -421,6 +421,32 @@ def process_request(
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Starting request process")
 
+    # New mode: sender_type in args — credentials from env vars, body has notification_text only
+    if args and "sender_type" in args:
+        if not request_body:
+            influxdb3_local.error(f"[{task_id}] No request body provided.")
+            return {"status": "failed", "message": "No request body provided."}
+        try:
+            data = json.loads(request_body)
+        except JSONDecodeError:
+            influxdb3_local.error(f"[{task_id}] Invalid JSON in request body.")
+            return {"status": "failed", "message": "Invalid JSON in request body."}
+        if "notification_text" not in data:
+            influxdb3_local.error(f"[{task_id}] Missing 'notification_text' in request body.")
+            return {"status": "failed", "message": "Missing required field: 'notification_text'."}
+
+        sender_config = resolve_sender_config(influxdb3_local, args, task_id)
+        if sender_config is None:
+            return {"status": "failed", "message": "Failed to resolve sender credentials from environment variables."}
+
+        request = NotificationRequest(
+            sender_type=args["sender_type"],
+            notification_text=data["notification_text"],
+            sender_config=sender_config,
+        )
+        results = dispatch_notifications(influxdb3_local, [request], task_id)
+        return {"status": "success", "message": "Request processed", "results": results}
+
     # Process the request body
     if request_body:
         try:

@@ -26,6 +26,22 @@ class NotificationRequest:
     sender_config: dict[str, str]
 
 
+def resolve_sender_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
+    config = {}
+    for key, value in args.items():
+        if not key.endswith("_env"):
+            continue
+        env_value = os.getenv(value)
+        if env_value is None:
+            influxdb3_local.error(
+                f"[{task_id}] Environment variable '{value}' (from arg '{key}') is not set"
+            )
+            return None
+        clean_key = key[: -len("_env")]
+        config[clean_key] = env_value
+    return config
+
+
 def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
     """
     Sends an SMS via the Twilio API.

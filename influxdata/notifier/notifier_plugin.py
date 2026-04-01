@@ -1,6 +1,6 @@
 """
 {
-    "plugin_type": ["http"]
+    "plugin_type": ["http", "onwrite"]
 }
 """
 
@@ -11,11 +11,19 @@ import os
 import random
 import time
 import uuid
+from dataclasses import dataclass
 from json import JSONDecodeError
 
 import httpx
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
+
+
+@dataclass
+class NotificationRequest:
+    sender_type: str
+    notification_text: str
+    sender_config: dict[str, str]
 
 
 def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:

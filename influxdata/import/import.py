@@ -3036,21 +3036,18 @@ def get_source_databases_list(
 
         elif influxdb_version == 2:
             headers = _build_v2_headers(credentials)
+            headers["Content-Type"] = "application/json"
 
             response = session.get(
-                f"{base_url}/api/v2/buckets",
+                f"{base_url}/query",
+                params={"q": "SHOW DATABASES"},
                 headers=headers,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
-            result = response.json()
-            databases = []
-            if "buckets" in result:
-                databases = [bucket["name"] for bucket in result["buckets"]]
-
-            # Filter out system buckets (starting with _)
-            databases = [db for db in databases if not db.startswith("_")]
+            databases = _parse_v1_series_values(response.json())
+            databases = [db for db in databases if db not in ["_internal"]]
             return {"databases": sorted(databases)}
 
         elif influxdb_version == 3:
@@ -3121,50 +3118,17 @@ def get_source_tables_list(
 
         elif influxdb_version == 2:
             headers = _build_v2_headers(credentials)
+            headers["Content-Type"] = "application/json"
 
-            # First, get the orgID from the bucket
-            buckets_response = session.get(
-                f"{base_url}/api/v2/buckets",
-                params={"name": source_database},
+            response = session.get(
+                f"{base_url}/query",
+                params={"db": source_database, "q": "SHOW MEASUREMENTS"},
                 headers=headers,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
-            buckets_response.raise_for_status()
-
-            buckets_data = buckets_response.json()
-            buckets = buckets_data.get("buckets", [])
-            if not buckets:
-                return {"error": f"Bucket '{source_database}' not found"}
-
-            org_id = buckets[0].get("orgID")
-            if not org_id:
-                return {"error": "Could not determine organization ID from bucket"}
-
-            # Now query measurements using Flux
-            headers["Content-Type"] = "application/vnd.flux"
-            headers["Accept"] = "application/csv"
-
-            escaped_bucket = source_database.replace('"', '\\"')
-            flux_query = f'import "influxdata/influxdb/schema"\nschema.measurements(bucket: "{escaped_bucket}")'
-
-            response = session.post(
-                f"{base_url}/api/v2/query",
-                params={"orgID": org_id},
-                headers=headers,
-                data=flux_query,
                 timeout=REQUEST_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
 
-            # Parse CSV response
-            tables = []
-            lines = response.text.strip().split("\n")
-            for line in lines[1:]:  # Skip header
-                if line.strip() and "," in line:
-                    parts = line.split(",")
-                    if len(parts) >= 4 and parts[3]:
-                        tables.append(parts[3].strip())
-
+            tables = _parse_v1_series_values(response.json())
             return {"tables": sorted(tables)}
 
         elif influxdb_version == 3:

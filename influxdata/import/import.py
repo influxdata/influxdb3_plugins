@@ -1391,6 +1391,15 @@ def import_table(
         influxdb3_local.info(
             f"[{task_id}] No data found in specified range for '{measurement}'"
         )
+        write_import_state(
+            influxdb3_local,
+            import_id,
+            measurement,
+            "completed",
+            0,
+            task_id,
+            no_sync=True,
+        )
         return {
             "measurement": measurement,
             "status": "completed",

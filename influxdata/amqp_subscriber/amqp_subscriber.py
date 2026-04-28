@@ -1584,20 +1584,20 @@ def write_stats(
             line.tag("virtual_host", virtual_host)
 
             # Period stats (current interval since last write)
-            line.int64_field("received", data["received"])
-            line.int64_field("processed", data["processed"])
-            line.int64_field("failed", data["failed"])
-            # Only write success_rate if there were messages in this period
+            line.int64_field("period_received", data["received"])
+            line.int64_field("period_processed", data["processed"])
+            line.int64_field("period_failed", data["failed"])
+            # Only write period_success_rate if there were messages in this period
             if data["received"] > 0:
-                line.float64_field("success_rate", data["success_rate"])
+                line.float64_field("period_success_rate", data["success_rate"])
 
             # Total stats (accumulated over entire plugin lifetime)
-            line.int64_field("total_received", data["total_received"])
-            line.int64_field("total_processed", data["total_processed"])
-            line.int64_field("total_failed", data["total_failed"])
-            # Only write total_success_rate if there were any messages ever
+            line.int64_field("messages_received", data["total_received"])
+            line.int64_field("messages_processed", data["total_processed"])
+            line.int64_field("messages_failed", data["total_failed"])
+            # Only write success_rate if there were any messages ever
             if data["total_received"] > 0:
-                line.float64_field("total_success_rate", data["total_success_rate"])
+                line.float64_field("success_rate", data["total_success_rate"])
 
             line.time_ns(time.time_ns())
             lines.append(line)

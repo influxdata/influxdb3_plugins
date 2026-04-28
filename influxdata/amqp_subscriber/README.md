@@ -278,7 +278,7 @@ Process batch messages containing arrays of JSON objects:
 - Each array element is processed independently as a separate data point
 - If one element fails to parse, the others continue processing (partial success)
 - Parse errors for individual elements are logged to `amqp_exceptions` table
-- Statistics count each AMQP message as one unit (received=1, processed=1), regardless of array size
+- Statistics count each AMQP message as one unit (messages_received+=1, messages_processed+=1), regardless of array size
 
 ### Line Protocol Format
 
@@ -360,19 +360,19 @@ The plugin tracks comprehensive statistics and writes them to the `amqp_stats` t
 
 ### amqp_stats Table
 
-| Field                 | Type  | Description                                              |
-|-----------------------|-------|----------------------------------------------------------|
-| `queue` (tag)         | tag   | AMQP queue name                                          |
-| `host` (tag)          | tag   | AMQP broker address                                      |
-| `virtual_host` (tag)  | tag   | AMQP virtual host                                        |
-| `received`            | int   | Messages received in current period                      |
-| `processed`           | int   | Messages processed in current period                     |
-| `failed`              | int   | Messages failed in current period                        |
-| `success_rate`        | float | Success rate for current period (%)                      |
-| `total_received`      | int   | Total messages received (all time)                       |
-| `total_processed`     | int   | Total messages processed (all time)                      |
-| `total_failed`        | int   | Total messages failed (all time)                         |
-| `total_success_rate`  | float | Total success rate (all time, %)                         |
+| Field                   | Type  | Description                                              |
+|-------------------------|-------|----------------------------------------------------------|
+| `queue` (tag)           | tag   | AMQP queue name                                          |
+| `host` (tag)            | tag   | AMQP broker address                                      |
+| `virtual_host` (tag)    | tag   | AMQP virtual host                                        |
+| `messages_received`     | int   | Total messages received (all time)                       |
+| `messages_processed`    | int   | Total messages processed (all time)                      |
+| `messages_failed`       | int   | Total messages failed (all time)                         |
+| `success_rate`          | float | Total success rate (all time, %)                         |
+| `period_received`       | int   | Messages received in current period                      |
+| `period_processed`      | int   | Messages processed in current period                     |
+| `period_failed`         | int   | Messages failed in current period                        |
+| `period_success_rate`   | float | Success rate for current period (%)                      |
 
 ### Querying Statistics
 
@@ -383,7 +383,7 @@ influxdb3 query --database mydb \
 
 # Success rate over time
 influxdb3 query --database mydb \
-  "SELECT queue, success_rate, processed, failed
+  "SELECT queue, success_rate, messages_processed, messages_failed
    FROM amqp_stats
    WHERE time > now() - INTERVAL '1 hour'
    ORDER BY time DESC"

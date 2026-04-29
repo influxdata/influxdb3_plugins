@@ -1,0 +1,94 @@
+name: Publish Registry
+
+on:
+  push:
+    branches: [demo/public-registry-mvp]
+    paths:
+      - 'registry-guide/plugins/**'
+      - 'registry-guide/index.json'
+      - 'registry-guide/scripts/**'
+      - '.github/workflows/publish.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: registry-publish
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  S3_BUCKET: influxdb3-plugins-registry
+  AWS_REGION: us-east-2
+  AWS_ROLE_ARN: arn:aws:iam::752401886767:role/influxdb3-plugins-registry-ci
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read SDK version
+        id: sdk-version
+        run: echo "version=$(cat registry-guide/.sdk-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch influxdb3-plugin CLI
+        run: |
+          SDK_VERSION="${{ steps.sdk-version.outputs.version }}"
+          curl -LsSf \
+            "https://github.com/influxdata/influxdb3-plugin-sdk/releases/download/v${SDK_VERSION}/influxdb3-plugin-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar xzf - -C /usr/local/bin/ influxdb3-plugin
+          influxdb3-plugin --version
+
+      - name: Configure AWS credentials (OIDC)
+        if: env.AWS_ROLE_ARN != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (static keys fallback)
+        if: env.AWS_ROLE_ARN == ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch current index from S3
+        run: |
+          aws s3 cp \
+            "s3://${{ env.S3_BUCKET }}/index.json" \
+            /tmp/current-index.json
+
+      - name: Run publish script
+        run: |
+          registry-guide/scripts/publish.sh \
+            registry-guide/plugins \
+            /tmp/current-index.json \
+            /tmp/publish-output
+
+      - name: Upload artifacts to S3
+        run: |
+          if ls /tmp/publish-output/artifacts/*.tar.gz 1>/dev/null 2>&1; then
+            for artifact in /tmp/publish-output/artifacts/*.tar.gz; do
+              aws s3 cp "$artifact" \
+                "s3://${{ env.S3_BUCKET }}/artifacts/$(basename "$artifact")" \
+                --content-type "application/gzip"
+            done
+          fi
+
+      - name: Upload index to S3
+        run: |
+          aws s3 cp \
+            /tmp/publish-output/index.json \
+            "s3://${{ env.S3_BUCKET }}/index.json" \
+            --content-type "application/json"
+
+      - name: Verify public access
+        run: |
+          echo "Fetching public index..."
+          curl -sS "https://${{ env.S3_BUCKET }}.s3.${{ env.AWS_REGION }}.amazonaws.com/index.json" \
+            | python3 -m json.tool

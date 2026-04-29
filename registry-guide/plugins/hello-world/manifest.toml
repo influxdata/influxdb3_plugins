@@ -1,0 +1,10 @@
+manifest_schema_version = "1.1"
+
+[plugin]
+name = "hello-world"
+version = "0.1.0"
+description = "A new request-handling plugin."
+triggers = ["process_request"]
+
+[dependencies]
+database_version = ">=3.0.0"

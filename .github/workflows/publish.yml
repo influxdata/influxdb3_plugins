@@ -107,24 +107,48 @@ jobs:
           GH_ARTIFACTS_URL="https://github.com/${{ env.GH_RELEASE_REPO }}/releases/download/${{ env.GH_RELEASE_TAG }}"
 
           # Generate a GitHub-flavored index with swapped artifacts_url
+          mkdir -p /tmp/gh-release
           python3 -c "
           import json, sys
           with open('/tmp/publish-output/index.json') as f:
               idx = json.load(f)
           idx['artifacts_url'] = '${GH_ARTIFACTS_URL}'
-          with open('/tmp/gh-index.json', 'w') as f:
+          with open('/tmp/gh-release/index.json', 'w') as f:
               json.dump(idx, f, indent=2)
               f.write('\n')
           "
 
-          # Upload new artifacts (skip if already exists)
-          if ls /tmp/publish-output/artifacts/*.tar.gz 1>/dev/null 2>&1; then
-            for artifact in /tmp/publish-output/artifacts/*.tar.gz; do
-              gh release upload "${{ env.GH_RELEASE_TAG }}" "$artifact" \
+          # Sync all artifacts referenced in the index to the release.
+          # For each entry, check if the asset exists; if not, download from S3 and upload.
+          python3 -c "
+          import json
+          with open('/tmp/publish-output/index.json') as f:
+              idx = json.load(f)
+          for p in idx['plugins']:
+              print(f\"{p['name']}-{p['version']}.tar.gz\")
+          " | while read artifact_name; do
+            # Check if already in the release
+            if gh release view "${{ env.GH_RELEASE_TAG }}" --repo "${{ env.GH_RELEASE_REPO }}" \
+                --json assets --jq ".assets[].name" | grep -qF "$artifact_name"; then
+              echo "  $artifact_name: already in release"
+              continue
+            fi
+
+            # Check if we just built it
+            if [ -f "/tmp/publish-output/artifacts/$artifact_name" ]; then
+              echo "  $artifact_name: uploading (new)"
+              gh release upload "${{ env.GH_RELEASE_TAG }}" "/tmp/publish-output/artifacts/$artifact_name" \
                 --repo "${{ env.GH_RELEASE_REPO }}" || true
-            done
-          fi
+              continue
+            fi
+
+            # Otherwise fetch from S3 and upload
+            echo "  $artifact_name: syncing from S3"
+            aws s3 cp "s3://${{ env.S3_BUCKET }}/artifacts/$artifact_name" "/tmp/gh-release/$artifact_name"
+            gh release upload "${{ env.GH_RELEASE_TAG }}" "/tmp/gh-release/$artifact_name" \
+              --repo "${{ env.GH_RELEASE_REPO }}" || true
+          done
 
           # Upload index (overwrite)
-          gh release upload "${{ env.GH_RELEASE_TAG }}" /tmp/gh-index.json#index.json \
+          gh release upload "${{ env.GH_RELEASE_TAG }}" /tmp/gh-release/index.json \
             --repo "${{ env.GH_RELEASE_REPO }}" --clobber

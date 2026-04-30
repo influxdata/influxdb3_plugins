@@ -22,6 +22,8 @@ env:
   S3_BUCKET: influxdb3-plugins-registry
   AWS_REGION: us-east-2
   AWS_ROLE_ARN: arn:aws:iam::752401886767:role/influxdb3-plugins-registry-ci
+  GH_RELEASE_REPO: influxdata/influxdb3_plugins_dev
+  GH_RELEASE_TAG: registry
 
 jobs:
   publish:
@@ -92,8 +94,37 @@ jobs:
             "s3://${{ env.S3_BUCKET }}/index.json" \
             --content-type "application/json"
 
-      - name: Verify public access
+      - name: Verify S3 public access
         run: |
-          echo "Fetching public index..."
+          echo "Fetching public index from S3..."
           curl -sS "https://${{ env.S3_BUCKET }}.s3.${{ env.AWS_REGION }}.amazonaws.com/index.json" \
             | python3 -m json.tool
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          GH_ARTIFACTS_URL="https://github.com/${{ env.GH_RELEASE_REPO }}/releases/download/${{ env.GH_RELEASE_TAG }}"
+
+          # Generate a GitHub-flavored index with swapped artifacts_url
+          python3 -c "
+          import json, sys
+          with open('/tmp/publish-output/index.json') as f:
+              idx = json.load(f)
+          idx['artifacts_url'] = '${GH_ARTIFACTS_URL}'
+          with open('/tmp/gh-index.json', 'w') as f:
+              json.dump(idx, f, indent=2)
+              f.write('\n')
+          "
+
+          # Upload new artifacts (skip if already exists)
+          if ls /tmp/publish-output/artifacts/*.tar.gz 1>/dev/null 2>&1; then
+            for artifact in /tmp/publish-output/artifacts/*.tar.gz; do
+              gh release upload "${{ env.GH_RELEASE_TAG }}" "$artifact" \
+                --repo "${{ env.GH_RELEASE_REPO }}" || true
+            done
+          fi
+
+          # Upload index (overwrite)
+          gh release upload "${{ env.GH_RELEASE_TAG }}" /tmp/gh-index.json#index.json \
+            --repo "${{ env.GH_RELEASE_REPO }}" --clobber

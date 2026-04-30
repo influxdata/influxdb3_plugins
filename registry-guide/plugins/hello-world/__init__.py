@@ -2,7 +2,7 @@
 
 
 def process_request(influxdb3_local, query_params, request_headers, request_body, args=None):
-    """Echo request inputs as a JSON response. Replace with your own handler."""
+    """Echo request inputs as a JSON response with a greeting."""
     return {
         "query_params": dict(query_params),
         "request_headers": dict(request_headers),

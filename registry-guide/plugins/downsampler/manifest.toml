@@ -2,7 +2,7 @@ manifest_schema_version = "1.1"
 
 [plugin]
 name = "downsampler"
-version = "1.0.0"
+version = "1.1.0"
 description = "Downsample time series data on a schedule."
 triggers = ["process_scheduled_call"]
 

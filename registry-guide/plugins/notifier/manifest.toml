@@ -1,9 +1,9 @@
 manifest_schema_version = "1.1"
 
 [plugin]
-name = "hello-world"
+name = "notifier"
 version = "0.1.0"
-description = "A new request-handling plugin."
+description = "Send notifications via HTTP, Slack, or Discord."
 triggers = ["process_request"]
 
 [dependencies]

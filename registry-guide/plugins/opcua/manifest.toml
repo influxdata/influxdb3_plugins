@@ -1,9 +1,9 @@
 manifest_schema_version = "1.1"
 
 [plugin]
-name = "downsampler"
-version = "1.0.0"
-description = "Downsample time series data on a schedule."
+name = "opcua"
+version = "0.1.0"
+description = "Collect data from OPC UA servers."
 triggers = ["process_scheduled_call"]
 
 [dependencies]

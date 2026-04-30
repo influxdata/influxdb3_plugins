@@ -1,9 +1,9 @@
 manifest_schema_version = "1.1"
 
 [plugin]
-name = "downsampler"
-version = "1.0.0"
-description = "Downsample time series data on a schedule."
+name = "kafka-subscriber"
+version = "0.1.0"
+description = "Subscribe to Kafka topics and write messages to InfluxDB."
 triggers = ["process_scheduled_call"]
 
 [dependencies]

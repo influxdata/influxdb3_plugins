@@ -1,0 +1,10 @@
+manifest_schema_version = "1.1"
+
+[plugin]
+name = "import"
+version = "0.1.0"
+description = "Import data from InfluxDB v1/v2 instances."
+triggers = ["process_request"]
+
+[dependencies]
+database_version = ">=3.0.0"

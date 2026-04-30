@@ -1,9 +1,9 @@
 manifest_schema_version = "1.1"
 
 [plugin]
-name = "downsampler"
-version = "1.0.0"
-description = "Downsample time series data on a schedule."
+name = "nws-weather"
+version = "0.1.0"
+description = "Sample weather data from the National Weather Service."
 triggers = ["process_scheduled_call"]
 
 [dependencies]

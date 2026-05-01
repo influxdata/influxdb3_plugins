@@ -240,7 +240,7 @@ def _resolve_path(path: str, description: str) -> str:
     if not plugin_dir:
         raise ValueError(
             f"PLUGIN_DIR environment variable not set. "
-            f"Required for relative {description} path: {path}"
+            f"Required for relative {description} path."
         )
     return os.path.join(plugin_dir, path)
 
@@ -310,10 +310,13 @@ class OPCUAConfig:
         config_path: str = _resolve_path(config_file, "configuration file")
 
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+            raise FileNotFoundError("Configuration file not found or not accessible.")
 
-        with open(config_path, "rb") as f:
-            config: dict[str, Any] = tomllib.load(f)
+        try:
+            with open(config_path, "rb") as f:
+                config: dict[str, Any] = tomllib.load(f)
+        except OSError:
+            raise OSError("Configuration file not found or not accessible.") from None
 
         self._validate_toml_config(config)
 
@@ -958,15 +961,18 @@ class OPCUAConnectionManager:
 
                 if not os.path.exists(cert_path):
                     raise FileNotFoundError(
-                        f"Client certificate not found: {cert_path}"
+                        "Security configuration failed. Check certificate and key files."
                     )
                 if not os.path.exists(key_path):
                     raise FileNotFoundError(
-                        f"Client private key not found: {key_path}"
+                        "Security configuration failed. Check certificate and key files."
                     )
 
                 security_string = f"{policy},{mode},{cert_path},{key_path}"
-                await self.client.set_security_string(security_string)
+                try:
+                    await self.client.set_security_string(security_string)
+                except Exception:
+                    raise OSError("Security configuration failed. Check certificate and key files.") from None
 
             # Configure authentication
             auth: dict = self.config.get("auth", {})

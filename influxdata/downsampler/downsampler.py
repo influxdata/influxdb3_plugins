@@ -88,6 +88,20 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
+
+
+def validate_identifier(name: str, kind: str = "identifier") -> None:
+    if not IDENTIFIER_PATTERN.match(name):
+        raise Exception(
+            f"Invalid {kind}: '{name}' "
+            f"(must start with a letter, digit, or underscore and contain only letters, digits, underscores, and hyphens)"
+        )
+
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
 
 def parse_time_interval(
     influxdb3_local, args: dict, key: str, task_id: str
@@ -326,6 +340,14 @@ def parse_tag_values_for_scheduler(
     # Use config file
     if args["use_config_file"]:
         if isinstance(tag_values, dict):
+            tag_names: list = get_tag_names(influxdb3_local, source_measurement, task_id)
+            for tag_name in list(tag_values.keys()):
+                validate_identifier(tag_name, "tag name")
+                if tag_name not in tag_names:
+                    influxdb3_local.warn(
+                        f"[{task_id}] Tag '{tag_name}' does not exist in '{source_measurement}'."
+                    )
+                    del tag_values[tag_name]
             return tag_values
         else:
             raise Exception(
@@ -390,6 +412,7 @@ def parse_tag_values_for_http(
     if tag_value_filters is not None:
         tag_names: list = get_tag_names(influxdb3_local, source_measurement, task_id)
         for tag_name in list(tag_value_filters.keys()):
+            validate_identifier(tag_name, "tag name")
             if tag_name not in tag_names:
                 influxdb3_local.warn(
                     f"[{task_id}] Tag '{tag_name}' does not exist in '{source_measurement}'."
@@ -879,15 +902,17 @@ def generate_fields_string(
         query += ",\n"
         aggregation = field[1]
         field_name = field[0]
+        quoted_field = quote_identifier(field_name)
+        alias = quote_identifier(f"{field_name}_{aggregation}")
 
         # Add ORDER BY time for first_value and last_value to ensure correct temporal ordering
         if aggregation in ('first_value', 'last_value'):
-            query += f'\t{aggregation}("{field_name}" ORDER BY time) as "{field_name}_{aggregation}"'
+            query += f'\t{aggregation}({quoted_field} ORDER BY time) as {alias}'
         else:
-            query += f'\t{aggregation}("{field_name}") as "{field_name}_{aggregation}"'
+            query += f'\t{aggregation}({quoted_field}) as {alias}'
 
     for tag in tags_list:
-        query += f',\n\t"{tag}"'
+        query += f',\n\t{quote_identifier(tag)}'
 
     return query
 
@@ -904,31 +929,46 @@ def generate_group_by_string(tags_list: list):
     """
     group_by_clause: str = "_time"
     for tag in tags_list:
-        group_by_clause += f', "{tag}"'
+        group_by_clause += f', {quote_identifier(tag)}'
     return group_by_clause
 
 
-def generate_tag_filter_clause(tag_values: dict | None):
+def generate_tag_filter_clause(tag_values: dict | None) -> tuple[str, dict]:
     """
-    Generates the WHERE clause for filtering by tag values.
+    Generates the WHERE clause for filtering by tag values using parameter binding.
 
     Args:
         tag_values (dict | None): Dictionary mapping tag names to lists of values, or None.
 
     Returns:
-        str: SQL WHERE clause string for tag filters, or empty string if tag_values is None.
+        tuple[str, dict]: SQL WHERE clause string and a dict of query parameters.
     """
     if tag_values is None:
-        return ""
+        return "", {}
 
     sql_clause: str = ""
+    params: dict = {}
+    param_idx: int = 0
+
     for key, values in tag_values.items():
+        validate_identifier(key, "tag name")
+        quoted_key = quote_identifier(key)
+
         if len(values) == 1:
-            sql_clause += f"AND\n\t\"{key}\" = '{values[0]}'\n"
+            param_name = f"tag_val_{param_idx}"
+            sql_clause += f'AND\n\t{quoted_key} = ${param_name}\n'
+            params[param_name] = values[0]
+            param_idx += 1
         else:
-            quoted_values = ", ".join(f"'{v}'" for v in values)
-            sql_clause += f'AND\n\t"{key}" IN ({quoted_values})\n'
-    return sql_clause
+            placeholders: list[str] = []
+            for v in values:
+                param_name = f"tag_val_{param_idx}"
+                placeholders.append(f"${param_name}")
+                params[param_name] = v
+                param_idx += 1
+            sql_clause += f'AND\n\t{quoted_key} IN ({", ".join(placeholders)})\n'
+
+    return sql_clause, params
 
 
 def build_downsample_query(
@@ -939,7 +979,7 @@ def build_downsample_query(
     tag_values: dict[str, list[str]] | None,
     start_time: datetime,
     end_time: datetime,
-) -> str:
+) -> tuple[str, dict]:
     """
     Builds a downsampling SQL query for any mode (HTTP or scheduler), given explicit start/end.
 
@@ -953,14 +993,18 @@ def build_downsample_query(
         end_time:   UTC datetime for WHERE time < ...
 
     Returns:
-        A complete SQL query string.
+        tuple[str, dict]: A complete SQL query string and a dict of query parameters.
     """
+    validate_identifier(measurement, "measurement name")
+
     # SELECT clause
     fields_clause: str = generate_fields_string(fields_list, interval, tags_list)
     # GROUP BY clause
     group_by_clause: str = generate_group_by_string(tags_list)
     # tag filters
-    tag_filter_clause: str = generate_tag_filter_clause(tag_values)
+    tag_filter_clause, params = generate_tag_filter_clause(tag_values)
+
+    escaped_measurement = measurement.replace("'", "''")
 
     # ISO timestamps
     start_iso: str = start_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -970,16 +1014,16 @@ def build_downsample_query(
         SELECT
             {fields_clause}
         FROM
-            '{measurement}'
+            '{escaped_measurement}'
         WHERE
             time >= '{start_iso}'
-        AND 
+        AND
             time < '{end_iso}'
         {tag_filter_clause}
         GROUP BY
         {group_by_clause}
     """
-    return query
+    return query, params
 
 
 def write_downsampled_data(
@@ -1221,7 +1265,7 @@ def process_scheduled_call(
         real_then: datetime = real_now - window
         influxdb3_local.info(f"[{task_id}] Querying data from {real_then} to {real_now} with fields: {fields} and tags: {tags}")
 
-        query: str = build_downsample_query(
+        query, params = build_downsample_query(
             fields,
             source_measurement,
             tags,
@@ -1231,7 +1275,7 @@ def process_scheduled_call(
             real_now,
         )
 
-        data: list = influxdb3_local.query(query)
+        data: list = influxdb3_local.query(query, params)
 
         # Log source data metrics
         source_record_count: int = len(data)
@@ -1418,7 +1462,8 @@ def process_request(
         backfill_start, backfill_end = parse_backfill_window(data, task_id)
 
         if backfill_start is None:
-            q: str = f"SELECT MIN(time) as _t FROM {source_measurement}"
+            escaped_src = source_measurement.replace("'", "''")
+            q: str = f"SELECT MIN(time) as _t FROM '{escaped_src}'"
             res: list = influxdb3_local.query(q)
             oldest: int = res[0].get("_t")
 
@@ -1455,7 +1500,7 @@ def process_request(
             batch_count += 1
             batch_end = min(cursor + batch_delta, backfill_end)
 
-            query: str = build_downsample_query(
+            query, params = build_downsample_query(
                 fields,
                 source_measurement,
                 tags,
@@ -1465,7 +1510,7 @@ def process_request(
                 batch_end,
             )
 
-            batch_data: list = influxdb3_local.query(query)
+            batch_data: list = influxdb3_local.query(query, params)
             batch_source_count: int = len(batch_data)
             total_source_records += batch_source_count
 

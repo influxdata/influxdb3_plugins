@@ -92,7 +92,7 @@ IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 
 
 def validate_identifier(name: str, kind: str = "identifier") -> None:
-    if not IDENTIFIER_PATTERN.match(name):
+    if not IDENTIFIER_PATTERN.fullmatch(name):
         raise Exception(
             f"Invalid {kind}: '{name}' "
             f"(must start with a letter, digit, or underscore and contain only letters, digits, underscores, and hyphens)"

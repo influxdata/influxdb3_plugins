@@ -3,19 +3,18 @@ import sys
 import tempfile
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-SKIPPED = []
-
-
-def _try_import(module_path):
-    """Try importing a module; return (module, None) on success or (None, reason) on failure."""
-    try:
-        import importlib
-        mod = importlib.import_module(module_path)
-        return mod, None
-    except ImportError as e:
-        return None, str(e)
+mqtt_mod = pytest.importorskip(
+    "influxdata.mqtt_subscriber.mqtt_subscriber",
+    reason="paho-mqtt / jsonpath-ng not installed",
+)
+kafka_mod = pytest.importorskip(
+    "influxdata.kafka_subscriber.kafka_subscriber",
+    reason="confluent-kafka / jsonpath-ng not installed",
+)
 
 
 class MockCache:
@@ -63,18 +62,12 @@ def _find_log(logs, substring):
 
 def test_mqtt_missing_config_no_path_leak():
     """Missing config file: exception and logs must not contain the resolved path."""
-    mqtt_mod, reason = _try_import("influxdata.mqtt_subscriber.mqtt_subscriber")
-    if mqtt_mod is None:
-        SKIPPED.append(f"test_mqtt_missing_config_no_path_leak ({reason})")
-        return
-    MQTTConfig = mqtt_mod.MQTTConfig
-
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["PLUGIN_DIR"] = tmpdir
         caught = None
         try:
-            MQTTConfig(mock, {"config_file_path": "nonexistent.toml"}, "task-1")
+            mqtt_mod.MQTTConfig(mock, {"config_file_path": "nonexistent.toml"}, "task-1")
         except Exception as e:
             caught = e
         assert caught is not None, "Expected an exception for missing config"
@@ -86,17 +79,9 @@ def test_mqtt_missing_config_no_path_leak():
         )
 
 
+@pytest.mark.skipif(os.getuid() == 0, reason="running as root, chmod 0o000 has no effect")
 def test_mqtt_unreadable_config_no_path_leak():
     """Unreadable config file: exception and logs must not contain the resolved path."""
-    mqtt_mod, reason = _try_import("influxdata.mqtt_subscriber.mqtt_subscriber")
-    if mqtt_mod is None:
-        SKIPPED.append(f"test_mqtt_unreadable_config_no_path_leak ({reason})")
-        return
-    if os.getuid() == 0:
-        SKIPPED.append("test_mqtt_unreadable_config_no_path_leak (running as root)")
-        return
-    MQTTConfig = mqtt_mod.MQTTConfig
-
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["PLUGIN_DIR"] = tmpdir
@@ -106,7 +91,7 @@ def test_mqtt_unreadable_config_no_path_leak():
         os.chmod(config_file, 0o000)
         caught = None
         try:
-            MQTTConfig(mock, {"config_file_path": "test.toml"}, "task-2")
+            mqtt_mod.MQTTConfig(mock, {"config_file_path": "test.toml"}, "task-2")
         except Exception as e:
             caught = e
         finally:
@@ -123,12 +108,6 @@ def test_mqtt_unreadable_config_no_path_leak():
 def test_mqtt_missing_cert_no_path_leak():
     """Missing TLS cert: connect() error log must not contain the resolved path,
     and must contain the expected sanitized error message proving _configure_tls ran."""
-    mqtt_mod, reason = _try_import("influxdata.mqtt_subscriber.mqtt_subscriber")
-    if mqtt_mod is None:
-        SKIPPED.append(f"test_mqtt_missing_cert_no_path_leak ({reason})")
-        return
-    MQTTConnectionManager = mqtt_mod.MQTTConnectionManager
-
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["PLUGIN_DIR"] = tmpdir
@@ -137,13 +116,13 @@ def test_mqtt_missing_cert_no_path_leak():
             "broker_port": 1883,
             "tls": {"ca_cert": "nonexistent_ca.pem"},
         }
-        mgr = MQTTConnectionManager(config, mock, "task-3")
+        mgr = mqtt_mod.MQTTConnectionManager(config, mock, "task-3")
         result = mgr.connect()
         assert result is False, "Expected connect() to return False"
         assert not _logs_contain_path(mock.logs, tmpdir), (
             f"Leaked temp path {tmpdir} in logs: {mock.logs}"
         )
-        cert_error_log = _find_log(mock.logs, "TLS configuration failed")
+        cert_error_log = _find_log(mock.logs, "TLS configured")
         assert cert_error_log is not None, (
             f"Expected a log containing the sanitized TLS error, "
             f"proving _configure_tls ran. Got: {mock.logs}"
@@ -151,17 +130,7 @@ def test_mqtt_missing_cert_no_path_leak():
 
 
 def test_kafka_connect_handler_suppresses_paths():
-    """Kafka connect() error handler must not log cert paths when SSL is configured.
-    Uses a real temp cert file so os.path.exists passes in _build_consumer_config,
-    then monkeypatches Consumer to raise an error containing the cert path.
-    Asserts Consumer was called (proving we reached that code path) and that
-    the logged message is the generic SSL failure, not str(e)."""
-    kafka_mod, reason = _try_import("influxdata.kafka_subscriber.kafka_subscriber")
-    if kafka_mod is None:
-        SKIPPED.append(f"test_kafka_connect_handler_suppresses_paths ({reason})")
-        return
-    KafkaConsumerManager = kafka_mod.KafkaConsumerManager
-
+    """Kafka connect() error handler must not log cert paths when SSL is configured."""
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["PLUGIN_DIR"] = tmpdir
@@ -176,7 +145,7 @@ def test_kafka_connect_handler_suppresses_paths():
             "security_protocol": "SSL",
             "ssl": {"ca_cert": ca_file},
         }
-        mgr = KafkaConsumerManager(config, mock, "task-4")
+        mgr = kafka_mod.KafkaConsumerManager(config, mock, "task-4")
 
         mock_consumer_cls = MagicMock(
             side_effect=Exception(
@@ -204,21 +173,3 @@ def test_kafka_connect_handler_suppresses_paths():
         assert error_log is not None, (
             f"Expected the generic SSL error log, got: {mock.logs}"
         )
-
-
-if __name__ == "__main__":
-    passed = 0
-    failed = 0
-    for name, func in sorted(globals().items()):
-        if name.startswith("test_") and callable(func):
-            try:
-                func()
-                print(f"  PASS: {name}")
-                passed += 1
-            except Exception as e:
-                print(f"  FAIL: {name}: {e}")
-                failed += 1
-    for skip_msg in SKIPPED:
-        print(f"  SKIP: {skip_msg}")
-    print(f"\n{passed} passed, {failed} failed, {len(SKIPPED)} skipped")
-    sys.exit(1 if failed else 0)

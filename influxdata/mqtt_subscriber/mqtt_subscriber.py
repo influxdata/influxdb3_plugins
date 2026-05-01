@@ -860,9 +860,16 @@ class MQTTConnectionManager:
             return True
 
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to MQTT broker: {str(e)}"
-            )
+            if "tls" in self.config:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to MQTT broker: "
+                    f"connection failed (TLS configured). "
+                    f"Check broker address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to MQTT broker: {str(e)}"
+                )
             return False
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):

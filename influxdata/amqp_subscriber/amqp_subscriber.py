@@ -818,15 +818,17 @@ class AMQPConsumerManager:
             )
             return True
 
-        except pika.exceptions.AMQPConnectionError as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] AMQP connection error: {str(e)}"
-            )
-            return False
-        except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to AMQP broker: {str(e)}"
-            )
+        except (pika.exceptions.AMQPConnectionError, Exception) as e:
+            if self.config.get("ssl", {}):
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to AMQP broker: "
+                    f"connection failed (SSL/TLS configured). "
+                    f"Check broker address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to AMQP broker: {str(e)}"
+                )
             return False
 
     def get_messages(self) -> list[dict[str, Any]]:

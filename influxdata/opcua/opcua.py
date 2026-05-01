@@ -994,9 +994,16 @@ class OPCUAConnectionManager:
             return True
 
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to OPC UA server: {str(e)}"
-            )
+            if self.config.get("security", {}).get("security_policy"):
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to OPC UA server: "
+                    f"connection failed (security configured). "
+                    f"Check server address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to OPC UA server: {str(e)}"
+                )
             return False
 
     async def _resolve_namespace_uris(self):

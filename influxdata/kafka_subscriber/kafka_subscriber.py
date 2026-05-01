@@ -267,7 +267,7 @@ class KafkaConfig:
         if not plugin_dir:
             raise ValueError(
                 f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
+                f"Required for relative {description} path."
             )
         return os.path.join(plugin_dir, path)
 
@@ -276,10 +276,13 @@ class KafkaConfig:
         config_path: str = self._resolve_path(config_file, "configuration file")
 
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+            raise FileNotFoundError("Configuration file not found or not accessible.")
 
-        with open(config_path, "rb") as f:
-            config: dict[str, Any] = tomllib.load(f)
+        try:
+            with open(config_path, "rb") as f:
+                config: dict[str, Any] = tomllib.load(f)
+        except OSError:
+            raise OSError("Configuration file not found or not accessible.") from None
 
         self._validate_toml_config(config)
         return config
@@ -822,7 +825,7 @@ class KafkaConsumerManager:
         if not plugin_dir:
             raise ValueError(
                 f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
+                f"Required for relative {description} path."
             )
         return os.path.join(plugin_dir, path)
 
@@ -864,7 +867,7 @@ class KafkaConsumerManager:
             if ca_cert:
                 ca_cert = self._resolve_path(ca_cert, "CA certificate")
                 if not os.path.exists(ca_cert):
-                    raise FileNotFoundError(f"CA certificate not found: {ca_cert}")
+                    raise FileNotFoundError("TLS configuration failed. Check certificate and key files.")
                 consumer_config["ssl.ca.location"] = ca_cert
 
             client_cert = ssl_config.get("client_cert")
@@ -873,11 +876,9 @@ class KafkaConsumerManager:
                 client_cert = self._resolve_path(client_cert, "client certificate")
                 client_key = self._resolve_path(client_key, "client key")
                 if not os.path.exists(client_cert):
-                    raise FileNotFoundError(
-                        f"Client certificate not found: {client_cert}"
-                    )
+                    raise FileNotFoundError("TLS configuration failed. Check certificate and key files.")
                 if not os.path.exists(client_key):
-                    raise FileNotFoundError(f"Client key not found: {client_key}")
+                    raise FileNotFoundError("TLS configuration failed. Check certificate and key files.")
                 consumer_config["ssl.certificate.location"] = client_cert
                 consumer_config["ssl.key.location"] = client_key
 
@@ -928,15 +929,17 @@ class KafkaConsumerManager:
             )
             return True
 
-        except KafkaException as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Kafka connection error: {str(e)}"
-            )
-            return False
-        except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to Kafka: {str(e)}"
-            )
+        except (KafkaException, Exception) as e:
+            if "SSL" in self.config.get("security_protocol", ""):
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to Kafka: "
+                    f"connection failed (SSL/TLS configured). "
+                    f"Check broker address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to Kafka: {str(e)}"
+                )
             return False
 
     def _process_message(self, msg) -> dict[str, Any] | None:

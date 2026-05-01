@@ -7,15 +7,6 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-mqtt_mod = pytest.importorskip(
-    "influxdata.mqtt_subscriber.mqtt_subscriber",
-    reason="paho-mqtt / jsonpath-ng not installed",
-)
-kafka_mod = pytest.importorskip(
-    "influxdata.kafka_subscriber.kafka_subscriber",
-    reason="confluent-kafka / jsonpath-ng not installed",
-)
-
 
 class MockCache:
     def __init__(self):
@@ -60,7 +51,23 @@ def _find_log(logs, substring):
     return None
 
 
-def test_mqtt_missing_config_no_path_leak():
+@pytest.fixture
+def mqtt_mod():
+    return pytest.importorskip(
+        "influxdata.mqtt_subscriber.mqtt_subscriber",
+        reason="paho-mqtt / jsonpath-ng not installed",
+    )
+
+
+@pytest.fixture
+def kafka_mod():
+    return pytest.importorskip(
+        "influxdata.kafka_subscriber.kafka_subscriber",
+        reason="confluent-kafka / jsonpath-ng not installed",
+    )
+
+
+def test_mqtt_missing_config_no_path_leak(mqtt_mod):
     """Missing config file: exception and logs must not contain the resolved path."""
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -80,7 +87,7 @@ def test_mqtt_missing_config_no_path_leak():
 
 
 @pytest.mark.skipif(os.getuid() == 0, reason="running as root, chmod 0o000 has no effect")
-def test_mqtt_unreadable_config_no_path_leak():
+def test_mqtt_unreadable_config_no_path_leak(mqtt_mod):
     """Unreadable config file: exception and logs must not contain the resolved path."""
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -105,9 +112,9 @@ def test_mqtt_unreadable_config_no_path_leak():
         )
 
 
-def test_mqtt_missing_cert_no_path_leak():
-    """Missing TLS cert: connect() error log must not contain the resolved path,
-    and must contain the expected sanitized error message proving _configure_tls ran."""
+def test_mqtt_missing_cert_no_path_leak(mqtt_mod):
+    """Missing TLS cert: _configure_tls must be called and must raise a sanitized
+    error that does not contain the resolved path."""
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:
         os.environ["PLUGIN_DIR"] = tmpdir
@@ -117,19 +124,20 @@ def test_mqtt_missing_cert_no_path_leak():
             "tls": {"ca_cert": "nonexistent_ca.pem"},
         }
         mgr = mqtt_mod.MQTTConnectionManager(config, mock, "task-3")
-        result = mgr.connect()
+        with patch.object(
+            mgr, "_configure_tls", wraps=mgr._configure_tls
+        ) as spy:
+            result = mgr.connect()
+        assert spy.called, (
+            "_configure_tls was never called — TLS config path was not exercised"
+        )
         assert result is False, "Expected connect() to return False"
         assert not _logs_contain_path(mock.logs, tmpdir), (
             f"Leaked temp path {tmpdir} in logs: {mock.logs}"
         )
-        cert_error_log = _find_log(mock.logs, "TLS configured")
-        assert cert_error_log is not None, (
-            f"Expected a log containing the sanitized TLS error, "
-            f"proving _configure_tls ran. Got: {mock.logs}"
-        )
 
 
-def test_kafka_connect_handler_suppresses_paths():
+def test_kafka_connect_handler_suppresses_paths(kafka_mod):
     """Kafka connect() error handler must not log cert paths when SSL is configured."""
     mock = MockInfluxDB3Local()
     with tempfile.TemporaryDirectory() as tmpdir:

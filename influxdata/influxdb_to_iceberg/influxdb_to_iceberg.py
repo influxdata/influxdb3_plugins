@@ -76,8 +76,8 @@ from pyiceberg.schema import Schema
 from pyiceberg.table import Table
 from pyiceberg.types import (
     BooleanType,
-    FloatType,
-    IntegerType,
+    DoubleType,
+    LongType,
     NestedField,
     PrimitiveType,
     StringType,
@@ -298,9 +298,9 @@ def generate_query(
 def pandas_dtype_to_iceberg_type(dtype) -> PrimitiveType:
     """Converts a Pandas dtype to an Iceberg type."""
     if pd.api.types.is_integer_dtype(dtype):
-        return IntegerType()
+        return LongType()
     elif pd.api.types.is_float_dtype(dtype):
-        return FloatType()
+        return DoubleType()
     elif pd.api.types.is_bool_dtype(dtype):
         return BooleanType()
     elif pd.api.types.is_datetime64_any_dtype(dtype):
@@ -364,9 +364,9 @@ def update_schema_and_dataframe(table: Table, df: pd.DataFrame, influxdb3_local,
                     break
 
             # Add column with appropriate null values based on type
-            if isinstance(field_type, IntegerType):
+            if isinstance(field_type, LongType):
                 df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='Int64')
-            elif isinstance(field_type, FloatType):
+            elif isinstance(field_type, DoubleType):
                 df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='float64')
             elif isinstance(field_type, BooleanType):
                 df_modified[col_name] = pd.Series([None] * len(df_modified), dtype='boolean')

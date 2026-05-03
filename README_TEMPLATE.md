@@ -285,11 +285,11 @@ influxdb3 install package package_name
 **Solution**: 
 1. Check that source measurement contains data
 2. Verify trigger is enabled and running
-3. Check logs for errors:
+3. Check logs for errors (logs are stored in the trigger's database):
    ```bash
    influxdb3 query \
-     --database _internal \
-     "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
+     --database YOUR_DATABASE \
+     "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name' ORDER BY event_time DESC"
    ```
 
 ### Debugging tips

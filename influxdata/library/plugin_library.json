@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2026-01-08T16:30:00+00:00",
+        "last_updated": "2026-05-03T20:49:08+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -165,13 +165,79 @@
                 "trigger_types_supported": ["scheduler"]
             },
             {
+                "name": "InfluxDB Import",
+                "path": "influxdata/import/import.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables seamless data import from InfluxDB v1, v2, or v3 instances to InfluxDB 3 Core/Enterprise",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/import/README.md",
+                "required_plugins": [],
+                "required_libraries": ["requests"],
+                "last_update": "2026-02-26",
+                "trigger_types_supported": ["http"]
+            },
+            {
+                "name": "Schema Validator",
+                "path": "influxdata/schema_validator/schema_validator.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Validates incoming line protocol data against a JSON schema.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/schema_validator/README.md",
+                "required_plugins": [],
+                "required_libraries": [],
+                "last_update": "2026-03-04",
+                "trigger_types_supported": ["data_writes"]
+            },
+            {
+                "name": "MQTT Subscriber",
+                "path": "influxdata/mqtt_subscriber/mqtt_subscriber.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables real-time ingestion of MQTT messages into InfluxDB 3. Subscribe to MQTT broker topics and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/mqtt_subscriber/README.md",
+                "required_plugins": [],
+                "required_libraries": ["paho-mqtt", "jsonpath-ng"],
+                "last_update": "2026-03-06",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Kafka Subscriber",
+                "path": "influxdata/kafka_subscriber/kafka_subscriber.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/kafka_subscriber/README.md",
+                "required_plugins": [],
+                "required_libraries": ["confluent-kafka", "jsonpath-ng"],
+                "last_update": "2026-03-06",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "AMQP Subscriber",
+                "path": "influxdata/amqp_subscriber/amqp_subscriber.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables real-time ingestion of AMQP messages (RabbitMQ and other AMQP-compatible brokers) into InfluxDB 3. Subscribe to queues and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/amqp_subscriber/README.md",
+                "required_plugins": [],
+                "required_libraries": ["pika", "jsonpath-ng"],
+                "last_update": "2026-03-06",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "OPC UA",
+                "path": "influxdata/opcua/opcua.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables periodic ingestion of OPC UA node values into InfluxDB 3. Connect to OPC UA servers (PLCs, SCADA, CNC machines) and read current values with support for auto-discovery browse mode, automatic data type detection, namespace URI resolution, and quality filtering.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/opcua/README.md",
+                "required_plugins": [],
+                "required_libraries": ["asyncua"],
+                "last_update": "2026-03-30",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
                 "name": "Synthefy Forecasting",
                 "path": "synthefy/synthefy-forecasting/synthefy_forecasting.py",
                 "description": "Integrates Synthefy Forecasting API with InfluxDB 3 to enable on-demand time series forecasting via HTTP requests. Reads time series data from InfluxDB, generates forecasts using Synthefy's advanced forecasting models (sfm-tabular, Migas-latest, Chronos2, Moirai2, TimesFM, etc.) and writes the results back to InfluxDB for visualization and alerting. Supports multivariate forecasting with metadata fields as covariates.",
                 "author": "Synthefy",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/synthefy/synthefy-forecasting/README.md",
                 "required_plugins": [],
-                "required_libraries": ["pandas", "httpx"],
+                "required_libraries": ["pandas", "requests"],
                 "last_update": "2026-01-08",
                 "trigger_types_supported": ["http"]
             }

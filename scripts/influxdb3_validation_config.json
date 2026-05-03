@@ -1,0 +1,132 @@
+{
+  "description": "Configuration for validating influxdb3 CLI commands and API usage in plugin READMEs",
+  "version": "1.0.0",
+  "last_updated": "2026-02-02",
+
+  "cli": {
+    "deprecated_options": {
+      "--plugin-filename": {
+        "replacement": "--path",
+        "message": "Use --path instead of --plugin-filename (deprecated)",
+        "deprecated_since": "2025-06"
+      }
+    },
+
+    "format_rules": {
+      "--path": {
+        "pattern": "--path\\s+\"[^\"]+\"",
+        "message": "--path value should be quoted (for example, --path \"plugin.py\")"
+      }
+    },
+
+    "recommended_patterns": {
+      "gh_prefix_for_library_plugins": {
+        "context": "influxdata/",
+        "pattern": "--path\\s+\"gh:influxdata/",
+        "message": "Consider using gh: prefix for plugins from the library (for example, --path \"gh:influxdata/...\")"
+      }
+    },
+
+    "valid_commands": [
+      "influxdb3 serve",
+      "influxdb3 write",
+      "influxdb3 query",
+      "influxdb3 create trigger",
+      "influxdb3 enable trigger",
+      "influxdb3 disable trigger",
+      "influxdb3 delete trigger",
+      "influxdb3 update trigger",
+      "influxdb3 show",
+      "influxdb3 install package",
+      "influxdb3 test"
+    ]
+  },
+
+  "api": {
+    "endpoints": {
+      "processing_engine": {
+        "base_path": "/api/v3/engine",
+        "valid_paths": [
+          "/api/v3/engine/{trigger_path}",
+          "/api/v3/engine/notify"
+        ]
+      },
+      "query": {
+        "base_path": "/api/v3/query",
+        "valid_paths": [
+          "/api/v3/query/sql",
+          "/api/v3/query/influxql"
+        ]
+      },
+      "write": {
+        "base_path": "/api/v3/write",
+        "valid_paths": [
+          "/api/v3/write"
+        ]
+      },
+      "configure": {
+        "base_path": "/api/v3/configure",
+        "valid_paths": [
+          "/api/v3/configure/plugin_environment/install_packages"
+        ]
+      }
+    },
+
+    "deprecated_endpoints": {},
+
+    "required_headers": {
+      "authenticated_requests": [
+        "Authorization: Bearer {token}"
+      ],
+      "write_requests": [
+        "Content-Type: application/json"
+      ]
+    },
+
+    "format_rules": {
+      "curl_authorization": {
+        "pattern": "-H\\s+[\"']Authorization:\\s+Bearer",
+        "message": "API requests requiring auth should use -H \"Authorization: Bearer {token}\""
+      }
+    }
+  },
+
+  "trigger_specs": {
+    "valid_formats": [
+      {
+        "type": "table",
+        "pattern": "table:[a-zA-Z_][a-zA-Z0-9_]*",
+        "example": "table:sensor_data"
+      },
+      {
+        "type": "all_tables",
+        "pattern": "all_tables",
+        "example": "all_tables"
+      },
+      {
+        "type": "every",
+        "pattern": "every:\\d+[smhdwMy]",
+        "example": "every:5m"
+      },
+      {
+        "type": "cron",
+        "pattern": "cron:.+",
+        "example": "cron:0 0 8 * * *"
+      },
+      {
+        "type": "request",
+        "pattern": "request:[a-zA-Z_][a-zA-Z0-9_/]*",
+        "example": "request:webhook"
+      }
+    ]
+  },
+
+  "notes": [
+    "CLI: Update deprecated_options when CLI flags change",
+    "CLI: format_rules are enforced as errors",
+    "CLI: recommended_patterns generate warnings only",
+    "API: Update endpoints when API paths change",
+    "API: Add deprecated_endpoints when endpoints are removed",
+    "trigger_specs: Update patterns when new trigger types are added"
+  ]
+}

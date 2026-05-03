@@ -1,0 +1,3 @@
+pandas
+pyarrow
+pyiceberg[s3fs,hive,sql-sqlite]

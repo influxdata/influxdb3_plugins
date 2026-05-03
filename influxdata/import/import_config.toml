@@ -1,0 +1,73 @@
+# Import Plugin Configuration Template
+# Copy this file to your PLUGIN_DIR and reference it with `--trigger-arguments config_file_path=import_config.toml`
+# This plugin is designed for HTTP-triggered importing between InfluxDB instances
+
+########## Required Parameters ##########
+# Source InfluxDB URL
+# Specify the URL of the source InfluxDB instance (include port if non-standard)
+source_url = "http://localhost:8086"  # e.g., "http://localhost:8086", "https://influxdb-source.example.com:8086"
+
+# Source InfluxDB version
+# Specify the version of source InfluxDB: 1 or 2
+influxdb_version = 1  # e.g., 1 or 2
+
+# Source database name
+# Specify the name of the database to import from
+source_database = "telegraf"  # e.g., "telegraf", "mydb", "sensor_data"
+
+
+########## Authentication Parameters (Required - choose one method) ##########
+# Authentication Method 1: Token-based authentication (InfluxDB v2 or v1 with token support)
+# Specify the authentication token for the source InfluxDB
+source_token = "my-token"  # e.g., "my-super-secret-token"
+
+# Authentication Method 2: Username/Password authentication (InfluxDB v1)
+# Specify both username AND password together (cannot be used with source_token)
+#source_username = "admin"  # e.g., "admin", "user123"
+#source_password = "my-password"  # e.g., "my-secure-password"
+
+# Note: You must provide EITHER source_token OR (source_username AND source_password together)
+# Using both methods simultaneously will result in an error
+
+
+########## Optional Parameters ##########
+# Destination database name
+# Specify the name of the database to import to in the local InfluxDB instance
+# If not specified, data will be written to the default database
+#dest_database = "imported_data"  # e.g., "imported_data", "production_data"
+
+# Import start timestamp
+# Specify the start time for data import in RFC3339, Unix, or date format
+# If not specified, import starts from the oldest data available
+#start_timestamp = "2024-01-01T00:00:00Z"  # e.g., "2024-01-01T00:00:00Z", "1704067200", "2024-01-01"
+
+# Import end timestamp
+# Specify the end time for data import in RFC3339, Unix, or date format
+# If not specified, import continues to the newest data available
+#end_timestamp = "2024-12-31T23:59:59Z"  # e.g., "2024-12-31T23:59:59Z", "1735689599", "2024-12-31"
+
+# Query interval delay in milliseconds
+# Delay between consecutive queries to avoid overloading the source database
+# Default: 100ms
+#query_interval_ms = 100  # e.g., 100, 500, 1000
+
+# Import direction
+# Specify whether to import oldest data first or newest data first
+# Options: "oldest_first" or "newest_first"
+# Default: "oldest_first"
+#import_direction = "oldest_first"  # e.g., "oldest_first", "newest_first"
+
+# Target batch size
+# Number of rows to fetch and write in each batch
+# Default: 2000
+#target_batch_size = 2000  # e.g., 1000, 2000, 5000
+
+# Table filter
+# Dot-separated list of specific tables/measurements to import
+# If not specified, all tables will be imported
+#table_filter = "cpu.mem.disk"  # e.g., "cpu.mem.disk", "temperature.humidity"
+
+# Dry run mode
+# If true, estimates import without actually transferring data
+# Default: false
+#dry_run = false  # e.g., true, false

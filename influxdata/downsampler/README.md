@@ -66,9 +66,9 @@ For more information on using TOML configuration files, see the Using TOML Confi
 
 Each downsampled record includes three additional metadata columns:
 
-- `record_count` — the number of original points compressed into this single downsampled row
-- `time_from` — the minimum timestamp among the original points in the interval  
-- `time_to` — the maximum timestamp among the original points in the interval
+- `record_count`: the number of original points compressed into this single downsampled row
+- `time_from`: the minimum timestamp among the original points in the interval
+- `time_to`: the maximum timestamp among the original points in the interval
 
 ## Installation steps
 
@@ -93,7 +93,7 @@ Run downsampling periodically on historical data:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'source_measurement=cpu_metrics,target_measurement=cpu_hourly,interval=1h,window=6h,calculations=avg,specific_fields=usage_user.usage_system' \
   cpu_hourly_downsample
@@ -106,7 +106,7 @@ Trigger downsampling via HTTP requests:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "request:downsample" \
   downsample_api
 ```
@@ -121,7 +121,7 @@ Downsample CPU usage data from 1-minute intervals to hourly averages:
 # Create the trigger
 influxdb3 create trigger \
   --database system_metrics \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'source_measurement=cpu,target_measurement=cpu_hourly,interval=1h,window=6h,calculations=avg,specific_fields=usage_user.usage_system.usage_idle' \
   cpu_hourly_downsample
@@ -157,7 +157,7 @@ Apply different aggregation functions to different fields:
 # Create trigger with field-specific aggregations
 influxdb3 create trigger \
   --database sensors \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:10min" \
   --trigger-arguments 'source_measurement=environment,target_measurement=environment_10min,interval=10min,window=30min,calculations=temperature:avg.humidity:avg.pressure:max' \
   env_multi_agg
@@ -210,10 +210,10 @@ curl -X POST http://localhost:8181/api/v3/engine/downsample \
 
 ### Logging
 
-Logs are stored in the `_internal` database (or the database where the trigger is created) in the `system.processing_engine_logs` table. To view logs:
+Logs are stored in the trigger's database in the `system.processing_engine_logs` table. To view logs:
 
 ```bash
-influxdb3 query --database _internal "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
+influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine_logs WHERE trigger_name = 'your_trigger_name'"
 ```
 
 Log columns:
@@ -306,7 +306,7 @@ influxdb3 list triggers --database mydb
 1. **Check execution logs** with task ID filtering:
 
    ```bash
-   influxdb3 query --database _internal \
+   influxdb3 query --database YOUR_DATABASE \
      "SELECT * FROM system.processing_engine_logs WHERE log_text LIKE '%task_id%' ORDER BY event_time DESC LIMIT 10"
    ```
 
@@ -341,7 +341,7 @@ Combine all field calculations for a measurement in one trigger:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename gh:influxdata/downsampler/downsampler.py \
+  --path "gh:influxdata/downsampler/downsampler.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'source_measurement=temperature,target_measurement=temperature_hourly,interval=1h,window=6h,calculations=temp:avg.temp:max.temp:min,specific_fields=temp' \
   temperature_hourly_downsample

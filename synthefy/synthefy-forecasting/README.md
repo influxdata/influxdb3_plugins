@@ -6,74 +6,103 @@
 
 ## Description
 
-The Synthefy Forecasting Plugin integrates Synthefy Forecasting API with InfluxDB 3 to enable on-demand time series forecasting via HTTP requests. It reads time series data from InfluxDB, generates forecasts using Synthefy's advanced forecasting models and writes the results back to InfluxDB for visualization and alerting.
+The Synthefy Forecasting Plugin integrates the Synthefy Forecasting API with InfluxDB 3 to enable on-demand time series forecasting via HTTP requests. It reads time series data from InfluxDB, generates forecasts using Synthefy's foundation models, and writes the results back to InfluxDB for visualization and alerting.
 
 **Key Features:**
 
 - **On-Demand Forecasting**: Generate forecasts on-demand via HTTP requests
 - **Multiple Models**: Support for various Synthefy models
-- **Metadata Support**: Use additional fields as covariates for improved forecasting accuracy
-- **Tag Filtering**: Filter data by tags (e.g., location, device) for targeted forecasting
-- **Line Protocol Writes**: Reliable data writing using InfluxDB Line Protocol
+- **Metadata Support**: Use additional fields as covariates for improved accuracy
+- **Tag Filtering**: Filter input data by tags (e.g., location, device); supports multiple values per tag (`IN (...)`)
+- **Line Protocol Writes**: Reliable, batched writing via `write_sync` / `write_sync_to_db`
 
 ## Configuration
 
-Plugin parameters may be specified as key-value pairs in the `--trigger-arguments` flag (CLI) or in the `trigger_arguments` field (API) when creating a trigger.
+Plugin parameters may be specified as key-value pairs in the `--trigger-arguments` flag (CLI) or in the `trigger_arguments` field (API) when creating a trigger, and/or in the JSON body of each HTTP request. Body values override trigger arguments.
 
 ### Plugin metadata
 
 This plugin includes a JSON metadata schema in its docstring that defines supported trigger types and configuration parameters. This metadata enables the [InfluxDB 3 Explorer](https://docs.influxdata.com/influxdb3/explorer/) UI to display and configure the plugin.
 
+### Authentication for the Synthefy API
+
+The Synthefy API key is **never** read from trigger arguments or the request body. It must be provided via either of:
+
+- HTTP request header: `X-Synthefy-Api-Key: <your-key>`
+- Environment variable: `SYNTHEFY_API_KEY`
+
+If both are set, the header takes precedence.
+
 ### HTTP trigger parameters
 
-| Parameter            | Type   | Default  | Description                                                       |
-|----------------------|--------|----------|-------------------------------------------------------------------|
-| `measurement`        | string | required | Source measurement containing historical data                     |
-| `field`              | string | "value"  | Field name to forecast                                            |
-| `tags`               | string | ""       | Tag filters, comma-separated (e.g., "location=NYC,device=sensor1") |
-| `time_range`         | string | "30d"    | Historical data window. Format: `<number><unit>` (e.g., "30d")    |
-| `forecast_horizon`   | string | "7d"     | Forecast duration. Format: `<number><unit>` or "<number> points"  |
-| `model`              | string | "sfm-tabular"| Synthefy model to use (e.g., "sfm-tabular", "Migas-latest") |
-| `api_key`            | string | required | Synthefy API key (create at [console.synthefy.com/api-keys](https://console.synthefy.com/api-keys) or set SYNTHEFY_API_KEY environment variable)   |
-| `output_measurement` | string | "{measurement}_forecast" | Destination measurement for forecast results          |
-| `metadata_fields`    | string | ""       | Comma-separated list of metadata field names to use as covariates |
-| `database`           | string | ""       | Database name for reading and writing data (optional)             |
+| Parameter            | Type           | Default                    | Description                                                                                                                                                                                        |
+|----------------------|----------------|----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `measurement`        | string         | required                   | Source measurement (table) containing historical data                                                                                                                                              |
+| `field`              | string         | `"value"`                  | Field name to forecast                                                                                                                                                                             |
+| `tags`               | string \| dict | `""`                       | Tag filters. Trigger args: dot-separated string `key:val1@val2.key2:val3`. Request body: JSON object mapping tag name to a string or list of strings. See [Tag filter format](#tag-filter-format). |
+| `time_range`         | string         | `"30d"`                    | Historical window. Format: `<number><unit>`. Units: `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y` (`m`/`q`/`y` are approximate).                                                                        |
+| `forecast_horizon`   | string         | `"7d"`                     | Forecast duration. Format: `<number><unit>` (same units as `time_range`) or `<number> points`.                                                                                                     |
+| `model`              | string         | `"sfm-tabular"`            | Synthefy model identifier (e.g., `sfm-tabular`, `Migas-latest`)                                                                                                                                    |
+| `output_measurement` | string         | `"{measurement}_forecast"` | Destination measurement for forecast results                                                                                                                                                       |
+| `metadata_fields`    | string \| list | `""`                       | Trigger args: space-separated list of field names (`"humidity pressure"`). Request body: JSON list of strings. Used as covariates.                                                                 |
+| `database`           | string         | `""`                       | Optional override database for **writes only**. If unset, forecasts are written to the trigger's database. Reads always go to the trigger's database.                                              |
+
+#### Tag filter format
+
+The plugin supports multi-value tag filters that are translated to `tag IN ('a', 'b', ...)` in SQL.
+
+**Trigger arguments (string form)** — based on the downsampler convention:
+
+- `.` separates `key:value` pairs
+- `:` separates the tag name from its value(s)
+- `@` separates multiple values for the same tag
+- Quote a value with `'...'` or `"..."` if it contains special characters such as `:`, `@`, `.` or `'`
+
+Examples:
+```
+tags="room:Bedroom"
+tags="room:Bedroom@Kitchen.location:Hall"
+tags="room:'Some other room'@Bedroom.device:sensor1"
+```
+
+**Request body (JSON form)**:
+```json
+{ "tags": { "room": ["Bedroom", "Kitchen"], "location": "Hall" } }
+```
+
+#### Forecast points and tags
+
+When a tag filter has a single value, that value is added as a tag on every forecast point. When it has multiple values (an `IN (...)` filter), no value is written for that tag — the response covers several tag values at once.
 
 ## Requirements
 
 ### Dependencies
 
-- Python 3.7 or higher
-- `pandas` - Data manipulation
-- `httpx` or `requests` - HTTP client for API calls
+- Python 3.9 or higher
+- `pandas` — Data manipulation
+- `requests` — HTTP client for the Synthefy API
 
 ### Installation
 
-```bash
-pip install pandas httpx
-```
-
-Or using InfluxDB 3 package manager:
+Using the InfluxDB 3 package manager:
 
 ```bash
 influxdb3 install package pandas
-influxdb3 install package httpx
+influxdb3 install package requests
 ```
 
 ### Prerequisites
 
 - InfluxDB 3 Core or Enterprise installed and running
-- Synthefy API key: Create one at [https://console.synthefy.com/api-keys](https://console.synthefy.com/api-keys)
+- Synthefy API key — create one at [https://console.synthefy.com/api-keys](https://console.synthefy.com/api-keys)
 
 ## Quick Start / Testing Setup
 
-Before using the plugin, you need to create a database and write some sample data:
+Create a database and write some sample data:
 
 ```bash
-# Create database
 influxdb3 create database mydb
 
-# Write sample time series data (7 days of hourly data)
 NOW=$(date +%s)
 for i in {0..168}; do
   TIMESTAMP=$((NOW - (168 - i) * 3600))000000000
@@ -81,14 +110,11 @@ for i in {0..168}; do
 done
 ```
 
-**Note**: In InfluxDB 3, tables/measurements are created automatically when you first write data to them. Make sure you have data in your measurement before running forecasts.
+**Note**: In InfluxDB 3, tables/measurements are created automatically when you first write data to them.
 
-**Quick check if data exists:**
+**Quick check that data exists:**
 ```bash
-# Check if measurement has data
 influxdb3 query --database mydb "SELECT COUNT(*) FROM temperature"
-
-# Or see a few sample rows
 influxdb3 query --database mydb "SELECT * FROM temperature ORDER BY time DESC LIMIT 5"
 ```
 
@@ -96,166 +122,158 @@ influxdb3 query --database mydb "SELECT * FROM temperature ORDER BY time DESC LI
 
 ### HTTP trigger
 
-Generate forecasts on-demand via HTTP request:
+Create and enable the trigger:
 
 ```bash
 influxdb3 create trigger \
   --database mydb \
   --plugin-filename synthefy/synthefy-forecasting/synthefy_forecasting.py \
   --trigger-spec "request:forecast" \
-  --trigger-arguments measurement=temperature,field=value,api_key=YOUR_API_KEY \
+  --trigger-arguments measurement=temperature,field=value \
   temperature_forecast_http
+
+influxdb3 enable trigger --database mydb temperature_forecast_http
 ```
 
-Then call via HTTP:
+Trigger arguments act as defaults; any field can be overridden in the request body.
+
+Then call via HTTP. **Always** pass the Synthefy API key as a header (or set the `SYNTHEFY_API_KEY` env var on the InfluxDB process):
 
 ```bash
-# Get your token first
 TOKEN=$(influxdb3 create token --admin --offline | grep token | cut -d'=' -f2)
-
-# IMPORTANT: Make sure you have written data to the measurement first!
-# Tables are created when you first write data. See "Quick Start / Testing Setup" section above.
-# Example: influxdb3 write --database mydb "temperature,location=NYC value=72.5"
 
 curl -X POST http://localhost:8181/api/v3/engine/forecast \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "X-Synthefy-Api-Key: YOUR_SYNTHEFY_API_KEY" \
   -d '{
     "measurement": "temperature",
     "field": "value",
     "time_range": "30d",
     "forecast_horizon": "7d",
-    "model": "sfm-tabular",
-    "api_key": "YOUR_SYNTHEFY_API_KEY",
-    "database": "mydb"
+    "model": "sfm-tabular"
   }'
 ```
 
 **Important Notes:**
-- Endpoint is `/api/v3/engine/forecast` (matches `request:forecast` trigger spec)
-- Include `"database"` in request body for HTTP triggers (trigger context may not be available)
-- Authentication is handled automatically by the framework via the Authorization header
+- Endpoint is `/api/v3/engine/forecast` (matches the `request:forecast` trigger spec).
+- Authentication for InfluxDB itself is handled by the framework via the `Authorization` header.
+- The Synthefy API key must be in the `X-Synthefy-Api-Key` header or in the `SYNTHEFY_API_KEY` env var; it cannot be passed via trigger arguments or request body.
 
 ## Example Usage
 
 ### Basic forecast
 
-Forecast temperature data with default settings:
+```bash
+TOKEN=$(influxdb3 create token --admin --offline | grep token | cut -d'=' -f2)
+
+curl -X POST http://localhost:8181/api/v3/engine/forecast \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Synthefy-Api-Key: YOUR_SYNTHEFY_API_KEY" \
+  -d '{
+    "measurement": "temperature",
+    "field": "value"
+  }'
+```
+
+### Forecast with single-tag filter
 
 ```bash
-# First, ensure you have data in the measurement (see Quick Start section above)
-# Example: influxdb3 write --database mydb "temperature,location=NYC value=72.5"
+curl -X POST http://localhost:8181/api/v3/engine/forecast \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Synthefy-Api-Key: YOUR_SYNTHEFY_API_KEY" \
+  -d '{
+    "measurement": "temperature",
+    "field": "value",
+    "tags": { "location": "NYC" },
+    "time_range": "30d"
+  }'
+```
 
-# Create HTTP trigger
+### Forecast with multi-value tag filter
+
+```bash
+curl -X POST http://localhost:8181/api/v3/engine/forecast \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Synthefy-Api-Key: YOUR_SYNTHEFY_API_KEY" \
+  -d '{
+    "measurement": "temperature",
+    "field": "value",
+    "tags": { "location": ["NYC", "SF"], "device": "sensor1" },
+    "time_range": "30d"
+  }'
+```
+
+### Forecast with metadata covariates
+
+```bash
+curl -X POST http://localhost:8181/api/v3/engine/forecast \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Synthefy-Api-Key: YOUR_SYNTHEFY_API_KEY" \
+  -d '{
+    "measurement": "temperature",
+    "field": "value",
+    "metadata_fields": ["humidity", "pressure"],
+    "time_range": "30d"
+  }'
+```
+
+### Trigger arguments form
+
+The same parameters can also be set as trigger arguments (note the dot/colon/`@` syntax for `tags` and the space-separated list for `metadata_fields`):
+
+```bash
 influxdb3 create trigger \
   --database mydb \
   --plugin-filename synthefy/synthefy-forecasting/synthefy_forecasting.py \
   --trigger-spec "request:forecast" \
-  --trigger-arguments measurement=temperature,field=value,api_key=YOUR_API_KEY \
-  temperature_forecast_trigger
-
-# Enable trigger
-influxdb3 enable trigger --database mydb temperature_forecast_trigger
-
-# Make HTTP request
-TOKEN=$(influxdb3 create token --admin --offline | grep token | cut -d'=' -f2)
-curl -X POST http://localhost:8181/api/v3/engine/forecast \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "measurement": "temperature",
-    "field": "value",
-    "database": "mydb"
-  }'
-```
-
-### Forecast with tag filtering
-
-Forecast only for specific location:
-
-```bash
-curl -X POST http://localhost:8181/api/v3/engine/forecast \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "measurement": "temperature",
-    "field": "value",
-    "tags": "location=NYC",
-    "time_range": "30d",
-    "database": "mydb"
-  }'
-```
-
-### Forecast with metadata
-
-Use humidity as a covariate for improved accuracy:
-
-```bash
-curl -X POST http://localhost:8181/api/v3/engine/forecast \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "measurement": "temperature",
-    "field": "value",
-    "metadata_fields": "humidity,pressure",
-    "time_range": "30d",
-    "database": "mydb"
-  }'
+  --trigger-arguments 'measurement=temperature,field=value,tags=location:NYC@SF.device:sensor1,metadata_fields=humidity pressure,time_range=30d,forecast_horizon=7d' \
+  temperature_forecast_http
 ```
 
 ### Advanced model
 
-Use advanced foundation models for more accurate forecasts:
-
 ```bash
-# First, ensure you have data in the sales measurement
-# Example: Write sample sales data (90 days of daily data)
-# Note: Using 90d instead of 730d to avoid InfluxDB 3 Core file limit (see Troubleshooting)
-NOW=$(date +%s)
-for i in {0..90}; do
-  TIMESTAMP=$((NOW - (90 - i) * 86400))000000000
-  influxdb3 write --database mydb "sales,location=NYC revenue=$((1000 + RANDOM % 500)) ${TIMESTAMP}"
-done
-
-# Check if data exists
-influxdb3 query --database mydb "SELECT COUNT(*) FROM sales"
-
-# Using sfm-tabular (multivariate foundation model)
 curl -X POST http://localhost:8181/api/v3/engine/forecast \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "measurement": "sales",
-    "field": "revenue",
-    "model": "sfm-tabular",
-    "forecast_horizon": "30d",
-    "time_range": "90d",
-    "database": "mydb"
-  }'
-
-# Using Migas-latest (foundation model)
-curl -X POST http://localhost:8181/api/v3/engine/forecast \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "X-Synthefy-Api-Key: YOUR_SYNTHEFY_API_KEY" \
   -d '{
     "measurement": "sales",
     "field": "revenue",
     "model": "Migas-latest",
     "forecast_horizon": "30d",
-    "time_range": "90d",
-    "database": "mydb"
+    "time_range": "90d"
+  }'
+```
+
+### Writing the forecast to a different database
+
+```bash
+curl -X POST http://localhost:8181/api/v3/engine/forecast \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Synthefy-Api-Key: YOUR_SYNTHEFY_API_KEY" \
+  -d '{
+    "measurement": "temperature",
+    "field": "value",
+    "database": "forecasts"
   }'
 ```
 
 ## Output Format
 
-Forecasts are written to a new measurement (default: `{measurement}_forecast`) with the following structure:
+Forecasts are written to a new measurement (default: `{measurement}_forecast`) using `write_sync` (or `write_sync_to_db` when `database` is set) with `no_sync=True`, batched into a single line-protocol payload.
 
 - **Measurement**: `{measurement}_forecast` (configurable via `output_measurement`)
-- **Tags**: Original tags + `model={model_name}`
+- **Tags**: Single-value tag filters from the request + `model={model_name}`
 - **Fields**:
   - `{field_name}`: Forecasted values
-  - `value_{quantile}`: Quantile forecasts if available (e.g., `value_0.1`, `value_0.9`)
+  - `value_{quantile}`: Quantile forecasts when available (e.g., `value_0.1`, `value_0.9`)
 
 Example Line Protocol output:
 
@@ -265,26 +283,21 @@ temperature_forecast,location=NYC,model=sfm-tabular value=72.5,value_0.1=71.2,va
 
 ## Querying Forecasts
 
-Query forecast results:
+Forecast points sit in the future, so query by an upcoming time window rather than a past one:
 
 ```sql
-SELECT * FROM temperature_forecast 
-WHERE time >= now() - INTERVAL '7 days'
+SELECT *
+FROM temperature_forecast
+WHERE time >= now() AND time <= now() + INTERVAL '7 days'
 ORDER BY time
 ```
 
-Compare historical and forecasted data:
+Historical data — past 30 days:
 
 ```sql
-SELECT time, value as actual 
-FROM temperature 
+SELECT time, value
+FROM temperature
 WHERE time >= now() - INTERVAL '30 days'
-
-UNION ALL
-
-SELECT time, value as forecast 
-FROM temperature_forecast 
-WHERE time >= now() - INTERVAL '7 days'
 ORDER BY time
 ```
 
@@ -293,103 +306,57 @@ ORDER BY time
 The plugin supports models available through the Synthefy Forecasting API. Key supported models include:
 
 - `sfm-tabular`: Synthefy Foundation Model for tabular/multivariate time series
-- `Migas-latest`: Latest Migas foundation model for time series forecasting
+- `Migas-latest`: Latest Migas foundation model
 
-**Note**: Additional models may be available depending on your Synthefy API configuration. Check with [Synthefy documentation](https://docs.synthefy.com) for the most up-to-date model list and availability.
+Check the [Synthefy documentation](https://docs.synthefy.com) for the most up-to-date model list and availability.
 
 ## Troubleshooting
 
-### No data found / Table not found
+### Missing API key
 
-If you see "No data found" or "table not found" errors:
+`{"message":"Missing API key"}` — set `X-Synthefy-Api-Key` in the request headers, or `SYNTHEFY_API_KEY` in the environment of the InfluxDB process.
 
-- **Tables are created when you first write data**: In InfluxDB 3, measurements/tables don't exist until you write data to them. Write some sample data first (see Quick Start section above)
-- Check that the measurement exists and has data
-- Verify the time range includes data (use longer range like `"730d"` for older data)
-- Check tag filters match your data
-- Ensure data timestamps are within the specified `time_range` window
+### Measurement not found
 
-### Database name not found
+`{"message":"Measurement '<name>' not found"}` — the plugin verifies the measurement exists by querying `information_schema.columns`. Make sure the measurement has been written to in the trigger's database.
 
-If you see "Database name not found" errors:
+### Field does not exist
 
-- **For HTTP triggers**: Include `"database": "your_db_name"` in the request body
-- The database may also be set automatically by the trigger context
-- If error persists, specify `database=your_db_name` in trigger arguments
+`{"message":"Field '<name>' does not exist in '<measurement>'"}` — the requested `field` (or `metadata_fields` entries) was not found in the measurement schema.
 
-### API errors
+### No data found
+
+`{"message":"No data found"}` — the query returned zero rows. Widen `time_range`, relax `tags` filters, or verify timestamps fall inside the window.
+
+### Invalid interval format
+
+`Invalid interval format: '<value>'. Expected '<number><unit>'.` — `time_range` and `forecast_horizon` must be `<number><unit>` (units: `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y`) or, for `forecast_horizon`, `<number> points`.
+
+### Synthefy API errors
 
 If Synthefy API calls fail:
 
-- Verify your API key is correct (create one at [console.synthefy.com/api-keys](https://console.synthefy.com/api-keys))
-- Check API URL is accessible
-- Review API rate limits
+- Verify the API key is correct
+- Check API URL accessibility and rate limits
 - Check network connectivity
 
 ### Write errors
 
 If writes fail:
 
-- Ensure database exists
-- Check plugin has write permissions
-- Verify Line Protocol format is correct
-- Check InfluxDB connection
-- Verify the correct database is being used (check logs for "Using database: ...")
-
-### Forecast data not queryable
-
-If you can't query forecast data after successful write:
-
-- Wait a few seconds for table to be created (first write creates the table)
-- Verify you're querying the correct database
-- Check that forecast was written to `{measurement}_forecast` measurement
-- Use: `SELECT * FROM temperature_forecast ORDER BY time LIMIT 10`
+- Ensure the database exists (the trigger database, or the override `database` if used)
+- Ensure the plugin has write permissions
+- Check the `[task_id] Error writing forecasts attempt N/M: …` warnings in the InfluxDB logs
 
 ### Query file limit exceeded (InfluxDB 3 Core)
 
-If you see "Query would scan X Parquet files, exceeding the file limit" errors:
-
-This is a limitation of **InfluxDB 3 Core** when querying large time ranges with many data files.
-
-**Solutions:**
-
-1. **Use a narrower time range** (recommended):
-   ```bash
-   # Instead of 730d, use 90d or 180d to stay within file limits
-   curl -X POST http://localhost:8181/api/v3/engine/forecast \
-     -H "Authorization: Bearer $TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "measurement": "sales",
-       "field": "revenue",
-       "time_range": "90d",
-       "database": "mydb"
-     }'
-   ```
-
-2. **Increase the file limit** (may cause slower queries):
-   ```bash
-   influxdb3 query --database mydb --query-file-limit 1000 "SELECT * FROM sales LIMIT 10"
-   ```
-   Note: This only affects the CLI query command, not plugin queries.
-
-3. **Write data in batches** to reduce file count:
-   ```bash
-   # Write multiple points per command to reduce file count
-   influxdb3 write --database mydb "sales,location=NYC revenue=1000 1700000000000000000\nsales,location=NYC revenue=1100 1700086400000000000"
-   ```
-
-4. **Upgrade to InfluxDB 3 Enterprise** (free for non-commercial use):
-   - Enterprise automatically compacts files for efficient querying
-   - No file limit restrictions
-   - See: https://www.influxdata.com/downloads
-
-**Note**: The file limit is a Core limitation to prevent performance degradation. For production use with large datasets, consider InfluxDB 3 Enterprise.
+If you see "Query would scan X Parquet files, exceeding the file limit" errors, narrow `time_range` (e.g., `90d` instead of `730d`), or upgrade to InfluxDB 3 Enterprise (which compacts files and removes the limit).
 
 ## Limitations
 
-- Currently supports single time series per trigger execution
-- Forecast horizon calculation assumes regular time intervals
+- Currently supports a single time series per request (one `field` plus optional covariates).
+- Forecast horizon calculation assumes regular time intervals.
+- Tag values containing `:`, `@`, `.` or `'` are only fully supported via the JSON request body or quoted values in the trigger-arguments string form.
 
 ## License
 
@@ -397,8 +364,6 @@ Apache 2.0
 
 ## Support
 
-For issues and questions:
-
-- Plugin issues: Open an issue in the [influxdb3_plugins repository](https://github.com/influxdata/influxdb3_plugins)
-- Synthefy API: Contact [Synthefy support](https://synthefy.com) or see [Synthefy documentation](https://docs.synthefy.com)
-- InfluxDB: See [InfluxDB documentation](https://docs.influxdata.com/influxdb3/)
+- Plugin issues: open an issue in the [influxdb3_plugins repository](https://github.com/influxdata/influxdb3_plugins)
+- Synthefy API: contact [Synthefy support](https://synthefy.com) or see [Synthefy documentation](https://docs.synthefy.com)
+- InfluxDB: see [InfluxDB documentation](https://docs.influxdata.com/influxdb3/)

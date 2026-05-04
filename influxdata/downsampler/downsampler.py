@@ -88,17 +88,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
-
-
-def validate_identifier(name: str, kind: str = "identifier") -> None:
-    if not IDENTIFIER_PATTERN.fullmatch(name):
-        raise Exception(
-            f"Invalid {kind}: '{name}' "
-            f"(must start with a letter, digit, or underscore and contain only letters, digits, underscores, and hyphens)"
-        )
-
-
 def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
@@ -342,7 +331,6 @@ def parse_tag_values_for_scheduler(
         if isinstance(tag_values, dict):
             tag_names: list = get_tag_names(influxdb3_local, source_measurement, task_id)
             for tag_name in list(tag_values.keys()):
-                validate_identifier(tag_name, "tag name")
                 if tag_name not in tag_names:
                     influxdb3_local.warn(
                         f"[{task_id}] Tag '{tag_name}' does not exist in '{source_measurement}'."
@@ -412,7 +400,6 @@ def parse_tag_values_for_http(
     if tag_value_filters is not None:
         tag_names: list = get_tag_names(influxdb3_local, source_measurement, task_id)
         for tag_name in list(tag_value_filters.keys()):
-            validate_identifier(tag_name, "tag name")
             if tag_name not in tag_names:
                 influxdb3_local.warn(
                     f"[{task_id}] Tag '{tag_name}' does not exist in '{source_measurement}'."
@@ -951,7 +938,6 @@ def generate_tag_filter_clause(tag_values: dict | None) -> tuple[str, dict]:
     param_idx: int = 0
 
     for key, values in tag_values.items():
-        validate_identifier(key, "tag name")
         quoted_key = quote_identifier(key)
 
         if len(values) == 1:
@@ -995,8 +981,6 @@ def build_downsample_query(
     Returns:
         tuple[str, dict]: A complete SQL query string and a dict of query parameters.
     """
-    validate_identifier(measurement, "measurement name")
-
     # SELECT clause
     fields_clause: str = generate_fields_string(fields_list, interval, tags_list)
     # GROUP BY clause

@@ -171,17 +171,6 @@ import math
 
 from pint import UnitRegistry
 
-IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
-
-
-def validate_identifier(name: str, kind: str = "identifier") -> None:
-    if not IDENTIFIER_PATTERN.fullmatch(name):
-        raise Exception(
-            f"Invalid {kind}: '{name}' "
-            f"(must start with a letter, digit, or underscore and contain only letters, digits, underscores, and hyphens)"
-        )
-
-
 def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
@@ -957,7 +946,6 @@ def generate_filter_clause(
     params: dict = {}
 
     for idx, (field, op, val) in enumerate(filters):
-        validate_identifier(field, "filter field name")
         if op not in allowed_operators:
             raise Exception(
                 f"Invalid filter operator: '{op}' (must be one of {', '.join(sorted(allowed_operators))})"
@@ -995,7 +983,6 @@ def generate_query(
     Returns:
         tuple[str, dict]: A complete SQL query string and a dict of query parameters.
     """
-    validate_identifier(measurement, "measurement name")
     escaped_measurement = measurement.replace("'", "''")
 
     # SELECT clause

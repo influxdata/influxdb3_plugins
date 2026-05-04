@@ -1168,7 +1168,7 @@ def process_scheduled_call(
         Exception: If no args are provided.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Downsampling task started at {call_time} with args: {args}")
+    influxdb3_local.info(f"[{task_id}] Downsampling task started at {call_time}")
 
     if args is None:
         influxdb3_local.error(f"[{task_id}] No args provided for plugin.")
@@ -1186,11 +1186,11 @@ def process_scheduled_call(
                     return
                 plugin_dir: Path = Path(plugin_dir_var)
                 file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
@@ -1399,7 +1399,7 @@ def process_request(
 
     if request_body:
         data: dict = json.loads(request_body)
-        influxdb3_local.info(f"[{task_id}] Request data: {data}.")
+        influxdb3_local.info(f"[{task_id}] Request received.")
     else:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"message": f"[{task_id}] Error: No request body provided."}

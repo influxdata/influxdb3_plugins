@@ -1384,7 +1384,7 @@ def process_scheduled_call(
                 - "filters": string defining field filters.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
+    influxdb3_local.info(f"[{task_id}] Starting scheduled call at {call_time}")
 
     # Override args with config file
     if args:
@@ -1398,11 +1398,11 @@ def process_scheduled_call(
                     return
                 plugin_dir: Path = Path(plugin_dir_var)
                 file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
@@ -1441,8 +1441,8 @@ def process_scheduled_call(
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
-        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
-        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
+        influxdb3_local.info(f"[{task_id}] Name transformations configured for {len(names_transformations)} fields")
+        influxdb3_local.info(f"[{task_id}] Value transformations configured for {len(values_transformations)} fields")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1643,7 +1643,7 @@ def process_scheduled_call(
 
         if dry_run:
             influxdb3_local.info(
-                f"[{task_id}] Dry run is set, transformed results: {transformed_results}"
+                f"[{task_id}] Dry run complete, {len(transformed_results)} rows transformed"
             )
             return
 
@@ -1728,7 +1728,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
                 influxdb3_local.info(
-                    f"[{task_id}] PLUGIN_DIR env var: {plugin_dir_var}"
+                    f"[{task_id}] PLUGIN_DIR env var is set"
                 )
                 if not plugin_dir_var:
                     influxdb3_local.error(
@@ -1737,11 +1737,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                     return
                 plugin_dir: Path = Path(plugin_dir_var)
                 file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] new args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
@@ -1779,8 +1779,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
-        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
-        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
+        influxdb3_local.info(f"[{task_id}] Name transformations configured for {len(names_transformations)} fields")
+        influxdb3_local.info(f"[{task_id}] Value transformations configured for {len(values_transformations)} fields")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1976,7 +1976,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
             if dry_run:
                 influxdb3_local.info(
-                    f"[{task_id}] Dry run is set, transformed results: {transformed_results}"
+                    f"[{task_id}] Dry run complete, {len(transformed_results)} rows transformed"
                 )
                 return
 

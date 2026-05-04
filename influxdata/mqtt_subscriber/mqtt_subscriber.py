@@ -257,13 +257,13 @@ class MQTTConfig:
         config_path: str = self._resolve_path(config_file, "configuration file")
 
         if not os.path.exists(config_path):
-            raise FileNotFoundError("Configuration file not found or not accessible.")
+            raise FileNotFoundError(f"Configuration file not found or not accessible: {config_file}")
 
         try:
             with open(config_path, "rb") as f:
                 config: dict[str, Any] = tomllib.load(f)
         except OSError:
-            raise OSError("Configuration file not found or not accessible.") from None
+            raise OSError(f"Configuration file not found or not accessible: {config_file}") from None
 
         # Validate required MQTT configuration
         self._validate_toml_config(config)
@@ -786,6 +786,11 @@ class MQTTConnectionManager:
             )
             return
 
+        # Save user-provided paths for error messages before resolving
+        ca_cert_orig = ca_cert
+        client_cert_orig = client_cert
+        client_key_orig = client_key
+
         # Resolve paths (absolute used as-is, relative resolved from PLUGIN_DIR)
         ca_cert = self._resolve_path(ca_cert, "CA certificate")
         if client_cert:
@@ -795,13 +800,13 @@ class MQTTConnectionManager:
 
         # Validate certificate files exist
         if not os.path.exists(ca_cert):
-            raise FileNotFoundError("TLS configuration failed. Check certificate and key files.")
+            raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
 
         if client_cert and not os.path.exists(client_cert):
-            raise FileNotFoundError("TLS configuration failed. Check certificate and key files.")
+            raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
 
         if client_key and not os.path.exists(client_key):
-            raise FileNotFoundError("TLS configuration failed. Check certificate and key files.")
+            raise FileNotFoundError(f"TLS configuration failed. client_key not found: {client_key_orig}")
 
         try:
             self.client.tls_set(ca_certs=ca_cert, certfile=client_cert, keyfile=client_key)

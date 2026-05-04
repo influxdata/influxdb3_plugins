@@ -310,13 +310,13 @@ class OPCUAConfig:
         config_path: str = _resolve_path(config_file, "configuration file")
 
         if not os.path.exists(config_path):
-            raise FileNotFoundError("Configuration file not found or not accessible.")
+            raise FileNotFoundError(f"Configuration file not found or not accessible: {config_file}")
 
         try:
             with open(config_path, "rb") as f:
                 config: dict[str, Any] = tomllib.load(f)
         except OSError:
-            raise OSError("Configuration file not found or not accessible.") from None
+            raise OSError(f"Configuration file not found or not accessible: {config_file}") from None
 
         self._validate_toml_config(config)
 
@@ -952,20 +952,18 @@ class OPCUAConnectionManager:
 
             if policy:
                 mode = security.get("security_mode", "SignAndEncrypt")
-                cert_path = _resolve_path(
-                    security["certificate"], "client certificate"
-                )
-                key_path = _resolve_path(
-                    security["private_key"], "client private key"
-                )
+                cert_orig = security["certificate"]
+                key_orig = security["private_key"]
+                cert_path = _resolve_path(cert_orig, "client certificate")
+                key_path = _resolve_path(key_orig, "client private key")
 
                 if not os.path.exists(cert_path):
                     raise FileNotFoundError(
-                        "Security configuration failed. Check certificate and key files."
+                        f"Security configuration failed. certificate not found: {cert_orig}"
                     )
                 if not os.path.exists(key_path):
                     raise FileNotFoundError(
-                        "Security configuration failed. Check certificate and key files."
+                        f"Security configuration failed. private_key not found: {key_orig}"
                     )
 
                 security_string = f"{policy},{mode},{cert_path},{key_path}"

@@ -1618,14 +1618,13 @@ def write_stats(
 
         if lines:
             influxdb3_local.write_sync(_BatchLines(lines), no_sync=True)
+            influxdb3_local.info(
+                f"[{task_id}] Wrote statistics for {len(queue_stats)} queues "
+                f"to amqp_stats table"
+            )
 
         # Reset period stats after writing
         stats.reset_period_stats()
-
-        influxdb3_local.info(
-            f"[{task_id}] Wrote statistics for {len(queue_stats)} queues "
-            f"to amqp_stats table"
-        )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
@@ -1717,23 +1716,11 @@ def process_scheduled_call(
         # Retrieve messages
         messages: list = amqp_consumer.get_messages()
 
-        # Write stats every 10 calls
-        call_count: int = influxdb3_local.cache.get("amqp_call_count")
-        if call_count is None:
-            call_count = 0
-
-        call_count += 1
-
         host: str = amqp_config.get("host", "unknown")
         virtual_host: str = amqp_config.get("virtual_host", "/")
 
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, host, virtual_host, task_id)
-            call_count = 0
-
-        influxdb3_local.cache.put("amqp_call_count", call_count)
-
         if len(messages) == 0:
+            write_stats(influxdb3_local, stats, host, virtual_host, task_id)
             return
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
@@ -1847,6 +1834,8 @@ def process_scheduled_call(
             f"[{task_id}] Data write complete: {success_count} records inserted into DB, "
             f"{error_count} errors"
         )
+
+        write_stats(influxdb3_local, stats, host, virtual_host, task_id)
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error in AMQP plugin: {str(e)}")

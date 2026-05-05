@@ -64,13 +64,13 @@
             {
                 "name": "Notification sender",
                 "path": "influxdata/notifier/notifier_plugin.py",
-                "description": "Standalone notification dispatcher that sends notifications through various channels (Slack, Discord, HTTP, SMS, WhatsApp) based on incoming HTTP requests. Features retry logic and environment variable support.",
+                "description": "Standalone notification dispatcher that sends notifications through various channels (Slack, Discord, HTTP, SMS, WhatsApp) based on incoming HTTP requests or table writes (WAL triggers). Features retry logic, environment variable credential resolution, and concurrent async dispatch.",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/notifier/README.md",
                 "required_plugins": [],
                 "required_libraries": ["httpx", "twilio"],
-                "last_update": "2025-06-16",
-                "trigger_types_supported": ["http"]
+                "last_update": "2026-04-01",
+                "trigger_types_supported": ["http", "data_writes"]
             },
             {
                 "name": "Basic Transformation",

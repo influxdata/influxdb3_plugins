@@ -351,10 +351,10 @@ location=warehouse_a,temp:22.5,hum:65,status:true,ts:1638360000000
 
 ## Statistics and Monitoring
 
-The plugin tracks comprehensive statistics and writes them to the `amqp_stats` table every 10 plugin calls.
+The plugin tracks comprehensive statistics and writes them to the `amqp_stats` table on every plugin invocation.
 
 **Important notes:**
-- Statistics are written **every 10 plugin invocations**, not based on time intervals
+- Statistics are written **on every plugin invocation**
 - Each queue is tracked separately with independent statistics
 - Statistics persist across plugin restarts using the InfluxDB cache
 
@@ -484,7 +484,7 @@ By default, failed messages are rejected without requeue (`requeue_on_failure=fa
 4. **Parse & Write**: Messages parsed according to format and written to InfluxDB
 5. **Acknowledgement**: Messages acknowledged based on `ack_policy` setting
 6. **Error Tracking**: Parse errors logged to `amqp_exceptions` table
-7. **Statistics**: Written to `amqp_stats` table every 10 plugin calls
+7. **Statistics**: Written to `amqp_stats` table on every plugin invocation
 8. **Disconnect**: Connection closed after processing
 
 ### Performance Optimization

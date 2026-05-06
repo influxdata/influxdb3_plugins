@@ -374,10 +374,10 @@ location=warehouse_a,temp:22.5,hum:65,status:true,ts:1638360000000
 
 ## Statistics and Monitoring
 
-The plugin tracks comprehensive statistics and writes them to the `mqtt_stats` table every 10 plugin calls.
+The plugin tracks comprehensive statistics and writes them to the `mqtt_stats` table on every plugin invocation.
 
 **Important notes:**
-- Statistics are written **every 10 plugin invocations**, not based on time intervals
+- Statistics are written **on every plugin invocation**
 - Each topic is tracked separately with independent statistics
 - Statistics persist across plugin restarts using the InfluxDB cache
 
@@ -497,7 +497,7 @@ For mutual TLS authentication, both client certificate and key are required.
 4. **Batch Processing**: Each trigger execution processes all queued messages
 5. **Parse & Write**: Messages parsed according to format and written to InfluxDB
 6. **Error Tracking**: Parse errors logged to `mqtt_exceptions` table
-7. **Statistics**: Written to `mqtt_stats` table every 10 plugin calls (not time-based)
+7. **Statistics**: Written to `mqtt_stats` table on every plugin invocation
 
 ### Performance Optimization
 

@@ -1729,11 +1729,10 @@ def write_stats(
 
         if lines:
             influxdb3_local.write_sync(_BatchLines(lines), no_sync=True)
-
-        influxdb3_local.info(
-            f"[{task_id}] Wrote statistics for {len(topic_partition_stats)} "
-            f"topic-partitions to kafka_stats table"
-        )
+            influxdb3_local.info(
+                f"[{task_id}] Wrote statistics for {len(topic_partition_stats)} "
+                f"topic-partitions to kafka_stats table"
+            )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
@@ -1832,25 +1831,13 @@ def process_scheduled_call(
         if offset_commit_policy == "always" and messages:
             kafka_consumer.commit_offsets()
 
-        # Write stats every 10 calls
-        call_count: int = influxdb3_local.cache.get("kafka_call_count")
-        if call_count is None:
-            call_count = 0
-
-        call_count += 1
-
         servers_str: str = ",".join(kafka_config.get("bootstrap_servers", []))
         group_id: str = kafka_config.get("group_id", "unknown")
-
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
-            call_count = 0
-
-        influxdb3_local.cache.put("kafka_call_count", call_count)
 
         if len(messages) == 0:
             # Still commit to save current position (important for auto_offset_reset=latest)
             kafka_consumer.commit_offsets()
+            write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
             return
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
@@ -1967,6 +1954,8 @@ def process_scheduled_call(
             f"[{task_id}] Data write complete: {success_count} records inserted into DB, "
             f"{error_count} errors"
         )
+
+        write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {str(e)}")

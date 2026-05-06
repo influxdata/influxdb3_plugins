@@ -1733,10 +1733,9 @@ def write_stats(influxdb3_local, stats: MQTTStats, broker_host: str, task_id: st
 
         if lines:
             influxdb3_local.write_sync(_BatchLines(lines), no_sync=True)
-
-        influxdb3_local.info(
-            f"[{task_id}] Wrote statistics for {len(topic_stats)} topics to mqtt_stats table"
-        )
+            influxdb3_local.info(
+                f"[{task_id}] Wrote statistics for {len(topic_stats)} topics to mqtt_stats table"
+            )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
@@ -1837,23 +1836,12 @@ def process_scheduled_call(
         # Retrieve messages from queue
         messages: list = mqtt_client.get_messages()
 
-        # Write stats every 10 calls (even if no messages)
-        call_count: int = influxdb3_local.cache.get("mqtt_call_count")
-        if call_count is None:
-            call_count = 0
-
-        call_count += 1
-
         broker_str: str = (
             f"{mqtt_config.get('broker_host')}:{mqtt_config.get('broker_port')}"
         )
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, broker_str, task_id)
-            call_count = 0
-
-        influxdb3_local.cache.put("mqtt_call_count", call_count)
 
         if len(messages) == 0:
+            write_stats(influxdb3_local, stats, broker_str, task_id)
             return
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
@@ -1950,6 +1938,8 @@ def process_scheduled_call(
         influxdb3_local.info(
             f"[{task_id}] Data write complete: {success_count} records inserted into DB, {error_count} errors"
         )
+
+        write_stats(influxdb3_local, stats, broker_str, task_id)
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {str(e)}")

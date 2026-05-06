@@ -220,11 +220,11 @@
                 "trigger_types_supported": ["scheduler"]
             },
             {
-                "name": "Fake Data Generator",
-                "path": "influxdata/fake_data_generator/fake_data_generator.py",
+                "name": "Bird Data Simulator",
+                "path": "influxdata/bird_data_simulator/bird_data_simulator.py",
                 "description": "Generates synthetic bird tracking telemetry with persistent birds, ranges, simulated movement, speed, heading, and body temperature. Exposes only simple volume controls.",
                 "author": "InfluxData",
-                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/fake_data_generator/README.md",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/bird_data_simulator/README.md",
                 "required_plugins": [],
                 "required_libraries": ["Faker"],
                 "last_update": "2026-04-29",

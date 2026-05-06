@@ -63,7 +63,7 @@ Fields:
 
 ### Species metadata
 
-The plugin embeds 20 United States bird species with simplified ranges, weight ranges, healthy body temperature ranges, and approximate top flight speeds directly in `fake_data_generator.py`.
+The plugin embeds 20 United States bird species with simplified ranges, weight ranges, healthy body temperature ranges, and approximate top flight speeds directly in `bird_data_simulator.py`.
 
 The species catalog uses [Cornell Lab All About Birds](https://www.allaboutbirds.org/guide/) species accounts and range maps as the primary reference for species presence, range, habitat, and measurements.
 General healthy body temperature ranges are based on published avian veterinary reference values such as the [Merck Veterinary Manual normal temperature table](https://www.merckvetmanual.com/reference-values-and-conversion-tables/reference-guides/normal-rectal-temperature-ranges).
@@ -99,7 +99,7 @@ General healthy body temperature ranges are based on published avian veterinary 
 ```bash
 influxdb3 create trigger \
   --database sample_data \
-  --path "gh:influxdata/fake_data_generator/fake_data_generator.py" \
+  --path "gh:influxdata/bird_data_simulator/bird_data_simulator.py" \
   --trigger-spec "every:1s" \
   bird_tracking
 ```
@@ -109,7 +109,7 @@ influxdb3 create trigger \
 ```bash
 influxdb3 create trigger \
   --database sample_data \
-  --path "gh:influxdata/fake_data_generator/fake_data_generator.py" \
+  --path "gh:influxdata/bird_data_simulator/bird_data_simulator.py" \
   --trigger-spec "every:1s" \
   --trigger-arguments bird_count=100 \
   bird_tracking_large
@@ -120,7 +120,7 @@ influxdb3 create trigger \
 ```bash
 influxdb3 create trigger \
   --database sample_data \
-  --path "gh:influxdata/fake_data_generator/fake_data_generator.py" \
+  --path "gh:influxdata/bird_data_simulator/bird_data_simulator.py" \
   --trigger-spec "every:10s" \
   --trigger-arguments bird_count=50,points_per_bird=10 \
   bird_tracking_dense
@@ -134,7 +134,7 @@ influxdb3 create trigger \
 # Create a small flock that writes once per second.
 influxdb3 create trigger \
   --database sample_data \
-  --path "gh:influxdata/fake_data_generator/fake_data_generator.py" \
+  --path "gh:influxdata/bird_data_simulator/bird_data_simulator.py" \
   --trigger-spec "every:1s" \
   --trigger-arguments bird_count=10 \
   bird_tracking_demo

@@ -117,7 +117,7 @@ class PluginConfig:
             common_packages.extend(["adtk", "scikit-learn"])
         elif "notification" in plugin_name_lower or "notifier" in plugin_name_lower:
             common_packages.extend(["slack-sdk"])
-        elif "fake_data_generator" in plugin_name_lower:
+        elif "bird_data_simulator" in plugin_name_lower:
             common_packages.extend(["Faker"])
         
         return common_packages

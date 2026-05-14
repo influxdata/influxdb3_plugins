@@ -248,7 +248,7 @@ class MQTTConfig:
         if not plugin_dir:
             raise ValueError(
                 f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
+                f"Required for relative {description} path."
             )
         return os.path.join(plugin_dir, path)
 
@@ -257,10 +257,13 @@ class MQTTConfig:
         config_path: str = self._resolve_path(config_file, "configuration file")
 
         if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+            raise FileNotFoundError(f"Configuration file not found or not accessible: {config_file}")
 
-        with open(config_path, "rb") as f:
-            config: dict[str, Any] = tomllib.load(f)
+        try:
+            with open(config_path, "rb") as f:
+                config: dict[str, Any] = tomllib.load(f)
+        except OSError:
+            raise OSError(f"Configuration file not found or not accessible: {config_file}") from None
 
         # Validate required MQTT configuration
         self._validate_toml_config(config)
@@ -766,7 +769,7 @@ class MQTTConnectionManager:
         if not plugin_dir:
             raise ValueError(
                 f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
+                f"Required for relative {description} path."
             )
         return os.path.join(plugin_dir, path)
 
@@ -783,6 +786,11 @@ class MQTTConnectionManager:
             )
             return
 
+        # Save user-provided paths for error messages before resolving
+        ca_cert_orig = ca_cert
+        client_cert_orig = client_cert
+        client_key_orig = client_key
+
         # Resolve paths (absolute used as-is, relative resolved from PLUGIN_DIR)
         ca_cert = self._resolve_path(ca_cert, "CA certificate")
         if client_cert:
@@ -792,15 +800,18 @@ class MQTTConnectionManager:
 
         # Validate certificate files exist
         if not os.path.exists(ca_cert):
-            raise FileNotFoundError(f"CA certificate not found: {ca_cert}")
+            raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
 
         if client_cert and not os.path.exists(client_cert):
-            raise FileNotFoundError(f"Client certificate not found: {client_cert}")
+            raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
 
         if client_key and not os.path.exists(client_key):
-            raise FileNotFoundError(f"Client key not found: {client_key}")
+            raise FileNotFoundError(f"TLS configuration failed. client_key not found: {client_key_orig}")
 
-        self.client.tls_set(ca_certs=ca_cert, certfile=client_cert, keyfile=client_key)
+        try:
+            self.client.tls_set(ca_certs=ca_cert, certfile=client_cert, keyfile=client_key)
+        except Exception:
+            raise OSError("TLS configuration failed. Check certificate and key files.") from None
         self.influxdb3_local.info(f"[{self.task_id}] TLS configured successfully")
 
     def connect(self) -> bool:
@@ -854,9 +865,16 @@ class MQTTConnectionManager:
             return True
 
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to MQTT broker: {str(e)}"
-            )
+            if "tls" in self.config:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to MQTT broker: "
+                    f"connection failed (TLS configured). "
+                    f"Check broker address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to MQTT broker: {str(e)}"
+                )
             return False
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
@@ -1715,10 +1733,9 @@ def write_stats(influxdb3_local, stats: MQTTStats, broker_host: str, task_id: st
 
         if lines:
             influxdb3_local.write_sync(_BatchLines(lines), no_sync=True)
-
-        influxdb3_local.info(
-            f"[{task_id}] Wrote statistics for {len(topic_stats)} topics to mqtt_stats table"
-        )
+            influxdb3_local.info(
+                f"[{task_id}] Wrote statistics for {len(topic_stats)} topics to mqtt_stats table"
+            )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
@@ -1819,23 +1836,12 @@ def process_scheduled_call(
         # Retrieve messages from queue
         messages: list = mqtt_client.get_messages()
 
-        # Write stats every 10 calls (even if no messages)
-        call_count: int = influxdb3_local.cache.get("mqtt_call_count")
-        if call_count is None:
-            call_count = 0
-
-        call_count += 1
-
         broker_str: str = (
             f"{mqtt_config.get('broker_host')}:{mqtt_config.get('broker_port')}"
         )
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, broker_str, task_id)
-            call_count = 0
-
-        influxdb3_local.cache.put("mqtt_call_count", call_count)
 
         if len(messages) == 0:
+            write_stats(influxdb3_local, stats, broker_str, task_id)
             return
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
@@ -1932,6 +1938,8 @@ def process_scheduled_call(
         influxdb3_local.info(
             f"[{task_id}] Data write complete: {success_count} records inserted into DB, {error_count} errors"
         )
+
+        write_stats(influxdb3_local, stats, broker_str, task_id)
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {str(e)}")

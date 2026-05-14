@@ -88,7 +88,7 @@ def process_scheduled_call(
             use_data_timestamp = args["use_data_timestamp"].lower() == "true"
 
     influxdb3_local.info(
-        f"[{task_id}] NWS Plugin started at {call_time} with args {args}"
+        f"[{task_id}] NWS Plugin started at {call_time}"
     )
     influxdb3_local.info(
         f"[{task_id}] Fetching data from {len(stations)} weather stations"

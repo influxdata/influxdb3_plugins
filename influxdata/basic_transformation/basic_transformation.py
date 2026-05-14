@@ -171,6 +171,9 @@ import math
 
 from pint import UnitRegistry
 
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
 _OP_FUNCS = {
     ">": operator.gt,
     "<": operator.lt,
@@ -915,39 +918,47 @@ def generate_fields_string(tags: list[str], fields: list[str]) -> str:
         str: Formatted string with quoted field names separated by commas and newlines.
     """
     all_fields: list = tags + fields
-    return ",\n\t".join(f'"{field}"' for field in all_fields)
+    return ",\n\t".join(quote_identifier(field) for field in all_fields)
 
 
 def generate_filter_clause(
     filters: list[tuple[str, str, str | int | float]] | None,
-) -> str:
+    valid_columns: list[str] | None = None,
+) -> tuple[str, dict]:
     """
-    Generates the WHERE clause for filtering by field/operator/value tuples.
+    Generates the WHERE clause for filtering by field/operator/value tuples using parameter binding.
 
     Args:
         filters (list[tuple[str, str, str | int | float]] | None):
             A list of 3-tuples (field, operator, value) as returned by `parse_field_values`,
             or None.
+        valid_columns (list[str] | None): Known column names from the schema for cross-checking
+            filter field names. If provided, filter fields not in this list are rejected.
 
     Returns:
-        str: SQL WHERE clause string combining all filters with AND, or empty string if no filters.
+        tuple[str, dict]: SQL WHERE clause string and a dict of query parameters.
     """
     if not filters:
-        return ""
+        return "", {}
 
+    allowed_operators = {"=", "!=", ">", "<", ">=", "<="}
     clauses: list[str] = []
-    for field, op, val in filters:
-        # Determine whether to quote the value
-        if isinstance(val, (int, float)):
-            val_str = str(val)
-        else:
-            # escape single quotes in string values
-            escaped = val.replace("'", "''")
-            val_str = f"'{escaped}'"
+    params: dict = {}
 
-        clauses.append(f'AND\n\t"{field}" {op} {val_str}\n')
+    for idx, (field, op, val) in enumerate(filters):
+        if op not in allowed_operators:
+            raise Exception(
+                f"Invalid filter operator: '{op}' (must be one of {', '.join(sorted(allowed_operators))})"
+            )
+        if valid_columns is not None and field not in valid_columns:
+            raise Exception(
+                f"Filter field '{field}' does not exist in the measurement schema"
+            )
+        param_name = f"filter_val_{idx}"
+        params[param_name] = val
+        clauses.append(f'AND\n\t{quote_identifier(field)} {op} ${param_name}\n')
 
-    return "".join(clauses)
+    return "".join(clauses), params
 
 
 def generate_query(
@@ -957,9 +968,9 @@ def generate_query(
     tag_names: list[str],
     start_time: datetime,
     end_time: datetime,
-) -> str:
+) -> tuple[str, dict]:
     """
-    Builds an SQL query.
+    Builds an SQL query with parameter binding for filter values.
 
     Args:
         measurement: source measurement name
@@ -970,25 +981,28 @@ def generate_query(
         end_time:   UTC datetime for WHERE time < ...
 
     Returns:
-        A complete SQL query string.
+        tuple[str, dict]: A complete SQL query string and a dict of query parameters.
     """
+    escaped_measurement = measurement.replace("'", "''")
+
     # SELECT clause
     fields_clause: str = generate_fields_string(tag_names, field_names)
-    filter_clause: str = generate_filter_clause(filters)
+    valid_columns: list[str] = tag_names + field_names + ["time"]
+    filter_clause, params = generate_filter_clause(filters, valid_columns)
 
     query: str = f"""
             SELECT
                 {fields_clause}
             FROM
-                '{measurement}'
+                '{escaped_measurement}'
             WHERE
                 time >= '{start_time}'
-            AND 
+            AND
                 time < '{end_time}'
             {filter_clause}
             ORDER BY time
         """
-    return query
+    return query, params
 
 
 def transform_to_influx_line(
@@ -1370,7 +1384,7 @@ def process_scheduled_call(
                 - "filters": string defining field filters.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
+    influxdb3_local.info(f"[{task_id}] Starting scheduled call at {call_time}")
 
     # Override args with config file
     if args:
@@ -1384,11 +1398,11 @@ def process_scheduled_call(
                     return
                 plugin_dir: Path = Path(plugin_dir_var)
                 file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
@@ -1427,8 +1441,8 @@ def process_scheduled_call(
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
-        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
-        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
+        influxdb3_local.info(f"[{task_id}] Name transformations configured for {len(names_transformations)} fields")
+        influxdb3_local.info(f"[{task_id}] Value transformations configured for {len(values_transformations)} fields")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1470,11 +1484,11 @@ def process_scheduled_call(
         influxdb3_local.info(f"[{task_id}] Tags to query: {tags_to_query}")
 
         # generate query
-        query: str = generate_query(
+        query, params = generate_query(
             measurement, filters, fields_to_query, tags_to_query, start_time, end_time
         )
         influxdb3_local.info(f"[{task_id}] Executing query for {measurement} with {len(filters)} filters")
-        results: list = influxdb3_local.query(query)
+        results: list = influxdb3_local.query(query, params)
         influxdb3_local.info(f"[{task_id}] Query executed, {len(results)} records returned")
 
         if not results:
@@ -1629,7 +1643,7 @@ def process_scheduled_call(
 
         if dry_run:
             influxdb3_local.info(
-                f"[{task_id}] Dry run is set, transformed results: {transformed_results}"
+                f"[{task_id}] Dry run complete, {len(transformed_results)} rows transformed"
             )
             return
 
@@ -1714,7 +1728,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
                 influxdb3_local.info(
-                    f"[{task_id}] PLUGIN_DIR env var: {plugin_dir_var}"
+                    f"[{task_id}] PLUGIN_DIR env var is set"
                 )
                 if not plugin_dir_var:
                     influxdb3_local.error(
@@ -1723,11 +1737,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                     return
                 plugin_dir: Path = Path(plugin_dir_var)
                 file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] new args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
@@ -1765,8 +1779,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
-        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
-        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
+        influxdb3_local.info(f"[{task_id}] Name transformations configured for {len(names_transformations)} fields")
+        influxdb3_local.info(f"[{task_id}] Value transformations configured for {len(values_transformations)} fields")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1962,7 +1976,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
             if dry_run:
                 influxdb3_local.info(
-                    f"[{task_id}] Dry run is set, transformed results: {transformed_results}"
+                    f"[{task_id}] Dry run complete, {len(transformed_results)} rows transformed"
                 )
                 return
 

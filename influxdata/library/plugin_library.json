@@ -220,6 +220,17 @@
                 "trigger_types_supported": ["scheduler"]
             },
             {
+                "name": "Bird Data Simulator",
+                "path": "influxdata/bird_data_simulator/bird_data_simulator.py",
+                "description": "Generates synthetic bird tracking telemetry with persistent birds, ranges, simulated movement, speed, heading, and body temperature. Exposes only simple volume controls.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/bird_data_simulator/README.md",
+                "required_plugins": [],
+                "required_libraries": ["Faker"],
+                "last_update": "2026-04-29",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
                 "name": "OPC UA",
                 "path": "influxdata/opcua/opcua.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Enables periodic ingestion of OPC UA node values into InfluxDB 3. Connect to OPC UA servers (PLCs, SCADA, CNC machines) and read current values with support for auto-discovery browse mode, automatic data type detection, namespace URI resolution, and quality filtering.",

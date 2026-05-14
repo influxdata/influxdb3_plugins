@@ -366,7 +366,7 @@ location=warehouse_a,temp:22.5,hum:65,ts:1638360000000
 
 ## Statistics and Monitoring
 
-The plugin tracks comprehensive statistics and writes them to the `kafka_stats` table every 10 plugin calls.
+The plugin tracks comprehensive statistics and writes them to the `kafka_stats` table on every plugin invocation.
 
 ### kafka_stats Table
 

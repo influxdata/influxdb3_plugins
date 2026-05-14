@@ -244,7 +244,7 @@
             {
                 "name": "Synthefy Forecasting",
                 "path": "synthefy/synthefy-forecasting/synthefy_forecasting.py",
-                "description": "Integrates Synthefy Forecasting API with InfluxDB 3 to enable on-demand time series forecasting via HTTP requests. Reads time series data from InfluxDB, generates forecasts using Synthefy's advanced forecasting models (sfm-tabular, Migas-latest, Chronos2, Moirai2, TimesFM, etc.) and writes the results back to InfluxDB for visualization and alerting. Supports multivariate forecasting with metadata fields as covariates.",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Integrates Synthefy Forecasting API with InfluxDB 3 to enable on-demand time series forecasting via HTTP requests. Reads time series data from InfluxDB, generates forecasts using Synthefy's advanced forecasting models (sfm-tabular, Migas-latest, Chronos2, Moirai2, TimesFM, etc.) and writes the results back to InfluxDB for visualization and alerting. Supports multivariate forecasting with metadata fields as covariates.",
                 "author": "Synthefy",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/synthefy/synthefy-forecasting/README.md",
                 "required_plugins": [],

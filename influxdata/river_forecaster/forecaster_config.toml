@@ -1,0 +1,24 @@
+# Forecaster Plugin — Example TOML Configuration
+# Use this file with: --trigger-arguments config_file_path=forecaster_config.toml
+
+# Tables to forecast (dot-separated, REQUIRED)
+include_tables = "system_cpu.system_memory"
+
+# Fields to forecast (dot-separated, optional — omit to forecast all numeric fields)
+# include_fields = "idle.used.available"
+
+# Series management
+max_series = "50"
+
+# Forecast settings
+min_observations = "30"
+default_horizon = "12"
+forecast_target_seconds = "3600"
+
+# SNARIMAX model parameters
+snarimax_p = "12"
+snarimax_d = "1"
+snarimax_q = "1"
+
+# Logging
+log_forecasts = "false"

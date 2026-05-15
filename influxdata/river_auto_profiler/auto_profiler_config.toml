@@ -1,0 +1,18 @@
+# Auto-Profiler Plugin — Example TOML Configuration
+# Use this file with: --trigger-arguments config_file_path=auto_profiler_config.toml
+
+# Fields to exclude from profiling (dot-separated)
+# exclude_fields = "status.version"
+
+# Tables to skip when using all_tables trigger (dot-separated)
+# exclude_tables = "debug_info.system_logs"
+
+# Series management
+max_series = "100"
+
+# Profiling frequency
+profile_write_interval = "50"
+min_observations = "50"
+
+# Logging
+log_profiles = "false"

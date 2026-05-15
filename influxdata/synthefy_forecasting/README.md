@@ -1,8 +1,6 @@
 # Synthefy Forecasting Plugin
 
-⚡ http  
-🏷️ forecasting, time-series, predictive-analytics  
-🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
+⚡ http 🏷️ forecasting, time-series, predictive-analytics 🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
 ## Description
 
@@ -33,7 +31,7 @@ The Synthefy API key is **never** read from trigger arguments or the request bod
 
 If both are set, the header takes precedence.
 
-### HTTP trigger parameters
+### Request body parameters
 
 | Parameter            | Type           | Default                    | Description                                                                                                                                                                                        |
 |----------------------|----------------|----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -82,7 +80,7 @@ When a tag filter has a single value, that value is added as a tag on every fore
 - `pandas` — Data manipulation
 - `requests` — HTTP client for the Synthefy API
 
-### Installation
+### Installation steps
 
 Using the InfluxDB 3 package manager:
 
@@ -118,7 +116,7 @@ influxdb3 query --database mydb "SELECT COUNT(*) FROM temperature"
 influxdb3 query --database mydb "SELECT * FROM temperature ORDER BY time DESC LIMIT 5"
 ```
 
-## Trigger Setup
+## Trigger setup
 
 ### HTTP trigger
 
@@ -127,7 +125,7 @@ Create and enable the trigger:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename synthefy/synthefy-forecasting/synthefy_forecasting.py \
+  --path "gh:influxdata/synthefy_forecasting/synthefy_forecasting.py" \
   --trigger-spec "request:forecast" \
   --trigger-arguments measurement=temperature,field=value \
   temperature_forecast_http
@@ -160,7 +158,7 @@ curl -X POST http://localhost:8181/api/v3/engine/forecast \
 - Authentication for InfluxDB itself is handled by the framework via the `Authorization` header.
 - The Synthefy API key must be in the `X-Synthefy-Api-Key` header or in the `SYNTHEFY_API_KEY` env var; it cannot be passed via trigger arguments or request body.
 
-## Example Usage
+## Example usage
 
 ### Basic forecast
 
@@ -229,7 +227,7 @@ The same parameters can also be set as trigger arguments (note the dot/colon/`@`
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --plugin-filename synthefy/synthefy-forecasting/synthefy_forecasting.py \
+  --path "gh:influxdata/synthefy_forecasting/synthefy_forecasting.py" \
   --trigger-spec "request:forecast" \
   --trigger-arguments 'measurement=temperature,field=value,tags=location:NYC@SF.device:sensor1,metadata_fields=humidity pressure,time_range=30d,forecast_horizon=7d' \
   temperature_forecast_http
@@ -310,7 +308,24 @@ The plugin supports models available through the Synthefy Forecasting API. Key s
 
 Check the [Synthefy documentation](https://docs.synthefy.com) for the most up-to-date model list and availability.
 
+## Code overview
+
+### Files
+
+- `synthefy_forecasting.py`: HTTP trigger entry point, argument parsing, InfluxDB query construction, Synthefy API calls, and forecast writes.
+- `requirements.txt`: Python packages required by the plugin.
+- `README.md`: Setup, usage, and troubleshooting documentation.
+
+### Key functions
+
+- `process_request(influxdb3_local, query_parameters, request_headers, request_body, args=None)`: handles HTTP requests, merges trigger arguments with request-body overrides, validates input, calls Synthefy, and writes forecast points.
+- `build_history_query(measurement, field, metadata_fields, tag_filters, start_time)`: builds the parameterized SQL query for historical data.
+- `dataframe_to_synthefy_request(df, field, forecast_horizon, metadata_fields, model, task_id)`: converts InfluxDB query rows into the Synthefy forecast request payload.
+- `forecast_response_to_line_builders(influxdb3_local, forecast_response, output_measurement, tag_filters, model, field_name, task_id)`: converts Synthefy forecast results into InfluxDB line protocol builders.
+
 ## Troubleshooting
+
+### Common issues
 
 ### Missing API key
 
@@ -362,7 +377,7 @@ If you see "Query would scan X Parquet files, exceeding the file limit" errors, 
 
 Apache 2.0
 
-## Support
+## Questions/Comments
 
 - Plugin issues: open an issue in the [influxdb3_plugins repository](https://github.com/influxdata/influxdb3_plugins)
 - Synthefy API: contact [Synthefy support](https://synthefy.com) or see [Synthefy documentation](https://docs.synthefy.com)

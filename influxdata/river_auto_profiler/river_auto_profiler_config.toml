@@ -1,0 +1,38 @@
+# River Auto-Profiler Plugin — Example TOML Configuration
+# Use this file with: --trigger-arguments config_file_path=river_auto_profiler_config.toml
+# Or with absolute path: --trigger-arguments config_file_path=/path/to/river_auto_profiler_config.toml
+
+# Fields to profile (TOML list). If set, only these numeric fields are processed.
+# include_fields = ["temperature", "humidity"]
+
+# Fields to exclude from profiling (TOML list)
+# exclude_fields = ["status", "version"]
+
+# Tables to skip when using all_tables trigger (TOML list)
+# exclude_tables = ["debug_info", "system_logs"]
+
+# String columns that are string fields, not tags (TOML list).
+# All other string columns are treated as tags.
+# string_fields = ["status_message", "description"]
+
+# EW stats initial fading factor (auto-adapted based on write frequency)
+# initial_fading_factor = 0.3
+
+# Seasonal period for variance bucket tracking: "hourly" (24 buckets) or "weekly" (168 buckets)
+# seasonal_period = "hourly"
+
+# Series management
+max_series = 1000
+
+# Profiling frequency
+profile_write_interval = 50
+min_observations = 50
+
+# Logging
+log_profiles = false
+
+# Model persistence (checkpoint/restore)
+checkpoint_interval_seconds = 1800
+max_checkpoint_age_hours = 24
+# Skip checkpointing cold-start profiles with fewer observations than this.
+min_checkpoint_observations = 10

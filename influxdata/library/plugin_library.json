@@ -243,7 +243,7 @@
             },
             {
                 "name": "River Auto Profiler",
-                "path": "influxdata/river_auto_profiler/auto_profiler.py",
+                "path": "influxdata/river_auto_profiler/river_auto_profiler.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Incrementally profiles incoming time-series data with River ML streaming statistics and writes per-series recommendations for anomaly detection tuning, including thresholds, fading factors, and profile maturity.",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_auto_profiler/README.md",
@@ -254,10 +254,10 @@
             },
             {
                 "name": "River Anomaly Detection",
-                "path": "influxdata/river_anomaly_detection/anomaly_detector.py",
+                "path": "influxdata/river_anomaly_detector/river_anomaly_detector.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Detects time-series anomalies on incoming writes using River ML online models, combining rolling statistics with HalfSpaceTrees for per-series anomaly scoring and optional auto-tuning from River Auto Profiler output.",
                 "author": "InfluxData",
-                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_anomaly_detection/README.md",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_anomaly_detector/README.md",
                 "required_plugins": [],
                 "required_libraries": ["river"],
                 "last_update": "2026-05-15",
@@ -265,7 +265,7 @@
             },
             {
                 "name": "River Forecaster",
-                "path": "influxdata/river_forecaster/forecaster.py",
+                "path": "influxdata/river_forecaster/river_forecaster.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Provides online time-series forecasting with River ML SNARIMAX models, learning from incoming writes and producing scheduled multi-step forecasts with per-series model state and optional auto-horizon support.",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_forecaster/README.md",

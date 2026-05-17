@@ -31,14 +31,17 @@ In TOML configuration, `broker_host` and `topics` are placed under the `[mqtt]` 
 
 In TOML configuration, these parameters are placed under the `[mqtt]` section.
 
-| Parameter     | Type    | Default        | Description                                        |
-|---------------|---------|----------------|----------------------------------------------------|
-| `broker_port` | integer | 1883           | MQTT broker port (1883 for non-TLS, 8883 for TLS)  |
-| `qos`         | integer | 1              | MQTT Quality of Service level (0, 1, or 2)         |
-| `client_id`   | string  | auto-generated | MQTT client identifier (must be unique per broker) |
+| Parameter         | Type    | Default        | Description                                                                              |
+|-------------------|---------|----------------|------------------------------------------------------------------------------------------|
+| `broker_port`     | integer | 1883           | MQTT broker port (1883 for non-TLS, 8883 for TLS)                                        |
+| `qos`             | integer | 1              | MQTT Quality of Service level (0, 1, or 2)                                               |
+| `client_id`       | string  | auto-generated | MQTT client identifier (must be unique per broker)                                       |
+| `max_queue_bytes` | integer | 67108864       | Maximum total bytes of MQTT payloads buffered between scheduled drains (default: 64 MiB) |
 
 
 **Recommendation:** Use QoS 1 for most IoT scenarios. It provides reliable delivery with minimal overhead.
+
+**About `max_queue_bytes`:** Between two scheduled fires, paho's network thread buffers incoming MQTT messages in an in-memory queue inside the plugin. To protect InfluxDB from a misbehaving or malicious broker, the plugin tracks the running total of buffered payload sizes; once it would exceed `max_queue_bytes`, new messages are dropped (the existing queue is still processed normally). Drop counts are reported per-topic in the `mqtt_stats` table (`messages_dropped` field) and a summary error is logged at the end of each cycle when any drops occurred. Raise this value if you expect high-throughput bursts; lower it on memory-constrained hosts.
 
 ### Authentication parameters
 
@@ -383,14 +386,15 @@ The plugin tracks comprehensive statistics and writes them to the `mqtt_stats` t
 
 ### mqtt_stats Table
 
-| Field                 | Type  | Description                            |
-|-----------------------|-------|----------------------------------------|
-| `topic` (tag)         | tag   | MQTT topic name                        |
-| `broker_host` (tag)   | tag   | MQTT broker address                    |
-| `messages_received`   | int   | Total messages received on this topic  |
-| `messages_processed`  | int   | Successfully processed messages        |
-| `messages_failed`     | int   | Failed messages                        |
-| `success_rate`        | float | Percentage of successful messages      |
+| Field                 | Type  | Description                                                                                       |
+|-----------------------|-------|---------------------------------------------------------------------------------------------------|
+| `topic` (tag)         | tag   | MQTT topic name                                                                                   |
+| `broker_host` (tag)   | tag   | MQTT broker address                                                                               |
+| `messages_received`   | int   | Total messages received on this topic (includes dropped messages)                                 |
+| `messages_processed`  | int   | Successfully processed messages                                                                   |
+| `messages_failed`     | int   | Failed messages                                                                                   |
+| `messages_dropped`    | int   | Messages dropped because the `max_queue_bytes` budget was exhausted                               |
+| `success_rate`        | float | Percentage of successfully processed messages: `processed / (processed + failed + dropped) * 100` |
 
 ### Querying Statistics
 

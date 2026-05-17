@@ -232,26 +232,31 @@ def load_config(
         config_file_path = (
             args.get("config_file_path") if args else body_args.get("config_file_path")
         )
-        try:
-            plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-            if not plugin_dir_var:
-                influxdb3_local.error(f"[{task_id}] Failed to get PLUGIN_DIR env var")
-                raise Exception(f"[{task_id}] PLUGIN_DIR environment variable not set")
+        if not config_file_path.endswith(".toml"):
+            influxdb3_local.error(
+                f"[{task_id}] Invalid config file format: expected a .toml file"
+            )
+            raise Exception("Invalid config file format: expected a .toml file")
 
+        plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
+        if not plugin_dir_var:
+            influxdb3_local.error(f"[{task_id}] Failed to get PLUGIN_DIR env var")
+            raise Exception("PLUGIN_DIR environment variable not set")
+
+        try:
             plugin_dir: Path = Path(plugin_dir_var)
             config_file = plugin_dir / config_file_path
 
-            if config_file.exists():
-                with open(config_file, "rb") as f:
-                    file_config = tomllib.load(f)
-                # Override config_data with values from file
-                config_data.update(file_config)
-                influxdb3_local.info(
-                    f"[{task_id}] Loaded configuration from {config_file}"
-                )
-        except Exception as e:
-            influxdb3_local.error(f"[{task_id}] Failed to load config file: {e}")
-            raise
+            with open(config_file, "rb") as f:
+                file_config = tomllib.load(f)
+            # Override config_data with values from file
+            config_data.update(file_config)
+            influxdb3_local.info(
+                f"[{task_id}] Loaded configuration from {config_file}"
+            )
+        except Exception:
+            influxdb3_local.error(f"[{task_id}] Failed to read config file")
+            raise Exception("Failed to read config file") from None
 
     # 4. Override with body_args (highest priority)
     if body_args:

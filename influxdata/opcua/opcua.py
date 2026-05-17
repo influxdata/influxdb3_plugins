@@ -139,6 +139,12 @@
             "example": "true",
             "description": "Disable configuration caching. When set to 'true', the configuration is reloaded from file/arguments on every scheduled call instead of being cached for 1 hour. Useful during development or when the config file changes frequently. Default: false.",
             "required": false
+        },
+        {
+            "name": "allow_insecure_auth",
+            "example": "true",
+            "description": "Permit sending username/password when 'security_policy' is not set. By default the plugin refuses this, because credentials are transmitted in cleartext over an unencrypted connection. Only enable on a trusted network. Default: false.",
+            "required": false
         }
     ]
 }
@@ -309,8 +315,38 @@ class OPCUAConfig:
         else:
             self.config = self._build_config_from_args()
 
-        # Validate server_url scheme regardless of the configuration source
-        self._validate_server_url(self.config.get("opcua", {}).get("server_url"))
+        # Security validation regardless of the configuration source
+        opcua_config: dict[str, Any] = self.config.get("opcua", {})
+        self._validate_server_url(opcua_config.get("server_url"))
+        self._validate_secure_auth(opcua_config)
+
+    @staticmethod
+    def _validate_secure_auth(opcua_config: dict[str, Any]):
+        """Refuse username/password authentication over an unencrypted channel.
+
+        When 'security_policy' is unset, asyncua connects with
+        SecurityPolicyNone and the credentials are sent in cleartext during
+        session activation. Require an explicit 'allow_insecure_auth' opt-in
+        before permitting that.
+        """
+        auth: dict = opcua_config.get("auth", {})
+        if not (auth.get("username") and auth.get("password")):
+            return
+
+        security: dict = opcua_config.get("security", {})
+        if security.get("security_policy"):
+            return
+
+        allow_insecure: bool = (
+            str(opcua_config.get("allow_insecure_auth", False)).lower() == "true"
+        )
+        if not allow_insecure:
+            raise ValueError(
+                "Refusing to send username/password over an unencrypted "
+                "connection: 'security_policy' is not set. Configure a security "
+                "policy, or set 'allow_insecure_auth' to true to permit "
+                "cleartext credentials (only on a trusted network)."
+            )
 
     @staticmethod
     def _validate_server_url(server_url: Any):
@@ -489,6 +525,15 @@ class OPCUAConfig:
         if disable_cache is not None and not isinstance(disable_cache, (bool, str)):
             raise ValueError(
                 "Parameter 'opcua.disable_config_cache' must be a boolean or string (true/false)"
+            )
+
+        # Validate allow_insecure_auth if present (accepts bool or string)
+        allow_insecure_auth = opcua_config.get("allow_insecure_auth")
+        if allow_insecure_auth is not None and not isinstance(
+            allow_insecure_auth, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'opcua.allow_insecure_auth' must be a boolean or string (true/false)"
             )
 
     @staticmethod
@@ -850,6 +895,10 @@ class OPCUAConfig:
             str(self.args.get("disable_config_cache", "false")).lower() == "true"
         )
 
+        allow_insecure_auth: bool = (
+            str(self.args.get("allow_insecure_auth", "false")).lower() == "true"
+        )
+
         result = {
             "opcua": {
                 "server_url": self.args.get("server_url"),
@@ -861,6 +910,7 @@ class OPCUAConfig:
                 "security": security_config,
                 "auth": auth_config,
                 "disable_config_cache": disable_config_cache,
+                "allow_insecure_auth": allow_insecure_auth,
             }
         }
 

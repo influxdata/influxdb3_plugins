@@ -1389,6 +1389,11 @@ def process_scheduled_call(
     # Override args with config file
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
                 if not plugin_dir_var:
@@ -1725,6 +1730,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
     # Override args with config file
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
                 influxdb3_local.info(

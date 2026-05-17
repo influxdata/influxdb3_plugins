@@ -11,7 +11,7 @@
         {
             "name": "server_url",
             "example": "opc.tcp://localhost:4840",
-            "description": "OPC UA server endpoint URL.",
+            "description": "OPC UA server endpoint URL. Must use the opc.tcp:// or opc.tls:// scheme.",
             "required": true
         },
         {
@@ -152,6 +152,7 @@ import tomllib
 import uuid
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 from asyncua import Client, ua
 
@@ -196,6 +197,9 @@ _VALID_QUALITY_CATEGORIES = {"good", "uncertain", "bad"}
 _DEFAULT_QUALITY_FILTER = {"good"}
 
 _CONFIG_CACHE_TTL = 60 * 60  # seconds — TTL for config and browse structure cache
+
+# Allowed URL schemes for 'server_url'. Restricted to OPC UA transport schemes
+_ALLOWED_OPCUA_SCHEMES = ("opc.tcp", "opc.tls")
 
 
 """
@@ -304,6 +308,28 @@ class OPCUAConfig:
             self.config = self._load_toml_config(config_file)
         else:
             self.config = self._build_config_from_args()
+
+        # Validate server_url scheme regardless of the configuration source
+        self._validate_server_url(self.config.get("opcua", {}).get("server_url"))
+
+    @staticmethod
+    def _validate_server_url(server_url: Any):
+        """Validate that 'server_url' uses an allowed OPC UA transport scheme.
+
+        Rejects schemes such as file:// or http:// that would let the plugin
+        be abused for local file disclosure or TCP port scanning.
+        """
+        if not isinstance(server_url, str) or not server_url.strip():
+            raise ValueError("Parameter 'server_url' must be a non-empty string")
+
+        parsed = urlparse(server_url.strip())
+        if parsed.scheme not in _ALLOWED_OPCUA_SCHEMES:
+            allowed = ", ".join(f"{s}://" for s in _ALLOWED_OPCUA_SCHEMES)
+            raise ValueError(
+                f"Invalid 'server_url' scheme: only {allowed} is allowed"
+            )
+        if not parsed.hostname:
+            raise ValueError("Parameter 'server_url' must include a host")
 
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
@@ -993,7 +1019,7 @@ class OPCUAConnectionManager:
 
             return True
 
-        except Exception as e:
+        except Exception:
             if self.config.get("security", {}).get("security_policy"):
                 self.influxdb3_local.error(
                     f"[{self.task_id}] Error connecting to OPC UA server: "
@@ -1002,7 +1028,8 @@ class OPCUAConnectionManager:
                 )
             else:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error connecting to OPC UA server: {str(e)}"
+                    f"[{self.task_id}] Error connecting to OPC UA server: "
+                    f"connection failed. Check server address and availability."
                 )
             return False
 

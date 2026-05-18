@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2026-05-15T15:42:04+00:00",
+        "last_updated": "2026-05-15T18:47:29+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -239,6 +239,17 @@
                 "required_plugins": [],
                 "required_libraries": ["asyncua"],
                 "last_update": "2026-03-30",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Signal Generator",
+                "path": "influxdata/signal_generator/signal_generator.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Generates configurable waveform-based time-series data on a schedule for demos, testing, dashboards, alerts, and downstream plugin validation without requiring an external data source.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/signal_generator/README.md",
+                "required_plugins": [],
+                "required_libraries": [],
+                "last_update": "2026-05-15",
                 "trigger_types_supported": ["scheduler"]
             },
             {

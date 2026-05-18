@@ -816,6 +816,7 @@ class KafkaConsumerManager:
         self.consumer: Consumer | None = None
         self.connected: bool = False
         self._pending_messages: list = []  # Messages received during assignment wait
+        self.poll_error: bool = False  # Set when a poll fails (auth/cert/transport)
 
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
@@ -911,21 +912,34 @@ class KafkaConsumerManager:
             # First polls trigger the rebalance process
             assignment_timeout = 10  # seconds
             start_time = time.time()
+            assignment = None
             while time.time() - start_time < assignment_timeout:
                 # Poll to trigger rebalance - save any messages received
                 msg = self.consumer.poll(timeout=0.5)
-                if msg is not None and not msg.error():
-                    self._pending_messages.append(msg)
+                if msg is not None:
+                    if msg.error():
+                        if msg.error().code() != KafkaError._PARTITION_EOF:
+                            self.influxdb3_local.error(
+                                f"[{self.task_id}] Error connecting to Kafka"
+                            )
+                            return False
+                    else:
+                        self._pending_messages.append(msg)
                 assignment = self.consumer.assignment()
                 if assignment:
                     self.influxdb3_local.info(
                         f"[{self.task_id}] Partitions assigned: {assignment}"
                     )
                     break
-            else:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] No partitions assigned within {assignment_timeout}s"
+
+            if not assignment:
+                # No assignment within the timeout is treated as a failure
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] No partitions assigned within "
+                    f"{assignment_timeout}s. Check broker availability, "
+                    f"credentials, certificates, and topic names."
                 )
+                return False
 
             self.connected = True
             self.influxdb3_local.info(
@@ -1020,6 +1034,18 @@ class KafkaConsumerManager:
                     # No more messages
                     break
 
+                if msg.error():
+                    # _PARTITION_EOF is a normal end-of-partition marker; any
+                    # other error means the poll itself failed (authentication,
+                    # certificate, transport). Flag it and stop polling.
+                    if msg.error().code() != KafkaError._PARTITION_EOF:
+                        self.poll_error = True
+                        self.influxdb3_local.error(
+                            f"[{self.task_id}] Error polling Kafka messages"
+                        )
+                        break
+                    continue
+
                 message_data = self._process_message(msg)
                 if message_data:
                     messages.append(message_data)
@@ -1028,6 +1054,7 @@ class KafkaConsumerManager:
                 poll_timeout = _POLL_TIMEOUT_MS_FAST / 1000.0
 
         except Exception as e:
+            self.poll_error = True
             self.influxdb3_local.error(
                 f"[{self.task_id}] Error polling Kafka messages: {str(e)}"
             )
@@ -1044,18 +1071,32 @@ class KafkaConsumerManager:
             if not assignment:
                 return
 
+            # When there is no position yet (new/empty topic), bootstrap the
+            # offset from the watermark matching auto_offset_reset.
+            offset_reset = self.config.get("auto_offset_reset", "earliest")
             offsets_to_commit = []
             for tp in assignment:
                 # First try to get current position
                 position = self.consumer.position([tp])
                 if position and position[0] and position[0].offset >= 0:
                     offsets_to_commit.append(position[0])
-                else:
-                    # No position yet - get high watermark (end of partition)
+                elif not self.poll_error:
+                    # No fetch position yet and the poll was healthy. Bootstrap
+                    # an offset only for a group that has never committed one -
+                    # if a committed offset already exists, leave it untouched
+                    committed = self.consumer.committed([tp], timeout=10)
+                    if committed and committed[0] and committed[0].offset >= 0:
+                        # An offset already exists for this partition.
+                        continue
                     low, high = self.consumer.get_watermark_offsets(tp)
-                    if high >= 0:
-                        tp_to_commit = TopicPartition(tp.topic, tp.partition, high)
+                    bootstrap = low if offset_reset == "earliest" else high
+                    if bootstrap >= 0:
+                        tp_to_commit = TopicPartition(
+                            tp.topic, tp.partition, bootstrap
+                        )
                         offsets_to_commit.append(tp_to_commit)
+                # else: poll failed and no valid position - skip this partition
+                #       so the previously committed offset stays intact.
 
             if offsets_to_commit:
                 self.consumer.commit(offsets=offsets_to_commit)
@@ -1828,6 +1869,7 @@ def process_scheduled_call(
 
         # Retrieve messages
         messages: list = kafka_consumer.get_messages()
+        poll_error: bool = kafka_consumer.poll_error
 
         # Commit offsets immediately if policy is "always"
         if offset_commit_policy == "always" and messages:
@@ -1837,8 +1879,15 @@ def process_scheduled_call(
         group_id: str = kafka_config.get("group_id", "unknown")
 
         if len(messages) == 0:
-            # Still commit to save current position (important for auto_offset_reset=latest)
-            kafka_consumer.commit_offsets()
+            if poll_error:
+                # Do not commit after a failed poll
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping offset commit: poll finished with "
+                    f"an error and no messages were retrieved"
+                )
+            else:
+                # Commit to save current position (e.g. bootstrap a new topic)
+                kafka_consumer.commit_offsets()
             write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
             return
 

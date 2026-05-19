@@ -46,6 +46,12 @@ format = "json"
 # Default: 67108864 (64 MiB). Uncomment to override.
 # max_queue_bytes = 67108864
 
+# Sending username/password without TLS transmits credentials in cleartext.
+# The plugin refuses this by default. Configure [mqtt.tls] below, or set this
+# to true to permit cleartext credentials on a trusted network.
+# This key belongs to the [mqtt] section (keep it above [mqtt.auth]).
+# allow_insecure_auth = false
+
 # Optional authentication (uncomment if needed)
 # [mqtt.auth]
 # username = "your_username"

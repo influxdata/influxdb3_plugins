@@ -93,6 +93,12 @@
             "required": false
         },
         {
+            "name": "allow_insecure_auth",
+            "example": "true",
+            "description": "Permit sending username/password when TLS is not configured (no ca_cert). By default the plugin refuses this, because credentials are transmitted in cleartext over an unencrypted connection. Only enable on a trusted network. Default: false.",
+            "required": false
+        },
+        {
             "name": "ca_cert",
             "example": "certs/ca.crt",
             "description": "Path to CA certificate file for TLS (absolute or relative to PLUGIN_DIR).",
@@ -213,6 +219,7 @@ class MQTTConfig:
 
     VALID_TIMESTAMP_FORMATS = {"ns", "ms", "s", "datetime"}
     VALID_FIELD_TYPES = {"int", "uint", "float", "string", "bool"}
+    FORBIDDEN_JSONPATH_TOKENS = ("=~", "sub(")
 
     def __init__(self, influxdb3_local, args: dict[str, str] | None, task_id: str):
         self.influxdb3_local = influxdb3_local
@@ -230,6 +237,58 @@ class MQTTConfig:
         else:
             # Use command-line arguments as config
             self.config = self._build_config_from_args()
+
+        # Security validation regardless of the configuration source
+        self._validate_secure_auth(self.config.get("mqtt", {}))
+        self._validate_jsonpath_safety(self.config)
+
+    @classmethod
+    def _validate_jsonpath_safety(cls, config: dict[str, Any]):
+        """Reject JSONPath expressions that embed a regex evaluated against
+        broker data.
+
+        jsonpath_ng.ext runs an admin-supplied regex through Python `re` in
+        exactly two places: the `=~` filter operator and the `sub()` string
+        function. Both are vulnerable to ReDoS on hostile message data.
+        Every other construct - comparison filters, nesting, recursive descent,
+        wildcards - runs in linear time and is left intact.
+        """
+        json_mapping: dict | None = (config.get("mapping") or {}).get("json")
+        if not json_mapping:
+            return
+
+        paths: list[str] = []
+        table_name_field = json_mapping.get("table_name_field")
+        if isinstance(table_name_field, str):
+            paths.append(table_name_field)
+        for json_path in (json_mapping.get("tags") or {}).values():
+            if isinstance(json_path, str):
+                paths.append(json_path)
+        for field_spec in (json_mapping.get("fields") or {}).values():
+            if (
+                isinstance(field_spec, (list, tuple))
+                and field_spec
+                and isinstance(field_spec[0], str)
+            ):
+                paths.append(field_spec[0])
+        timestamp_config = json_mapping.get("timestamp_config")
+        if isinstance(timestamp_config, dict) and isinstance(
+            timestamp_config.get("field"), str
+        ):
+            paths.append(timestamp_config["field"])
+
+        for path in paths:
+            lowered: str = path.lower()
+            for token in cls.FORBIDDEN_JSONPATH_TOKENS:
+                if token in lowered:
+                    raise ValueError(
+                        f"Unsupported JSONPath operator '{token.rstrip('(')}' "
+                        f"in '{path}': regex-based JSONPath operators ('=~' "
+                        f"and 'sub()') are disabled because they are "
+                        f"vulnerable to backtracking (ReDoS) on "
+                        f"hostile message data. Use comparison filters, or "
+                        f"extract the raw value and transform it downstream."
+                    )
 
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
@@ -255,6 +314,34 @@ class MQTTConfig:
                 f"Required for relative {description} path."
             )
         return os.path.join(plugin_dir, path)
+
+    @staticmethod
+    def _validate_secure_auth(mqtt_config: dict[str, Any]):
+        """Refuse username/password authentication over an unencrypted channel.
+
+        paho's ``username_pw_set`` and ``tls_set`` are configured by
+        independent gates, so credentials would otherwise be sent in cleartext
+        whenever auth is provided without a CA certificate. Require an explicit
+        'allow_insecure_auth' opt-in before permitting that.
+        """
+        auth: dict = mqtt_config.get("auth") or {}
+        if not (auth.get("username") and auth.get("password")):
+            return
+
+        tls: dict = mqtt_config.get("tls") or {}
+        if tls.get("ca_cert"):
+            return
+
+        allow_insecure: bool = (
+            str(mqtt_config.get("allow_insecure_auth", False)).lower() == "true"
+        )
+        if not allow_insecure:
+            raise ValueError(
+                "Refusing to send username/password over an unencrypted "
+                "connection: TLS is not configured (no 'ca_cert'). Configure "
+                "TLS, or set 'allow_insecure_auth' to true to permit cleartext "
+                "credentials (only on a trusted network)."
+            )
 
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
@@ -338,6 +425,23 @@ class MQTTConfig:
                 raise ValueError(
                     "Parameter 'mqtt.max_queue_bytes' must be a positive integer"
                 )
+
+        # Validate optional broker_port if present
+        if "broker_port" in mqtt_config:
+            broker_port = mqtt_config["broker_port"]
+            if not isinstance(broker_port, int) or not 1 <= broker_port <= 65535:
+                raise ValueError(
+                    "Parameter 'mqtt.broker_port' must be an integer between 1 and 65535"
+                )
+
+        # Validate optional allow_insecure_auth if present (accepts bool or string)
+        allow_insecure_auth = mqtt_config.get("allow_insecure_auth")
+        if allow_insecure_auth is not None and not isinstance(
+            allow_insecure_auth, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'mqtt.allow_insecure_auth' must be a boolean or string (true/false)"
+            )
 
         # Get message format (default to json if not specified)
         message_format: str = mqtt_config.get("format", "json")
@@ -479,10 +583,20 @@ class MQTTConfig:
         if max_queue_bytes <= 0:
             raise ValueError("Parameter 'max_queue_bytes' must be a positive integer")
 
+        broker_port: int = int(self.args.get("broker_port", 1883))
+        if not 1 <= broker_port <= 65535:
+            raise ValueError(
+                "Parameter 'broker_port' must be an integer between 1 and 65535"
+            )
+
+        allow_insecure_auth: bool = (
+            str(self.args.get("allow_insecure_auth", "false")).lower() == "true"
+        )
+
         return {
             "mqtt": {
                 "broker_host": self.args.get("broker_host"),
-                "broker_port": int(self.args.get("broker_port", 1883)),
+                "broker_port": broker_port,
                 "topics": topics_list,
                 "qos": int(self.args.get("qos", 1)),
                 "client_id": self.args.get("client_id", "influxdb3_mqtt_subscriber"),
@@ -490,6 +604,7 @@ class MQTTConfig:
                 "max_queue_bytes": max_queue_bytes,
                 "auth": auth_config,
                 "tls": tls_config,
+                "allow_insecure_auth": allow_insecure_auth,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -811,27 +926,12 @@ class MQTTConnectionManager:
             )
             return
 
-        # Save user-provided paths for error messages before resolving
-        ca_cert_orig = ca_cert
-        client_cert_orig = client_cert
-        client_key_orig = client_key
-
         # Resolve paths (absolute used as-is, relative resolved from PLUGIN_DIR)
         ca_cert = self._resolve_path(ca_cert, "CA certificate")
         if client_cert:
             client_cert = self._resolve_path(client_cert, "client certificate")
         if client_key:
             client_key = self._resolve_path(client_key, "client key")
-
-        # Validate certificate files exist
-        if not os.path.exists(ca_cert):
-            raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
-
-        if client_cert and not os.path.exists(client_cert):
-            raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
-
-        if client_key and not os.path.exists(client_key):
-            raise FileNotFoundError(f"TLS configuration failed. client_key not found: {client_key_orig}")
 
         try:
             self.client.tls_set(ca_certs=ca_cert, certfile=client_cert, keyfile=client_key)
@@ -1877,7 +1977,7 @@ def process_scheduled_call(
                     "text": config_loader.get_mapping_config("text"),
                 },
             }
-            influxdb3_local.cache.put("mqtt_config", cached_config)
+            influxdb3_local.cache.put("mqtt_config", cached_config, 60 * 60)
             influxdb3_local.info(
                 f"[{task_id}] MQTT Plugin initialized, format: {cached_config['mqtt']['format']}"
             )

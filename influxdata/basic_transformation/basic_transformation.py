@@ -169,7 +169,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import math
 
+import pint
 from pint import UnitRegistry
+
+# pint old versions parsed unit strings with eval(); refuse to run on a version below.
+_MIN_PINT_VERSION = (0, 20)
+_pint_version = tuple(int(p) for p in re.findall(r"\d+", pint.__version__)[:2])
+if _pint_version < _MIN_PINT_VERSION:
+    raise RuntimeError(
+        f"basic_transformation requires pint >= "
+        f"{'.'.join(map(str, _MIN_PINT_VERSION))}, found {pint.__version__}. "
+        f"Older versions parsed unit strings with eval(). Upgrade pint."
+    )
+
 
 def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -1033,11 +1045,22 @@ def transform_to_influx_line(
         builder.time_ns(timestamp)
 
         for tag in tags_list:
-            builder.tag(tag, row.get(tag))
+            if tag not in row:
+                continue
+            tag_value = row[tag]
+            if tag_value is None:
+                continue
+            builder.tag(tag, tag_value)
 
         for field_name in fields_list:
+            if field_name not in row:
+                continue
             value = row[field_name]
-            if isinstance(value, int):
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                builder.bool_field(field_name, value)
+            elif isinstance(value, int):
                 builder.int64_field(field_name, value)
             elif isinstance(value, float):
                 builder.float64_field(field_name, value)
@@ -1211,7 +1234,9 @@ def apply_unit_conversion_numeric(
 
     # 2) Parse transform_name
     m = re.fullmatch(
-        r"convert_([^_]+(?:_per_[^_]+)?)_to_([^_]+(?:_per_[^_]+)?)", transform_name
+        r"convert_([A-Za-z][A-Za-z0-9]*(?:_per_[A-Za-z][A-Za-z0-9]*)?)"
+        r"_to_([A-Za-z][A-Za-z0-9]*(?:_per_[A-Za-z][A-Za-z0-9]*)?)",
+        transform_name,
     )
     if not m:
         influxdb3_local.warn(
@@ -1428,6 +1453,13 @@ def process_scheduled_call(
         target_measurement: str = args["target_measurement"]
         window: timedelta = parse_time_interval(args["window"], task_id)
         target_database: str | None = args.get("target_database", None)
+        if target_measurement == measurement and not target_database:
+            influxdb3_local.warn(
+                f"[{task_id}] target_measurement '{target_measurement}' equals source measurement "
+                f"and 'target_database' is not set — each run will overwrite rows in the source "
+                f"table at the same tag+time. Set a different target_measurement or target_database "
+                f"if this is unintended."
+            )
         included_fields: list = parse_fields(args, "included_fields")
         excluded_fields: list = parse_fields(args, "excluded_fields")
         if included_fields and excluded_fields:
@@ -1771,6 +1803,13 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         measurement: str = args["measurement"]
         target_measurement: str = args["target_measurement"]
         target_database: str | None = args.get("target_database", None)
+        if target_measurement == measurement and not target_database:
+            influxdb3_local.error(
+                f"[{task_id}] target_measurement '{target_measurement}' equals source measurement "
+                f"and 'target_database' is not set — this would create an infinite write loop on an "
+                f"on-write trigger. Set a different target_measurement or target_database."
+            )
+            return
         included_fields: list = parse_fields(args, "included_fields")
         excluded_fields: list = parse_fields(args, "excluded_fields")
         if included_fields and excluded_fields:

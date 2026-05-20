@@ -1380,7 +1380,7 @@ def process_scheduled_call(
         influxdb3_local.info(f"[{task_id}] Downsampling job finished", summary_log)
 
     except Exception as e:
-        influxdb3_local.error(str(e))
+        influxdb3_local.error(f"[{task_id}] {e}")
 
 
 def process_request(
@@ -1402,12 +1402,24 @@ def process_request(
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Downsampling task started")
 
-    if request_body:
-        data: dict = json.loads(request_body)
-        influxdb3_local.info(f"[{task_id}] Request received.")
-    else:
+    if not request_body:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"message": f"[{task_id}] Error: No request body provided."}
+
+    max_body_bytes: int = 10 * 1024 * 1024  # 10 MiB
+    body_size: int = (
+        len(request_body)
+        if isinstance(request_body, (bytes, bytearray))
+        else len(request_body.encode("utf-8"))
+    )
+    if body_size > max_body_bytes:
+        influxdb3_local.error(
+            f"[{task_id}] Request body too large: {body_size} bytes (max {max_body_bytes})."
+        )
+        return {"message": f"[{task_id}] Error: Request body exceeds size limit."}
+
+    data: dict = json.loads(request_body)
+    influxdb3_local.info(f"[{task_id}] Request received.")
 
     try:
         start_time: float = time.time()
@@ -1479,8 +1491,19 @@ def process_request(
             "minutes": lambda x: timedelta(minutes=x),
             "hours": lambda x: timedelta(hours=x),
             "days": lambda x: timedelta(days=x),
+            "weeks": lambda x: timedelta(weeks=x),
         }
         batch_delta: timedelta = unit_mapping[unit.lower()](magnitude)
+
+        max_batches: int = 100_000
+        estimated_batches: float = (backfill_end - backfill_start) / batch_delta
+        if estimated_batches > max_batches:
+            influxdb3_local.error(
+                f"[{task_id}] Backfill range and batch_size would produce {int(estimated_batches)} "
+                f"batches, exceeding limit of {max_batches}. Increase batch_size or narrow the "
+                f"backfill window."
+            )
+            return {"message": f"[{task_id}] Error: Backfill range too large for batch_size."}
 
         influxdb3_local.info(
             f"[{task_id}] Starting downsampling for measurement {source_measurement} with fields: {fields} and tags: {tags} to query")
@@ -1603,5 +1626,5 @@ def process_request(
         }
 
     except Exception as e:
-        influxdb3_local.error(str(e))
+        influxdb3_local.error(f"[{task_id}] {e}")
         return {"message": str(e)}

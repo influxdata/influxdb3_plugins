@@ -426,13 +426,25 @@ class MQTTConfig:
                     "Parameter 'mqtt.max_queue_bytes' must be a positive integer"
                 )
 
-        # Validate optional broker_port if present
+        # Validate optional broker_port if present (accept int or numeric string)
         if "broker_port" in mqtt_config:
             broker_port = mqtt_config["broker_port"]
-            if not isinstance(broker_port, int) or not 1 <= broker_port <= 65535:
+            if isinstance(broker_port, bool) or not isinstance(broker_port, (int, str)):
                 raise ValueError(
                     "Parameter 'mqtt.broker_port' must be an integer between 1 and 65535"
                 )
+            try:
+                broker_port = int(broker_port)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid 'mqtt.broker_port': {mqtt_config['broker_port']!r}. "
+                    f"Must be an integer between 1 and 65535"
+                )
+            if not (1 <= broker_port <= 65535):
+                raise ValueError(
+                    "Parameter 'mqtt.broker_port' must be an integer between 1 and 65535"
+                )
+            mqtt_config["broker_port"] = broker_port
 
         # Validate optional allow_insecure_auth if present (accepts bool or string)
         allow_insecure_auth = mqtt_config.get("allow_insecure_auth")
@@ -583,7 +595,13 @@ class MQTTConfig:
         if max_queue_bytes <= 0:
             raise ValueError("Parameter 'max_queue_bytes' must be a positive integer")
 
-        broker_port: int = int(self.args.get("broker_port", 1883))
+        broker_port_arg = self.args.get("broker_port")
+        try:
+            broker_port: int = (
+                int(broker_port_arg) if broker_port_arg is not None else 1883
+            )
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid 'broker_port': {broker_port_arg!r}. Must be an integer.")
         if not 1 <= broker_port <= 65535:
             raise ValueError(
                 "Parameter 'broker_port' must be an integer between 1 and 65535"

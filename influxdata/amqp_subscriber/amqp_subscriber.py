@@ -127,6 +127,7 @@
 """
 
 import json
+import math
 import os
 import re
 import ssl
@@ -143,6 +144,11 @@ from jsonpath_ng.ext import parse as jsonpath_parse
 _CONNECTION_TIMEOUT = 10
 _MAX_MESSAGES = 500
 _PREFETCH_COUNT = 100
+
+# InfluxDB integer field ranges
+_INT64_MIN: int = -9223372036854775808
+_INT64_MAX: int = 9223372036854775807
+_UINT64_MAX: int = 18446744073709551615
 
 
 """
@@ -169,17 +175,46 @@ class _BatchLines:
         return self._built
 
 
+def _resolve_path(path: str, description: str) -> str:
+    """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
+    if os.path.isabs(path):
+        return path
+
+    plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
+    if not plugin_dir:
+        raise ValueError(
+            f"PLUGIN_DIR environment variable not set. "
+            f"Required for relative {description} path."
+        )
+    return os.path.join(plugin_dir, path)
+
+
 def add_field_with_type(line, field_key: str, value: Any, field_type: str):
     """Add field to LineBuilder with explicit type conversion.
 
     Supported types: int, uint, float, string, bool
     """
     if field_type == "int":
-        line.int64_field(field_key, int(value))
+        ival: int = int(value)
+        if not (_INT64_MIN <= ival <= _INT64_MAX):
+            raise ValueError(
+                f"int field '{field_key}' out of int64 range "
+                f"[{_INT64_MIN}, {_INT64_MAX}]: {ival}"
+            )
+        line.int64_field(field_key, ival)
     elif field_type == "uint":
-        line.uint64_field(field_key, int(value))
+        uval: int = int(value)
+        if not (0 <= uval <= _UINT64_MAX):
+            raise ValueError(
+                f"uint field '{field_key}' out of uint64 range "
+                f"[0, {_UINT64_MAX}]: {uval}"
+            )
+        line.uint64_field(field_key, uval)
     elif field_type == "float":
-        line.float64_field(field_key, float(value))
+        fval: float = float(value)
+        if not math.isfinite(fval):
+            raise ValueError(f"float field '{field_key}' is not finite: {fval}")
+        line.float64_field(field_key, fval)
     elif field_type == "string":
         line.string_field(field_key, str(value))
     elif field_type == "bool":
@@ -251,20 +286,6 @@ class AMQPConfig:
         else:
             self.config = self._build_config_from_args()
 
-    @staticmethod
-    def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
-        if os.path.isabs(path):
-            return path
-
-        plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path."
-            )
-        return os.path.join(plugin_dir, path)
-
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
         if not config_file.endswith(".toml"):
@@ -272,7 +293,7 @@ class AMQPConfig:
                 "Invalid config file format: expected a .toml file"
             )
 
-        config_path: str = self._resolve_path(config_file, "configuration file")
+        config_path: str = _resolve_path(config_file, "configuration file")
 
         try:
             with open(config_path, "rb") as f:
@@ -351,6 +372,26 @@ class AMQPConfig:
         queues: list[str] = amqp_config["queues"]
         if not isinstance(queues, list) or len(queues) == 0:
             raise ValueError("Parameter 'amqp.queues' must be a non-empty list")
+
+        # Validate port range if present (accept int or numeric string)
+        if "port" in amqp_config:
+            port = amqp_config["port"]
+            if isinstance(port, bool) or not isinstance(port, (int, str)):
+                raise ValueError(
+                    "Parameter 'amqp.port' must be an integer between 1 and 65535"
+                )
+            try:
+                port = int(port)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid 'amqp.port': {amqp_config['port']!r}. "
+                    f"Must be an integer between 1 and 65535"
+                )
+            if not (1 <= port <= 65535):
+                raise ValueError(
+                    "Parameter 'amqp.port' must be an integer between 1 and 65535"
+                )
+            amqp_config["port"] = port
 
         # Validate ack_policy if present
         ack_policy = amqp_config.get("ack_policy", "on_success")
@@ -523,10 +564,19 @@ class AMQPConfig:
         # Determine default port based on SSL
         default_port = 5671 if ssl_config else 5672
 
+        # Parse and validate port range
+        port_arg = self.args.get("port")
+        try:
+            port = int(port_arg) if port_arg is not None else default_port
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid port: '{port_arg}'. Must be an integer.")
+        if not (1 <= port <= 65535):
+            raise ValueError(f"Invalid port: {port}. Must be between 1 and 65535.")
+
         return {
             "amqp": {
                 "host": self.args.get("host"),
-                "port": int(self.args.get("port", default_port)),
+                "port": port,
                 "virtual_host": self.args.get("virtual_host", "/"),
                 "auth_mechanism": auth_mechanism,
                 "username": username,
@@ -769,20 +819,6 @@ class AMQPConsumerManager:
         self.channel: pika.adapters.blocking_connection.BlockingChannel | None = None
         self.connected: bool = False
 
-    @staticmethod
-    def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
-        if os.path.isabs(path):
-            return path
-
-        plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path."
-            )
-        return os.path.join(plugin_dir, path)
-
     def _build_ssl_context(self) -> ssl.SSLContext | None:
         """Build SSL context if SSL configuration is provided"""
         ssl_config = self.config.get("ssl", {})
@@ -795,7 +831,7 @@ class AMQPConsumerManager:
 
         # Resolve paths
         ca_cert_orig = ca_cert
-        ca_cert = self._resolve_path(ca_cert, "CA certificate")
+        ca_cert = _resolve_path(ca_cert, "CA certificate")
         if not os.path.exists(ca_cert):
             raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
 
@@ -811,8 +847,8 @@ class AMQPConsumerManager:
         if client_cert and client_key:
             client_cert_orig = client_cert
             client_key_orig = client_key
-            client_cert = self._resolve_path(client_cert, "client certificate")
-            client_key = self._resolve_path(client_key, "client key")
+            client_cert = _resolve_path(client_cert, "client certificate")
+            client_key = _resolve_path(client_key, "client key")
             if not os.path.exists(client_cert):
                 raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
             if not os.path.exists(client_key):
@@ -1156,16 +1192,17 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(
         self, data: dict[str, Any], path: str, cache_key: str | None = None
@@ -1479,33 +1516,28 @@ class TextParser:
     def _extract_value(
         self, text: str, pattern_str: str, field_name: str, cache_key: str | None = None
     ) -> str | None:
-        """Extract value from text using regex pattern"""
-        try:
-            if cache_key and cache_key in self._compiled_patterns:
-                pattern = self._compiled_patterns[cache_key]
-            else:
-                pattern = re.compile(pattern_str)
-
-            match = pattern.search(text)
-
-            if not match:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] Pattern for '{field_name}' did not match: "
-                    f"{pattern_str}"
-                )
-                return None
-
-            if match.groups():
-                return match.group(1)
-            else:
-                return match.group(0)
-
-        except re.error as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Invalid regex pattern for '{field_name}': "
-                f"{pattern_str} - {e}"
+        """Extract value from text using a pre-compiled regex pattern"""
+        pattern = self._compiled_patterns.get(cache_key) if cache_key else None
+        if pattern is None:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] No compiled pattern for '{field_name}' "
+                f"(pattern failed to compile at init): {pattern_str}"
             )
             return None
+
+        match = pattern.search(text)
+
+        if not match:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Pattern for '{field_name}' did not match: "
+                f"{pattern_str}"
+            )
+            return None
+
+        if match.groups():
+            return match.group(1)
+        else:
+            return match.group(0)
 
     def _get_timestamp(self, payload: str) -> int:
         """Extract and convert timestamp from text payload"""
@@ -1521,17 +1553,18 @@ class TextParser:
             payload, pattern_str, "timestamp", "timestamp"
         )
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class AMQPStats:

@@ -258,16 +258,18 @@ class MQTTConfig:
 
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
-        config_path: str = self._resolve_path(config_file, "configuration file")
+        if not config_file.endswith(".toml"):
+            raise ValueError(
+                "Invalid config file format: expected a .toml file"
+            )
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found or not accessible: {config_file}")
+        config_path: str = self._resolve_path(config_file, "configuration file")
 
         try:
             with open(config_path, "rb") as f:
                 config: dict[str, Any] = tomllib.load(f)
-        except OSError:
-            raise OSError(f"Configuration file not found or not accessible: {config_file}") from None
+        except Exception:
+            raise ValueError("Failed to read config file") from None
 
         # Validate required MQTT configuration
         self._validate_toml_config(config)

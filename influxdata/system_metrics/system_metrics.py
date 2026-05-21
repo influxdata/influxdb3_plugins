@@ -253,17 +253,21 @@ def process_scheduled_call(influxdb3_local, time, args=None):
         if args and 'config_file_path' in args:
             plugin_dir = os.environ.get('PLUGIN_DIR')
             if plugin_dir:
-                config_path = os.path.join(plugin_dir, args['config_file_path'])
-                try:
-                    with open(config_path, 'rb') as f:
-                        config = tomllib.load(f)
-                    # Override args with config values
-                    args.update(config)
-                    influxdb3_local.info(f"[{task_id}] Loaded configuration from {config_path}")
-                except FileNotFoundError:
-                    influxdb3_local.warn(f"[{task_id}] Config file not found: {config_path}")
-                except Exception as e:
-                    influxdb3_local.error(f"[{task_id}] Error loading config file: {e}")
+                config_file = args['config_file_path']
+                if not config_file.endswith('.toml'):
+                    influxdb3_local.error(
+                        f"[{task_id}] Invalid config file format: expected a .toml file"
+                    )
+                else:
+                    config_path = os.path.join(plugin_dir, config_file)
+                    try:
+                        with open(config_path, 'rb') as f:
+                            config = tomllib.load(f)
+                        # Override args with config values
+                        args.update(config)
+                        influxdb3_local.info(f"[{task_id}] Loaded configuration from {config_path}")
+                    except Exception:
+                        influxdb3_local.error(f"[{task_id}] Failed to read config file")
         
         # Set default values if args is None
         if args is None:

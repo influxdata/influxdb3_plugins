@@ -115,6 +115,12 @@ def load_schema(influxdb3_local, schema_file_path: str, task_id: str) -> dict | 
         influxdb3_local.error(f"[{task_id}] PLUGIN_DIR environment variable is not set")
         return None
 
+    if not schema_file_path.endswith(".json"):
+        influxdb3_local.error(
+            f"[{task_id}] Invalid schema file format: expected a .json file"
+        )
+        return None
+
     plugin_dir = Path(plugin_dir_var)
     file_path = plugin_dir / schema_file_path
 
@@ -125,14 +131,8 @@ def load_schema(influxdb3_local, schema_file_path: str, task_id: str) -> dict | 
         # Cache for 300 seconds (5 minutes) so config changes are picked up reasonably fast
         influxdb3_local.cache.put(cache_key, schema, ttl=300)
         return schema
-    except FileNotFoundError:
-        influxdb3_local.error(f"[{task_id}] Schema file not found: {file_path}")
-        return None
-    except json.JSONDecodeError as e:
-        influxdb3_local.error(f"[{task_id}] Invalid JSON in schema file: {e}")
-        return None
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to load schema file: {e}")
+    except Exception:
+        influxdb3_local.error(f"[{task_id}] Failed to read schema file")
         return None
 
 
@@ -451,6 +451,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         # ---- Load args from config file if specified ----
         if args:
             if path := args.get("config_file_path", None):
+                if not path.endswith(".toml"):
+                    influxdb3_local.error(
+                        f"[{task_id}] Invalid config file format: expected a .toml file"
+                    )
+                    return
                 try:
                     plugin_dir_var = os.getenv("PLUGIN_DIR", None)
                     if not plugin_dir_var:
@@ -461,8 +466,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                     influxdb3_local.info(f"[{task_id}] Reading trigger config from {file_path}")
                     with open(file_path, "rb") as f:
                         args = tomllib.load(f)
-                except Exception as e:
-                    influxdb3_local.error(f"[{task_id}] Failed to read config file: {e}")
+                except Exception:
+                    influxdb3_local.error(f"[{task_id}] Failed to read config file")
                     return
 
         # ---- Validate required args ----

@@ -41,6 +41,10 @@ topics = ["sensors/temperature", "sensors/humidity"]
 qos = 1
 client_id = "influxdb3_iot_collector"
 format = "json"
+# Maximum total bytes of MQTT payloads buffered between scheduled drains.
+# When exceeded, new messages are dropped and counted in the mqtt_stats table.
+# Default: 67108864 (64 MiB). Uncomment to override.
+# max_queue_bytes = 67108864
 
 # Optional authentication (uncomment if needed)
 # [mqtt.auth]

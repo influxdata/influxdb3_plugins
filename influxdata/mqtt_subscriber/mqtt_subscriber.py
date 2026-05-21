@@ -75,6 +75,12 @@
             "required": false
         },
         {
+            "name": "max_queue_bytes",
+            "example": "67108864",
+            "description": "Maximum total bytes of MQTT payloads buffered between scheduled drains. New messages are dropped when this budget is exhausted to bound memory use. Default: 67108864 (64 MiB).",
+            "required": false
+        },
+        {
             "name": "username",
             "example": "mqtt_user",
             "description": "MQTT broker username. Both username and password must be provided together.",
@@ -125,8 +131,6 @@ from paho.mqtt.client import CallbackAPIVersion, Client
 """
 Helper for batching multiple line protocol builders into a single write.
 """
-
-
 @runtime_checkable
 class _LineBuilderInterface(Protocol):
     def build(self) -> str: ...
@@ -325,6 +329,14 @@ class MQTTConfig:
         if not isinstance(topics, list) or len(topics) == 0:
             raise ValueError("Parameter 'mqtt.topics' must be a non-empty list")
 
+        # Validate optional max_queue_bytes if present
+        if "max_queue_bytes" in mqtt_config:
+            max_queue_bytes = mqtt_config["max_queue_bytes"]
+            if not isinstance(max_queue_bytes, int) or max_queue_bytes <= 0:
+                raise ValueError(
+                    "Parameter 'mqtt.max_queue_bytes' must be a positive integer"
+                )
+
         # Get message format (default to json if not specified)
         message_format: str = mqtt_config.get("format", "json")
 
@@ -461,6 +473,10 @@ class MQTTConfig:
                     "Both client_cert and client_key must be provided for mutual TLS"
                 )
 
+        max_queue_bytes: int = int(self.args.get("max_queue_bytes", 67108864))
+        if max_queue_bytes <= 0:
+            raise ValueError("Parameter 'max_queue_bytes' must be a positive integer")
+
         return {
             "mqtt": {
                 "broker_host": self.args.get("broker_host"),
@@ -469,6 +485,7 @@ class MQTTConfig:
                 "qos": int(self.args.get("qos", 1)),
                 "client_id": self.args.get("client_id", "influxdb3_mqtt_subscriber"),
                 "format": self.args.get("format", "json"),
+                "max_queue_bytes": max_queue_bytes,
                 "auth": auth_config,
                 "tls": tls_config,
             },
@@ -738,6 +755,12 @@ class MQTTConnectionManager:
         self.message_queue: Queue = Queue()
         self.connected: bool = False
         self.subscribed_topics: set[str] = set()
+        # Memory budget for queued payloads. Once exceeded, new messages are
+        # dropped to bound the plugin's memory footprint between drains.
+        self.max_queue_bytes: int = int(config.get("max_queue_bytes", 67108864))
+        self.queue_bytes: int = 0
+        self.dropped_by_topic: dict[str, int] = {}
+        self._drop_logged: bool = False
 
     @staticmethod
     def _create_mqtt_client(client_id: str):
@@ -920,13 +943,31 @@ class MQTTConnectionManager:
     def _on_message(self, client, userdata, msg):
         """Callback when message is received"""
         try:
+            payload_size: int = len(msg.payload)
+
+            # Memory-budget guard
+            if self.queue_bytes + payload_size > self.max_queue_bytes:
+                self.dropped_by_topic[msg.topic] = (
+                    self.dropped_by_topic.get(msg.topic, 0) + 1
+                )
+                if not self._drop_logged:
+                    self._drop_logged = True
+                    self.influxdb3_local.error(
+                        f"[{self.task_id}] Queue memory budget exhausted "
+                        f"({self.queue_bytes}/{self.max_queue_bytes} bytes); "
+                        f"dropping messages (first drop on topic {msg.topic}, "
+                        f"payload {payload_size} bytes). "
+                        f"Further drops this cycle will be counted silently."
+                    )
+                return
+
             # Attempt to decode payload as UTF-8
             try:
                 payload: str = msg.payload.decode("utf-8")
             except UnicodeDecodeError:
                 # Binary payload - skip with warning
                 self.influxdb3_local.warn(
-                    f"[{self.task_id}] Skipping binary message on topic {msg.topic} ({len(msg.payload)} bytes) - only UTF-8 text supported"
+                    f"[{self.task_id}] Skipping binary message on topic {msg.topic} ({payload_size} bytes) - only UTF-8 text supported"
                 )
                 return
 
@@ -942,8 +983,10 @@ class MQTTConnectionManager:
                 "topic": msg.topic,
                 "payload": payload,
                 "qos": msg.qos,
+                "_size": payload_size,
             }
 
+            self.queue_bytes += payload_size
             self.message_queue.put(message_data)
 
         except Exception as e:
@@ -952,16 +995,29 @@ class MQTTConnectionManager:
             )
 
     def get_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all messages from queue"""
+        """Retrieve all messages from queue and release their byte budget."""
         messages: list = []
+        drained_bytes: int = 0
         try:
             while True:
                 message = self.message_queue.get_nowait()
+                drained_bytes += message.pop("_size", 0)
                 messages.append(message)
         except Empty:
             pass
 
+        # Decrement (rather than reset to 0) so that any messages that arrive
+        # concurrently during drain remain accounted for.
+        self.queue_bytes = max(0, self.queue_bytes - drained_bytes)
+        self._drop_logged = False
+
         return messages
+
+    def get_drop_counters(self) -> dict[str, int]:
+        """Return per-topic drop counts accumulated since the last call and reset them."""
+        snapshot: dict[str, int] = dict(self.dropped_by_topic)
+        self.dropped_by_topic.clear()
+        return snapshot
 
     def disconnect(self):
         """Disconnect from MQTT broker"""
@@ -1647,38 +1703,46 @@ class MQTTStats:
 
     def reset(self):
         """Reset all statistics"""
-        self.messages_received: int = 0
-        self.messages_processed: int = 0
-        self.messages_failed: int = 0
-        # Track detailed stats per topic: {topic: {received, processed, failed}}
+        # Track detailed stats per topic: {topic: {received, processed, failed, dropped}}
         self.stats_by_topic: dict = {}
-        self.last_message_time: int | None = None
         self.current_topic: str | None = None  # Track current topic being processed
+
+    @staticmethod
+    def _empty_topic_stats() -> dict[str, int]:
+        return {"received": 0, "processed": 0, "failed": 0, "dropped": 0}
 
     def record_message_received(self, topic: str, count: int = 1):
         """Record received message(s)"""
-        self.messages_received += count
-        self.last_message_time = time.time_ns()
         self.current_topic = topic
 
         # Initialize topic stats if needed
         if topic not in self.stats_by_topic:
-            self.stats_by_topic[topic] = {"received": 0, "processed": 0, "failed": 0}
+            self.stats_by_topic[topic] = self._empty_topic_stats()
 
         self.stats_by_topic[topic]["received"] += count
 
+    def record_message_dropped(self, topic: str, count: int = 1):
+        """Record message(s) dropped by the queue-bytes guard.
+
+        Dropped messages still increment the per-topic received counter because
+        they did arrive from the broker, we just refused to buffer them.
+        """
+        if topic not in self.stats_by_topic:
+            self.stats_by_topic[topic] = self._empty_topic_stats()
+        else:
+            self.stats_by_topic[topic].setdefault("dropped", 0)
+
+        self.stats_by_topic[topic]["received"] += count
+        self.stats_by_topic[topic]["dropped"] += count
+
     def record_message_processed(self, count: int = 1):
         """Record successfully processed message(s)"""
-        self.messages_processed += count
-
         # Update current topic stats
         if self.current_topic and self.current_topic in self.stats_by_topic:
             self.stats_by_topic[self.current_topic]["processed"] += count
 
     def record_message_failed(self, count: int = 1):
         """Record failed message(s)"""
-        self.messages_failed += count
-
         # Update current topic stats
         if self.current_topic and self.current_topic in self.stats_by_topic:
             self.stats_by_topic[self.current_topic]["failed"] += count
@@ -1687,7 +1751,8 @@ class MQTTStats:
         """Get statistics by topic with calculated success rates"""
         result: dict = {}
         for topic, stats in self.stats_by_topic.items():
-            total: int = stats["processed"] + stats["failed"]
+            dropped: int = stats.get("dropped", 0)
+            total: int = stats["processed"] + stats["failed"] + dropped
             success_rate: float = (
                 (stats["processed"] / total * 100) if total > 0 else 0.0
             )
@@ -1696,6 +1761,7 @@ class MQTTStats:
                 "received": stats["received"],
                 "processed": stats["processed"],
                 "failed": stats["failed"],
+                "dropped": stats.get("dropped", 0),
                 "success_rate": round(success_rate, 2),
             }
         return result
@@ -1726,6 +1792,7 @@ def write_stats(influxdb3_local, stats: MQTTStats, broker_host: str, task_id: st
             line.int64_field("messages_received", topic_data["received"])
             line.int64_field("messages_processed", topic_data["processed"])
             line.int64_field("messages_failed", topic_data["failed"])
+            line.int64_field("messages_dropped", topic_data["dropped"])
             line.float64_field("success_rate", topic_data["success_rate"])
 
             line.time_ns(time.time_ns())
@@ -1835,6 +1902,18 @@ def process_scheduled_call(
 
         # Retrieve messages from queue
         messages: list = mqtt_client.get_messages()
+
+        # Fold per-topic drop counts (queue-bytes budget exhaustion) into stats.
+        drops: dict[str, int] = mqtt_client.get_drop_counters()
+        if drops:
+            total_dropped: int = sum(drops.values())
+            for dropped_topic, dropped_count in drops.items():
+                stats.record_message_dropped(dropped_topic, dropped_count)
+            influxdb3_local.error(
+                f"[{task_id}] Dropped {total_dropped} message(s) this cycle due to "
+                f"queue memory budget (max_queue_bytes={mqtt_client.max_queue_bytes}); "
+                f"per-topic drops: {drops}"
+            )
 
         broker_str: str = (
             f"{mqtt_config.get('broker_host')}:{mqtt_config.get('broker_port')}"

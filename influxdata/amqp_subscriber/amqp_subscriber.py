@@ -27,15 +27,21 @@
             "required": false
         },
         {
+            "name": "auth_mechanism",
+            "example": "plain",
+            "description": "AMQP authentication mechanism: 'plain' (username/password) or 'external' (client TLS certificate). Default: 'plain'.",
+            "required": false
+        },
+        {
             "name": "username",
-            "example": "guest",
-            "description": "AMQP broker username. Default: 'guest'.",
+            "example": "amqp_user",
+            "description": "AMQP broker username. Required when auth_mechanism is 'plain'.",
             "required": false
         },
         {
             "name": "password",
-            "example": "guest",
-            "description": "AMQP broker password. Default: 'guest'.",
+            "example": "amqp_password",
+            "description": "AMQP broker password. Required when auth_mechanism is 'plain'.",
             "required": false
         },
         {
@@ -227,6 +233,7 @@ class AMQPConfig:
     VALID_TIMESTAMP_FORMATS = {"ns", "ms", "s", "datetime"}
     VALID_FIELD_TYPES = {"int", "uint", "float", "string", "bool"}
     VALID_ACK_POLICIES = {"on_success", "always"}
+    VALID_AUTH_MECHANISMS = {"plain", "external"}
 
     def __init__(self, influxdb3_local, args: dict[str, str] | None, task_id: str):
         self.influxdb3_local = influxdb3_local
@@ -295,6 +302,36 @@ class AMQPConfig:
         else:
             return {"field": timestamp_field.strip(), "format": "ns"}
 
+    def _validate_auth(
+        self,
+        auth_mechanism: str,
+        username: str | None,
+        password: str | None,
+        ssl_config: dict,
+    ):
+        """Validate authentication mechanism and its required parameters."""
+        if auth_mechanism not in self.VALID_AUTH_MECHANISMS:
+            raise ValueError(
+                f"Invalid auth_mechanism: {auth_mechanism}. "
+                f"Supported: {', '.join(sorted(self.VALID_AUTH_MECHANISMS))}"
+            )
+
+        if auth_mechanism == "plain":
+            if not username or not password:
+                raise ValueError(
+                    "auth_mechanism 'plain' requires both username and password"
+                )
+        else:  # external
+            if not ssl_config.get("ca_cert"):
+                raise ValueError(
+                    "auth_mechanism 'external' requires TLS: provide ssl_ca_cert"
+                )
+            if not ssl_config.get("client_cert") or not ssl_config.get("client_key"):
+                raise ValueError(
+                    "auth_mechanism 'external' requires mutual TLS: provide "
+                    "ssl_client_cert and ssl_client_key"
+                )
+
     def _validate_toml_config(self, config: dict[str, Any]):
         """Validate that all required configuration parameters are present"""
         if "amqp" not in config:
@@ -332,6 +369,14 @@ class AMQPConfig:
         max_messages = amqp_config.get("max_messages", _MAX_MESSAGES)
         if not isinstance(max_messages, int) or max_messages < 1:
             raise ValueError("max_messages must be a positive integer")
+
+        # Validate authentication mechanism and its required parameters
+        self._validate_auth(
+            amqp_config.get("auth_mechanism", "plain"),
+            amqp_config.get("username"),
+            amqp_config.get("password"),
+            amqp_config.get("ssl") or {},
+        )
 
         # Get message format (default to json if not specified)
         message_format: str = amqp_config.get("format", "json")
@@ -469,6 +514,12 @@ class AMQPConfig:
                 "Both ssl_client_cert and ssl_client_key must be provided for mutual TLS"
             )
 
+        # Parse and validate authentication mechanism
+        auth_mechanism = self.args.get("auth_mechanism", "plain").strip().lower()
+        username = self.args.get("username")
+        password = self.args.get("password")
+        self._validate_auth(auth_mechanism, username, password, ssl_config)
+
         # Determine default port based on SSL
         default_port = 5671 if ssl_config else 5672
 
@@ -477,8 +528,9 @@ class AMQPConfig:
                 "host": self.args.get("host"),
                 "port": int(self.args.get("port", default_port)),
                 "virtual_host": self.args.get("virtual_host", "/"),
-                "username": self.args.get("username", "guest"),
-                "password": self.args.get("password", "guest"),
+                "auth_mechanism": auth_mechanism,
+                "username": username,
+                "password": password,
                 "queues": queues_list,
                 "format": self.args.get("format", "json"),
                 "ack_policy": ack_policy,
@@ -779,10 +831,14 @@ class AMQPConsumerManager:
         default_port = 5671 if ssl_config else 5672
         port = self.config.get("port", default_port)
         virtual_host = self.config.get("virtual_host", "/")
-        username = self.config.get("username", "guest")
-        password = self.config.get("password", "guest")
 
-        credentials = pika.PlainCredentials(username, password)
+        auth_mechanism = self.config.get("auth_mechanism", "plain")
+        if auth_mechanism == "external":
+            credentials = pika.credentials.ExternalCredentials()
+        else:
+            username = self.config.get("username")
+            password = self.config.get("password")
+            credentials = pika.PlainCredentials(username, password)
 
         # Build SSL options
         ssl_context = self._build_ssl_context()

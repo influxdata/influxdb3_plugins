@@ -95,6 +95,7 @@ is_running = "ns=2;s=MachineRunning"
 # [opcua]
 # server_url = "opc.tcp://plc-controller.local:4840"
 # table_name = "plc_data"
+# allow_insecure_auth = true   # required to send credentials without encryption
 
 # [opcua.auth]
 # username = "operator"
@@ -271,6 +272,7 @@ is_running = "ns=2;s=MachineRunning"
 # [opcua]
 # server_url = "opc.tcp://10.0.2.50:4840"
 # table_name = "plc_data"
+# allow_insecure_auth = true   # required to send credentials without encryption
 
 # [opcua.auth]
 # username = "monitor"

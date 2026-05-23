@@ -133,6 +133,7 @@
 """
 
 import json
+import math
 import os
 import re
 import time
@@ -148,6 +149,11 @@ from jsonpath_ng.ext import parse as jsonpath_parse
 _POLL_TIMEOUT_MS = 1000
 _POLL_TIMEOUT_MS_FAST = 100
 _MAX_POLL_RECORDS = 500
+
+# InfluxDB integer field ranges
+_INT64_MIN: int = -9223372036854775808
+_INT64_MAX: int = 9223372036854775807
+_UINT64_MAX: int = 18446744073709551615
 
 """
 Helper for batching multiple line protocol builders into a single write.
@@ -179,11 +185,26 @@ def add_field_with_type(line, field_key: str, value: Any, field_type: str):
     Supported types: int, uint, float, string, bool
     """
     if field_type == "int":
-        line.int64_field(field_key, int(value))
+        ival: int = int(value)
+        if not (_INT64_MIN <= ival <= _INT64_MAX):
+            raise ValueError(
+                f"int field '{field_key}' out of int64 range "
+                f"[{_INT64_MIN}, {_INT64_MAX}]: {ival}"
+            )
+        line.int64_field(field_key, ival)
     elif field_type == "uint":
-        line.uint64_field(field_key, int(value))
+        uval: int = int(value)
+        if not (0 <= uval <= _UINT64_MAX):
+            raise ValueError(
+                f"uint field '{field_key}' out of uint64 range "
+                f"[0, {_UINT64_MAX}]: {uval}"
+            )
+        line.uint64_field(field_key, uval)
     elif field_type == "float":
-        line.float64_field(field_key, float(value))
+        fval: float = float(value)
+        if not math.isfinite(fval):
+            raise ValueError(f"float field '{field_key}' is not finite: {fval}")
+        line.float64_field(field_key, fval)
     elif field_type == "string":
         line.string_field(field_key, str(value))
     elif field_type == "bool":
@@ -271,6 +292,26 @@ class KafkaConfig:
             )
         return os.path.join(plugin_dir, path)
 
+    @staticmethod
+    def _validate_topics(topics: list) -> None:
+        """Reject regex topic subscriptions (leading '^')."""
+        for topic in topics:
+            if isinstance(topic, str) and topic.startswith("^"):
+                raise ValueError(
+                    f"Invalid topic '{topic}': regex topic subscriptions "
+                    f"(leading '^') are not allowed"
+                )
+
+    @staticmethod
+    def _validate_bootstrap_servers(servers: list) -> None:
+        """Validate each bootstrap server is in 'host:port' form."""
+        for server in servers:
+            if not isinstance(server, str) or not re.match(r"^[^,\s]+:\d+$", server):
+                raise ValueError(
+                    f"Invalid bootstrap server '{server}'. "
+                    f"Expected 'host:port' format."
+                )
+
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
         if not config_file.endswith(".toml"):
@@ -336,11 +377,13 @@ class KafkaConfig:
             raise ValueError(
                 "Parameter 'kafka.bootstrap_servers' must be a non-empty list"
             )
+        self._validate_bootstrap_servers(servers)
 
         # Validate topics is a non-empty list
         topics: list[str] = kafka_config["topics"]
         if not isinstance(topics, list) or len(topics) == 0:
             raise ValueError("Parameter 'kafka.topics' must be a non-empty list")
+        self._validate_topics(topics)
 
         # Validate security_protocol if present
         security_protocol = kafka_config.get("security_protocol", "PLAINTEXT")
@@ -491,6 +534,9 @@ class KafkaConfig:
         # Parse space-separated values into lists
         topics_list: list[str] = self.args.get("topics").split()
         servers_list: list[str] = self.args.get("bootstrap_servers").split()
+
+        self._validate_topics(topics_list)
+        self._validate_bootstrap_servers(servers_list)
 
         # Validate offset_commit_policy
         commit_policy = self.args.get("offset_commit_policy", "on_success")
@@ -866,27 +912,25 @@ class KafkaConsumerManager:
         if "SSL" in security_protocol:
             ssl_config = self.config.get("ssl", {})
 
+            # Pin TLS verification explicitly
+            consumer_config["enable.ssl.certificate.verification"] = True
+            consumer_config["ssl.endpoint.identification.algorithm"] = "https"
+
             ca_cert = ssl_config.get("ca_cert")
             if ca_cert:
-                ca_cert_orig = ca_cert
-                ca_cert = self._resolve_path(ca_cert, "CA certificate")
-                if not os.path.exists(ca_cert):
-                    raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
-                consumer_config["ssl.ca.location"] = ca_cert
+                consumer_config["ssl.ca.location"] = self._resolve_path(
+                    ca_cert, "CA certificate"
+                )
 
             client_cert = ssl_config.get("client_cert")
             client_key = ssl_config.get("client_key")
             if client_cert and client_key:
-                client_cert_orig = client_cert
-                client_key_orig = client_key
-                client_cert = self._resolve_path(client_cert, "client certificate")
-                client_key = self._resolve_path(client_key, "client key")
-                if not os.path.exists(client_cert):
-                    raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
-                if not os.path.exists(client_key):
-                    raise FileNotFoundError(f"TLS configuration failed. client_key not found: {client_key_orig}")
-                consumer_config["ssl.certificate.location"] = client_cert
-                consumer_config["ssl.key.location"] = client_key
+                consumer_config["ssl.certificate.location"] = self._resolve_path(
+                    client_cert, "client certificate"
+                )
+                consumer_config["ssl.key.location"] = self._resolve_path(
+                    client_key, "client key"
+                )
 
                 key_password = ssl_config.get("key_password")
                 if key_password:
@@ -1291,16 +1335,17 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(
         self, data: dict[str, Any], path: str, cache_key: str | None = None
@@ -1343,7 +1388,14 @@ class LineProtocolParser:
 
             measurement_and_tags: str = parts[0]
             fields_str: str = parts[1]
-            timestamp_ns: int | None = int(parts[2]) if len(parts) == 3 else None
+            timestamp_ns: int | None = None
+            if len(parts) == 3:
+                timestamp_ns = int(parts[2])
+                if not (_INT64_MIN <= timestamp_ns <= _INT64_MAX):
+                    raise ValueError(
+                        f"line protocol timestamp out of int64 range "
+                        f"[{_INT64_MIN}, {_INT64_MAX}]: {timestamp_ns}"
+                    )
 
             measurement, tags = self._parse_measurement_and_tags(measurement_and_tags)
 
@@ -1609,33 +1661,27 @@ class TextParser:
     def _extract_value(
         self, text: str, pattern_str: str, field_name: str, cache_key: str | None = None
     ) -> str | None:
-        """Extract value from text using regex pattern"""
-        try:
-            if cache_key and cache_key in self._compiled_patterns:
-                pattern = self._compiled_patterns[cache_key]
-            else:
-                pattern = re.compile(pattern_str)
-
-            match = pattern.search(text)
-
-            if not match:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] Pattern for '{field_name}' did not match: "
-                    f"{pattern_str}"
-                )
-                return None
-
-            if match.groups():
-                return match.group(1)
-            else:
-                return match.group(0)
-
-        except re.error as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Invalid regex pattern for '{field_name}': "
-                f"{pattern_str} - {e}"
+        """Extract value from text using a pre-compiled regex pattern"""
+        pattern = self._compiled_patterns.get(cache_key) if cache_key else None
+        if pattern is None:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] No compiled pattern for '{field_name}' "
+                f"(pattern failed to compile at init): {pattern_str}"
             )
             return None
+
+        match = pattern.search(text)
+        if not match:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Pattern for '{field_name}' did not match: "
+                f"{pattern_str}"
+            )
+            return None
+
+        if match.groups():
+            return match.group(1)
+        else:
+            return match.group(0)
 
     def _get_timestamp(self, payload: str) -> int:
         """Extract and convert timestamp from text payload"""
@@ -1651,17 +1697,18 @@ class TextParser:
             payload, pattern_str, "timestamp", "timestamp"
         )
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class KafkaStats:

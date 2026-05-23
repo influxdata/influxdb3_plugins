@@ -830,29 +830,20 @@ class AMQPConsumerManager:
             return None
 
         # Resolve paths
-        ca_cert_orig = ca_cert
         ca_cert = _resolve_path(ca_cert, "CA certificate")
-        if not os.path.exists(ca_cert):
-            raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
 
         # Create SSL context
         try:
             ssl_context = ssl.create_default_context(cafile=ca_cert)
         except Exception:
-            raise OSError(f"TLS configuration failed. ca_cert not usable: {ca_cert_orig}") from None
+            raise OSError("TLS configuration failed. Check CA certificate file.") from None
 
         # Client certificate for mutual TLS
         client_cert = ssl_config.get("client_cert")
         client_key = ssl_config.get("client_key")
         if client_cert and client_key:
-            client_cert_orig = client_cert
-            client_key_orig = client_key
             client_cert = _resolve_path(client_cert, "client certificate")
             client_key = _resolve_path(client_key, "client key")
-            if not os.path.exists(client_cert):
-                raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
-            if not os.path.exists(client_key):
-                raise FileNotFoundError(f"TLS configuration failed. client_key not found: {client_key_orig}")
             try:
                 ssl_context.load_cert_chain(client_cert, client_key)
             except Exception:

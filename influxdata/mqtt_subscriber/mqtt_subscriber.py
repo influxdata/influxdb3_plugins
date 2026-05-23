@@ -1349,15 +1349,16 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(self, data: dict[str, Any], path: str, cache_key: str | None = None) -> Any:
         """Get value from JSON using JSONPath notation.
@@ -1802,17 +1803,18 @@ class TextParser:
 
         timestamp_value: Any = self._extract_value(payload, pattern_str, "timestamp", "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         # Convert timestamp based on format
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class MQTTStats:

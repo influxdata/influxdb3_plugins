@@ -882,6 +882,14 @@ When using a security policy, both files are required:
 - Configuration is cached for 1 hour — either wait for expiry or set `disable_config_cache = true`
 - Any plugin error automatically clears the cache
 
+#### "Previous opcua call still running, skipping this tick"
+
+- The plugin reuses a single cached connection and event loop, which cannot be used by two calls at once. With an asynchronous trigger (`--run-asynchronous`), scheduled invocations may overlap; if a call is still running when the next tick fires, that tick is skipped instead of failing.
+- Occasional skips are harmless. Frequent skips mean each read takes longer than the interval — reduce the per-call runtime or give it more time:
+  - Read fewer nodes per trigger, or narrow browse mode (smaller `browse_depth`, tighter `filter`/`exclude_branches`)
+  - Increase the trigger interval (e.g. `--trigger-spec "every:30s"` instead of `every:10s`)
+  - Check for a slow or unreachable server adding connection latency
+
 ## Limitations
 
 - **Polling only**: The plugin reads current values on each scheduled call. It does not use OPC UA subscriptions for change-based monitoring. Fast-changing signals may be missed between polling intervals.

@@ -153,6 +153,7 @@
 import asyncio
 import os
 import re
+import threading
 import time
 import tomllib
 import uuid
@@ -198,6 +199,9 @@ _VALID_SECURITY_POLICIES = {
     "Aes128Sha256RsaOaep",
     "Aes256Sha256RsaPss",
 }
+# Deprecated / cryptographically weak policies (SHA-1, RSA PKCS#1 v1.5).
+# Accepted for backward compatibility but warned about.
+_DEPRECATED_SECURITY_POLICIES = {"Basic128Rsa15", "Basic256"}
 _VALID_SECURITY_MODES = {"Sign", "SignAndEncrypt"}
 _VALID_QUALITY_CATEGORIES = {"good", "uncertain", "bad"}
 _DEFAULT_QUALITY_FILTER = {"good"}
@@ -478,6 +482,12 @@ class OPCUAConfig:
                 raise ValueError(
                     f"Invalid security_policy: {policy}. "
                     f"Supported: {', '.join(sorted(_VALID_SECURITY_POLICIES))}"
+                )
+            if policy in _DEPRECATED_SECURITY_POLICIES:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] security_policy '{policy}' is deprecated and "
+                    f"cryptographically weak (SHA-1 / RSA PKCS#1 v1.5). Prefer "
+                    f"Basic256Sha256 or an Aes*Sha256* policy."
                 )
             mode = security.get("security_mode", "SignAndEncrypt")
             if mode not in _VALID_SECURITY_MODES:
@@ -849,6 +859,12 @@ class OPCUAConfig:
                     f"Invalid security_policy: {security_policy}. "
                     f"Supported: {', '.join(sorted(_VALID_SECURITY_POLICIES))}"
                 )
+            if security_policy in _DEPRECATED_SECURITY_POLICIES:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] security_policy '{security_policy}' is "
+                    f"deprecated and cryptographically weak (SHA-1 / RSA PKCS#1 "
+                    f"v1.5). Prefer Basic256Sha256 or an Aes*Sha256* policy."
+                )
             security_config["security_policy"] = security_policy
 
             if security_mode:
@@ -1030,18 +1046,14 @@ class OPCUAConnectionManager:
 
             if policy:
                 mode = security.get("security_mode", "SignAndEncrypt")
-                cert_orig = security["certificate"]
-                key_orig = security["private_key"]
-                cert_path = _resolve_path(cert_orig, "client certificate")
-                key_path = _resolve_path(key_orig, "client private key")
+                cert_path = _resolve_path(security["certificate"], "client certificate")
+                key_path = _resolve_path(security["private_key"], "client private key")
 
-                if not os.path.exists(cert_path):
-                    raise FileNotFoundError(
-                        f"Security configuration failed. certificate not found: {cert_orig}"
-                    )
-                if not os.path.exists(key_path):
-                    raise FileNotFoundError(
-                        f"Security configuration failed. private_key not found: {key_orig}"
+                # set_security_string is comma-delimited; a comma in a path would
+                # break parsing and silently apply the wrong policy/files.
+                if "," in cert_path or "," in key_path:
+                    raise ValueError(
+                        "certificate and private_key paths must not contain commas"
                     )
 
                 security_string = f"{policy},{mode},{cert_path},{key_path}"
@@ -1235,7 +1247,11 @@ class OPCUAConnectionManager:
 
         try:
             children = await node.get_children()
-        except Exception:
+        except Exception as e:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Browse: cannot read children of "
+                f"{node.nodeid.to_string()}: {type(e).__name__}: {e}"
+            )
             return
 
         variables: dict[str, str] = {}
@@ -1268,7 +1284,11 @@ class OPCUAConnectionManager:
                             child, remaining_depth - 1, filter_re, exclude_re,
                             f"{browse_name}_", variables,
                         )
-            except Exception:
+            except Exception as e:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] Browse: skipping node "
+                    f"{child.nodeid.to_string()}: {type(e).__name__}: {e}"
+                )
                 continue
 
         if variables:
@@ -1295,7 +1315,11 @@ class OPCUAConnectionManager:
 
         try:
             children = await node.get_children()
-        except Exception:
+        except Exception as e:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Browse: cannot read children of "
+                f"{node.nodeid.to_string()}: {type(e).__name__}: {e}"
+            )
             return
 
         for child in children:
@@ -1315,7 +1339,11 @@ class OPCUAConnectionManager:
                         child, remaining_depth - 1, filter_re, exclude_re,
                         f"{prefix}{browse_name}_", variables,
                     )
-            except Exception:
+            except Exception as e:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] Browse: skipping node "
+                    f"{child.nodeid.to_string()}: {type(e).__name__}: {e}"
+                )
                 continue
 
     async def read_browsed_nodes(
@@ -1943,13 +1971,8 @@ async def _async_scheduled_call(
                 total_errors += total_fields
                 total_fields = 0
 
-        # ── 7. Stats every 10 calls ──────────────────────────────────────────
-        call_count: int = influxdb3_local.cache.get("opcua_call_count") or 0
-        call_count += 1
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, server_url, table_name, task_id)
-            call_count = 0
-        influxdb3_local.cache.put("opcua_call_count", call_count)
+        # ── 7. Write stats every call ────────────────────────────────────────
+        write_stats(influxdb3_local, stats, server_url, table_name, task_id)
 
         # ── 7. Summary log ───────────────────────────────────────────────────
         if total_fields > 0 or total_errors > 0:
@@ -1989,12 +2012,29 @@ def process_scheduled_call(
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Starting opcua plugin")
 
-    loop: asyncio.AbstractEventLoop | None = influxdb3_local.cache.get(
-        "opcua_event_loop"
-    )
-    if loop is None or loop.is_closed():
-        loop = asyncio.new_event_loop()
-        influxdb3_local.info(f"[{task_id}] Creating a new event loop")
-        influxdb3_local.cache.put("opcua_event_loop", loop)
+    # Lock lives in the shared cache so it is shared across async invocations.
+    # Skip this tick if a previous call still holds the loop.
+    lock = influxdb3_local.cache.get("opcua_call_lock")
+    if lock is None:
+        lock = threading.Lock()
+        influxdb3_local.cache.put("opcua_call_lock", lock)
 
-    loop.run_until_complete(_async_scheduled_call(influxdb3_local, task_id, args))
+    if not lock.acquire(blocking=False):
+        influxdb3_local.warn(
+            f"[{task_id}] Previous opcua call still running, skipping this tick. "
+            f"Reduce plugin runtime (fewer nodes) or increase the trigger interval."
+        )
+        return
+
+    try:
+        loop: asyncio.AbstractEventLoop | None = influxdb3_local.cache.get(
+            "opcua_event_loop"
+        )
+        if loop is None or loop.is_closed():
+            loop = asyncio.new_event_loop()
+            influxdb3_local.info(f"[{task_id}] Creating a new event loop")
+            influxdb3_local.cache.put("opcua_event_loop", loop)
+
+        loop.run_until_complete(_async_scheduled_call(influxdb3_local, task_id, args))
+    finally:
+        lock.release()

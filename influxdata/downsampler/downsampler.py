@@ -73,6 +73,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -87,6 +93,16 @@ import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Default True so config-load errors log in full; set from config (default
+# False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
 
 def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -1073,7 +1089,7 @@ def write_downsampled_data(
                     "max_retries": max_retries,
                     "records": record_count,
                     "database": db_name,
-                    "error": str(e),
+                    "error": _exc(e),
                 }
 
                 influxdb3_local.warn(
@@ -1092,11 +1108,11 @@ def write_downsampled_data(
             "database": db_name,
             "measurement": target_measurement,
             "retries": retry_count,
-            "error": str(e),
+            "error": _exc(e),
         }
 
         influxdb3_local.error(f"[{task_id}] Write failed with exception, {failure_log}")
-        return False, str(e), retry_count
+        return False, _exc(e), retry_count
 
 
 def transform_to_influx_line(
@@ -1201,6 +1217,11 @@ def process_scheduled_call(
                 return
         else:
             args["use_config_file"] = False
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str(args.get("enable_full_logging", False)).lower() == "true"
+    )
 
     influxdb3_local.info(
         f"[{task_id}] Starting downsampling schedule for call_time: {call_time}."
@@ -1380,7 +1401,7 @@ def process_scheduled_call(
         influxdb3_local.info(f"[{task_id}] Downsampling job finished", summary_log)
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] {e}")
+        influxdb3_local.error(f"[{task_id}] {_exc(e)}")
 
 
 def process_request(
@@ -1420,6 +1441,11 @@ def process_request(
 
     data: dict = json.loads(request_body)
     influxdb3_local.info(f"[{task_id}] Request received.")
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str(data.get("enable_full_logging", False)).lower() == "true"
+    )
 
     try:
         start_time: float = time.time()
@@ -1626,5 +1652,5 @@ def process_request(
         }
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] {e}")
-        return {"message": str(e)}
+        influxdb3_local.error(f"[{task_id}] {_exc(e)}")
+        return {"message": _exc(e)}

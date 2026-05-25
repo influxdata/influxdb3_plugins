@@ -145,6 +145,12 @@
             "example": "true",
             "description": "Permit sending username/password when 'security_policy' is not set. By default the plugin refuses this, because credentials are transmitted in cleartext over an unencrypted connection. Only enable on a trusted network. Default: false.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -210,6 +216,15 @@ _CONFIG_CACHE_TTL = 60 * 60  # seconds — TTL for config and browse structure c
 
 # Allowed URL schemes for 'server_url'. Restricted to OPC UA transport schemes
 _ALLOWED_OPCUA_SCHEMES = ("opc.tcp", "opc.tls")
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 """
@@ -402,6 +417,16 @@ class OPCUAConfig:
             raise ValueError("Missing required 'opcua' section in configuration")
 
         opcua_config: dict[str, Any] = config["opcua"]
+
+        enable_full_logging = opcua_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'opcua.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
 
         if "server_url" not in opcua_config:
             raise ValueError(
@@ -684,6 +709,12 @@ class OPCUAConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         if not self.args:
             raise ValueError("No arguments provided")
 
@@ -927,6 +958,7 @@ class OPCUAConfig:
                 "auth": auth_config,
                 "disable_config_cache": disable_config_cache,
                 "allow_insecure_auth": allow_insecure_auth,
+                "enable_full_logging": enable_full_logging,
             }
         }
 
@@ -1210,7 +1242,7 @@ class OPCUAConnectionManager:
             )
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error browsing from {root_node_id}: {str(e)}"
+                f"[{self.task_id}] Error browsing from {root_node_id}: {_exc(e)}"
             )
             return []
 
@@ -1494,7 +1526,7 @@ class OPCUAConnectionManager:
                 )
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error disconnecting from OPC UA server: {str(e)}"
+                f"[{self.task_id}] Error disconnecting from OPC UA server: {_exc(e)}"
             )
 
 
@@ -1604,7 +1636,7 @@ def write_stats(
         )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1632,7 +1664,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1787,6 +1819,11 @@ async def _async_scheduled_call(
                 )
         else:
             influxdb3_local.info(f"[{task_id}] Using cached configuration")
+
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(cached_config.get("enable_full_logging", False)).lower() == "true"
+        )
 
         server_url: str = cached_config["server_url"]
         table_name: str = cached_config["table_name"]
@@ -1966,7 +2003,7 @@ async def _async_scheduled_call(
                 stats.record_point_written(len(all_lines))
             except Exception as e:
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
                 total_errors += total_fields
                 total_fields = 0
@@ -1985,7 +2022,7 @@ async def _async_scheduled_call(
             influxdb3_local.warn(f"[{task_id}] No fields to write - all nodes failed")
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in OPC UA plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in OPC UA plugin: {_exc(e)}")
         # Close and drop connection so next call starts fresh
         if opcua_client is not None:
             await opcua_client.disconnect_silent()

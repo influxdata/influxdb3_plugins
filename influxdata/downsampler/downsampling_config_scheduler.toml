@@ -36,6 +36,11 @@ window = "your_window"  # e.g., "30min", "24h"
 # Integer value ≥ 0; default is typically 5
 #max_retries = 5  # e.g., 3, 10
 
+# Full exception logging
+# When true, full exception messages are logged. When false (default), only the
+# exception type is logged, to avoid leaking sensitive values into log output.
+#enable_full_logging = false
+
 # Target database for writing downsampled data
 # Specify the target database name (string); if omitted, source database is used
 #target_database = "your_target_database"  # e.g., "analytics_db", "downsampled_data"

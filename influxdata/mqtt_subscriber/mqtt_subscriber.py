@@ -115,6 +115,12 @@
             "example": "certs/client.key",
             "description": "Path to client private key for mutual TLS. Both client_cert and client_key must be provided together.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -132,6 +138,15 @@ from typing import Any, Protocol, runtime_checkable
 
 from jsonpath_ng.ext import parse as jsonpath_parse
 from paho.mqtt.client import CallbackAPIVersion, Client
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 """
@@ -402,6 +417,16 @@ class MQTTConfig:
 
         mqtt_config: dict[str, Any] = config["mqtt"]
 
+        enable_full_logging = mqtt_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'mqtt.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
+
         # Check required MQTT parameters
         if "broker_host" not in mqtt_config:
             raise ValueError(
@@ -548,6 +573,12 @@ class MQTTConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["topics", "broker_host"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -623,6 +654,7 @@ class MQTTConfig:
                 "auth": auth_config,
                 "tls": tls_config,
                 "allow_insecure_auth": allow_insecure_auth,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -1016,7 +1048,7 @@ class MQTTConnectionManager:
                 )
             else:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error connecting to MQTT broker: {str(e)}"
+                    f"[{self.task_id}] Error connecting to MQTT broker: {_exc(e)}"
                 )
             return False
 
@@ -1041,7 +1073,7 @@ class MQTTConnectionManager:
                         )
                     except Exception as e:
                         self.influxdb3_local.error(
-                            f"[{self.task_id}] Error subscribing to topic {topic}: {str(e)}"
+                            f"[{self.task_id}] Error subscribing to topic {topic}: {_exc(e)}"
                         )
         else:
             self.connected = False
@@ -1111,7 +1143,7 @@ class MQTTConnectionManager:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error processing MQTT message: {str(e)}"
+                f"[{self.task_id}] Error processing MQTT message: {_exc(e)}"
             )
 
     def get_messages(self) -> list[dict[str, Any]]:
@@ -1222,7 +1254,7 @@ class JSONParser:
                     except Exception as e:
                         # Log but continue processing other array elements
                         self.influxdb3_local.warn(
-                            f"[{self.task_id}] Error parsing array element {i}: {str(e)}"
+                            f"[{self.task_id}] Error parsing array element {i}: {_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -1242,10 +1274,10 @@ class JSONParser:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]) -> LineBuilder:
@@ -1446,7 +1478,7 @@ class LineProtocolParser:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1722,7 +1754,7 @@ class TextParser:
                         add_field_with_type(line, field_key, value, field_type)
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
-                            f"[{self.task_id}] Failed to convert field '{field_key}' value '{value}' to type '{field_type}': {str(e)}"
+                            f"[{self.task_id}] Failed to convert field '{field_key}' value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1737,7 +1769,7 @@ class TextParser:
             return line
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
 
     def _extract_value(
@@ -1927,7 +1959,7 @@ def write_stats(influxdb3_local, stats: MQTTStats, broker_host: str, task_id: st
             )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1963,7 +1995,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -2003,6 +2035,10 @@ def process_scheduled_call(
             )
 
         mqtt_config: dict = cached_config["mqtt"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(mqtt_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = mqtt_config["format"]
 
         # Get or create stats tracker from cache
@@ -2098,7 +2134,7 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
         # Phase 3: Update stats based on results
@@ -2143,7 +2179,7 @@ def process_scheduled_call(
         write_stats(influxdb3_local, stats, broker_str, task_id)
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {_exc(e)}")
         # Clean up cached state on fatal error
         influxdb3_local.cache.delete("mqtt_config")
 

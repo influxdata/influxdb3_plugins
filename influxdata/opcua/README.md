@@ -139,11 +139,12 @@ quality_filter = ["good", "uncertain"]
 
 ### Advanced parameters
 
-| Parameter              | Type   | Default | TOML Section | Description                                                                                                                                                              |
-|------------------------|--------|---------|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `config_file_path`     | string | none    | CLI only     | Path to TOML config file (absolute or relative to `PLUGIN_DIR`)                                                                                                          |
-| `disable_config_cache` | bool   | false   | `[opcua]`    | Reload configuration on every call instead of caching for 1 hour. Useful during development.                                                                             |
-| `allow_insecure_auth`  | bool   | false   | `[opcua]`    | Permit sending `username`/`password` when `security_policy` is not set (credentials sent in cleartext over an unencrypted connection). Only enable on a trusted network. |
+| Parameter              | Type   | Default | TOML Section | Description                                                                                                                                                                                                              |
+|------------------------|--------|---------|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `config_file_path`     | string | none    | CLI only     | Path to TOML config file (absolute or relative to `PLUGIN_DIR`)                                                                                                                                                          |
+| `disable_config_cache` | bool   | false   | `[opcua]`    | Reload configuration on every call instead of caching for 1 hour. Useful during development.                                                                                                                             |
+| `allow_insecure_auth`  | bool   | false   | `[opcua]`    | Permit sending `username`/`password` when `security_policy` is not set (credentials sent in cleartext over an unencrypted connection). Only enable on a trusted network.                                                 |
+| `enable_full_logging`  | bool   | false   | `[opcua]`    | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths). Enable temporarily for debugging. |
 
 ### Static and dynamic tags
 

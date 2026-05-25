@@ -66,6 +66,14 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 - `on_success` - Acknowledge only after successful processing. Failed messages are rejected (requeue controlled by `requeue_on_failure`).
 - `always` - Acknowledge all messages at the end of processing, regardless of success or failure.
 
+### Logging parameters
+
+In TOML configuration, `enable_full_logging` is placed directly under the `[amqp]` section.
+
+| Parameter             | Type    | Default | Description                                                                                                                                                                                                                              |
+|-----------------------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enable_full_logging` | boolean | false   | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths) into log output. Enable temporarily for debugging. |
+
 ### Message format parameters
 
 | Parameter         | Type   | Default | Description                                                    |

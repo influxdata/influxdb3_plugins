@@ -121,6 +121,12 @@
             "example": "certs/client.key",
             "description": "Path to client private key for mutual TLS.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -149,6 +155,15 @@ _PREFETCH_COUNT = 100
 _INT64_MIN: int = -9223372036854775808
 _INT64_MAX: int = 9223372036854775807
 _UINT64_MAX: int = 18446744073709551615
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 """
@@ -360,6 +375,16 @@ class AMQPConfig:
 
         amqp_config: dict[str, Any] = config["amqp"]
 
+        enable_full_logging = amqp_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'amqp.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
+
         if "host" not in amqp_config:
             raise ValueError("Missing required parameter 'amqp.host' in configuration")
 
@@ -507,6 +532,12 @@ class AMQPConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["host", "queues"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -587,6 +618,7 @@ class AMQPConfig:
                 "requeue_on_failure": requeue_on_failure,
                 "max_messages": max_messages,
                 "ssl": ssl_config,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -915,7 +947,7 @@ class AMQPConsumerManager:
                 )
             else:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error connecting to AMQP broker: {str(e)}"
+                    f"[{self.task_id}] Error connecting to AMQP broker: {_exc(e)}"
                 )
             return False
 
@@ -983,7 +1015,7 @@ class AMQPConsumerManager:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error retrieving AMQP messages: {str(e)}"
+                f"[{self.task_id}] Error retrieving AMQP messages: {_exc(e)}"
             )
 
         return messages
@@ -1009,7 +1041,7 @@ class AMQPConsumerManager:
             self.influxdb3_local.info(f"[{self.task_id}] Disconnected from AMQP broker")
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error disconnecting from AMQP broker: {str(e)}"
+                f"[{self.task_id}] Error disconnecting from AMQP broker: {_exc(e)}"
             )
 
 
@@ -1074,7 +1106,7 @@ class JSONParser:
                     except Exception as e:
                         self.influxdb3_local.warn(
                             f"[{self.task_id}] Error parsing array element {i}: "
-                            f"{str(e)}"
+                            f"{_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -1093,10 +1125,10 @@ class JSONParser:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]):
@@ -1264,7 +1296,7 @@ class LineProtocolParser:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1487,7 +1519,7 @@ class TextParser:
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
                             f"[{self.task_id}] Failed to convert field '{field_key}' "
-                            f"value '{value}' to type '{field_type}': {str(e)}"
+                            f"value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1501,7 +1533,7 @@ class TextParser:
             return line
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
 
     def _extract_value(
@@ -1709,7 +1741,7 @@ def write_stats(
         stats.reset_period_stats()
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1736,7 +1768,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1777,6 +1809,10 @@ def process_scheduled_call(
             )
 
         amqp_config: dict = cached_config["amqp"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(amqp_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = amqp_config["format"]
         ack_policy: str = amqp_config.get("ack_policy", "on_success")
         requeue_on_failure: bool = amqp_config.get("requeue_on_failure", False)
@@ -1859,7 +1895,7 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
         # Phase 3: Ack/nack and update stats based on results
@@ -1920,7 +1956,7 @@ def process_scheduled_call(
         write_stats(influxdb3_local, stats, host, virtual_host, task_id)
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in AMQP plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in AMQP plugin: {_exc(e)}")
         influxdb3_local.cache.delete("amqp_config")
 
     finally:

@@ -79,6 +79,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ],
     "onwrite_args_config": [
@@ -153,6 +159,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -181,6 +193,16 @@ if _pint_version < _MIN_PINT_VERSION:
         f"{'.'.join(map(str, _MIN_PINT_VERSION))}, found {pint.__version__}. "
         f"Older versions parsed unit strings with eval(). Upgrade pint."
     )
+
+
+# Default True so config-load errors log in full; set from config (default
+# False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 def quote_identifier(name: str) -> str:
@@ -831,7 +853,7 @@ def build_regex_pattern(
         return compiled
     except re.error as e:
         influxdb3_local.warn(
-            f"[{task_id}] Failed to compile regex: {e}, skipping"
+            f"[{task_id}] Failed to compile regex: {_exc(e)}, skipping"
         )
 
 
@@ -1125,7 +1147,7 @@ def write_data(
                     "max_retries": max_retries,
                     "records": record_count,
                     "database": db_name,
-                    "error": str(e),
+                    "error": _exc(e),
                 }
                 influxdb3_local.warn(
                     f"[{task_id}] Error write attempt {tries + 1}", retry_log
@@ -1140,10 +1162,10 @@ def write_data(
             "database": db_name,
             "measurement": target_measurement,
             "retries": retry_count,
-            "error": str(e),
+            "error": _exc(e),
         }
         influxdb3_local.error(f"[{task_id}] Write failed with exception, {failure_log}")
-        return False, str(e), retry_count
+        return False, _exc(e), retry_count
 
 
 def _normalize_temp_unit_alias(part: str) -> str | None:
@@ -1266,7 +1288,7 @@ def apply_unit_conversion_numeric(
             )
         except Exception as e:
             influxdb3_local.warn(
-                f"[{task_id}] Temperature conversion from '{from_part}' to '{to_part}' failed for value {value}: {e}"
+                f"[{task_id}] Temperature conversion from '{from_part}' to '{to_part}' failed for value {value}: {_exc(e)}"
             )
             return value
     # If one is temperature but the other is not, skip
@@ -1281,7 +1303,7 @@ def apply_unit_conversion_numeric(
         quantity = value * ureg(from_unit_str)
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Failed to interpret {value} as '{from_unit_str}': {e}. Skipping conversion."
+            f"[{task_id}] Failed to interpret {value} as '{from_unit_str}': {_exc(e)}. Skipping conversion."
         )
         return value
 
@@ -1290,7 +1312,7 @@ def apply_unit_conversion_numeric(
         return q2.magnitude
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Conversion from '{from_unit_str}' to '{to_unit_str}' failed for value {value}: {e}."
+            f"[{task_id}] Conversion from '{from_unit_str}' to '{to_unit_str}' failed for value {value}: {_exc(e)}."
         )
         return value
 
@@ -1336,7 +1358,7 @@ def apply_value_transformation(
             )
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Error in transformation '{transform_name}' for field '{field_name}': {str(e)}"
+            f"[{task_id}] Error in transformation '{transform_name}' for field '{field_name}': {_exc(e)}"
         )
 
     return value
@@ -1375,7 +1397,7 @@ def apply_name_transformation(
             )
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Error in transformation '{transform_name}' for '{name}': {str(e)}"
+            f"[{task_id}] Error in transformation '{transform_name}' for '{name}': {_exc(e)}"
         )
 
     return name
@@ -1438,6 +1460,11 @@ def process_scheduled_call(
                 return
         else:
             args["use_config_file"] = False
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str((args or {}).get("enable_full_logging", False)).lower() == "true"
+    )
 
     required_keys: list = ["measurement", "window", "target_measurement"]
 
@@ -1708,7 +1735,7 @@ def process_scheduled_call(
             )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
+        influxdb3_local.error(f"[{task_id}] Unexpected error: {_exc(e)}")
 
 
 def apply_filters(filters: list, fields: list, tags: list, rows: list):
@@ -1789,6 +1816,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                 return
         else:
             args["use_config_file"] = False
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str((args or {}).get("enable_full_logging", False)).lower() == "true"
+    )
 
     required_keys: list = ["measurement", "target_measurement"]
 
@@ -2055,4 +2087,4 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                 )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
+        influxdb3_local.error(f"[{task_id}] Unexpected error: {_exc(e)}")

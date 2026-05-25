@@ -127,6 +127,12 @@
             "example": "500",
             "description": "Maximum number of messages to retrieve per scheduled call. Default: 500. Set to 0 for unlimited.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -154,6 +160,15 @@ _MAX_POLL_RECORDS = 500
 _INT64_MIN: int = -9223372036854775808
 _INT64_MAX: int = 9223372036854775807
 _UINT64_MAX: int = 18446744073709551615
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 """
 Helper for batching multiple line protocol builders into a single write.
@@ -356,6 +371,16 @@ class KafkaConfig:
 
         kafka_config: dict[str, Any] = config["kafka"]
 
+        enable_full_logging = kafka_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'kafka.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
+
         if "bootstrap_servers" not in kafka_config:
             raise ValueError(
                 "Missing required parameter 'kafka.bootstrap_servers' in configuration"
@@ -520,6 +545,12 @@ class KafkaConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["topics", "bootstrap_servers", "group_id"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -624,6 +655,7 @@ class KafkaConfig:
                 "sasl": sasl_config,
                 "ssl": ssl_config,
                 "max_poll_records": max_poll_records,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -1001,7 +1033,7 @@ class KafkaConsumerManager:
                 )
             else:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error connecting to Kafka: {str(e)}"
+                    f"[{self.task_id}] Error connecting to Kafka: {_exc(e)}"
                 )
             return False
 
@@ -1100,7 +1132,7 @@ class KafkaConsumerManager:
         except Exception as e:
             self.poll_error = True
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error polling Kafka messages: {str(e)}"
+                f"[{self.task_id}] Error polling Kafka messages: {_exc(e)}"
             )
 
         return messages
@@ -1147,7 +1179,7 @@ class KafkaConsumerManager:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error committing offsets: {str(e)}"
+                f"[{self.task_id}] Error committing offsets: {_exc(e)}"
             )
 
     def disconnect(self):
@@ -1161,7 +1193,7 @@ class KafkaConsumerManager:
                 )
             except Exception as e:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error disconnecting from Kafka: {str(e)}"
+                    f"[{self.task_id}] Error disconnecting from Kafka: {_exc(e)}"
                 )
 
 
@@ -1226,7 +1258,7 @@ class JSONParser:
                     except Exception as e:
                         self.influxdb3_local.warn(
                             f"[{self.task_id}] Error parsing array element {i}: "
-                            f"{str(e)}"
+                            f"{_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -1245,10 +1277,10 @@ class JSONParser:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]):
@@ -1418,7 +1450,7 @@ class LineProtocolParser:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1641,7 +1673,7 @@ class TextParser:
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
                             f"[{self.task_id}] Failed to convert field '{field_key}' "
-                            f"value '{value}' to type '{field_type}': {str(e)}"
+                            f"value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1655,7 +1687,7 @@ class TextParser:
             return line
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
 
     def _extract_value(
@@ -1825,7 +1857,7 @@ def write_stats(
             )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1854,7 +1886,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1895,6 +1927,10 @@ def process_scheduled_call(
             )
 
         kafka_config: dict = cached_config["kafka"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(kafka_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = kafka_config["format"]
         offset_commit_policy: str = kafka_config.get(
             "offset_commit_policy", "on_success"
@@ -1996,7 +2032,7 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
         # Phase 3: Update stats based on results
@@ -2056,7 +2092,7 @@ def process_scheduled_call(
         write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {_exc(e)}")
         influxdb3_local.cache.delete("kafka_config")
 
     finally:

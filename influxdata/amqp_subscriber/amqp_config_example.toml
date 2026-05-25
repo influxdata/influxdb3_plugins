@@ -47,6 +47,9 @@ format = "json"
 ack_policy = "on_success"
 requeue_on_failure = false
 max_messages = 500
+# When true, full exception messages are logged. When false (default), only the
+# exception type is logged, to avoid leaking sensitive values into log output.
+# enable_full_logging = false
 
 # Optional SSL/TLS configuration (uncomment if needed)
 # [amqp.ssl]

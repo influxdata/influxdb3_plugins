@@ -46,6 +46,10 @@ format = "json"
 # Default: 67108864 (64 MiB). Uncomment to override.
 # max_queue_bytes = 67108864
 
+# When true, full exception messages are logged. When false (default), only the
+# exception type is logged, to avoid leaking sensitive values into log output.
+# enable_full_logging = false
+
 # Sending username/password without TLS transmits credentials in cleartext.
 # The plugin refuses this by default. Configure [mqtt.tls] below, or set this
 # to true to permit cleartext credentials on a trusted network.

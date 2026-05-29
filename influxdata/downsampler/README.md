@@ -42,11 +42,12 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Advanced parameters
 
-| Parameter         | Type    | Default   | Description                                         |
-|-------------------|---------|-----------|-----------------------------------------------------|
-| `target_database` | string  | "default" | Database for storing downsampled data               |
-| `max_retries`     | integer | 5         | Maximum number of retries for write operations      |
-| `batch_size`      | string  | "30d"     | Time interval for batch processing (HTTP mode only) |
+| Parameter             | Type    | Default   | Description                                                                                                                                                                               |
+|-----------------------|---------|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `target_database`     | string  | "default" | Database for storing downsampled data                                                                                                                                                     |
+| `max_retries`         | integer | 5         | Maximum number of retries for write operations                                                                                                                                            |
+| `batch_size`          | string  | "30d"     | Time interval for batch processing (HTTP mode only)                                                                                                                                       |
+| `enable_full_logging` | boolean | false     | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values. Enable temporarily for debugging. |
 
 ### TOML configuration
 

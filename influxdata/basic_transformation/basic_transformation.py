@@ -79,6 +79,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ],
     "onwrite_args_config": [
@@ -153,6 +159,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -169,7 +181,29 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import math
 
+import pint
 from pint import UnitRegistry
+
+# pint old versions parsed unit strings with eval(); refuse to run on a version below.
+_MIN_PINT_VERSION = (0, 20)
+_pint_version = tuple(int(p) for p in re.findall(r"\d+", pint.__version__)[:2])
+if _pint_version < _MIN_PINT_VERSION:
+    raise RuntimeError(
+        f"basic_transformation requires pint >= "
+        f"{'.'.join(map(str, _MIN_PINT_VERSION))}, found {pint.__version__}. "
+        f"Older versions parsed unit strings with eval(). Upgrade pint."
+    )
+
+
+# Default True so config-load errors log in full; set from config (default
+# False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
 
 def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -819,7 +853,7 @@ def build_regex_pattern(
         return compiled
     except re.error as e:
         influxdb3_local.warn(
-            f"[{task_id}] Failed to compile regex: {e}, skipping"
+            f"[{task_id}] Failed to compile regex: {_exc(e)}, skipping"
         )
 
 
@@ -1033,11 +1067,22 @@ def transform_to_influx_line(
         builder.time_ns(timestamp)
 
         for tag in tags_list:
-            builder.tag(tag, row.get(tag))
+            if tag not in row:
+                continue
+            tag_value = row[tag]
+            if tag_value is None:
+                continue
+            builder.tag(tag, tag_value)
 
         for field_name in fields_list:
+            if field_name not in row:
+                continue
             value = row[field_name]
-            if isinstance(value, int):
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                builder.bool_field(field_name, value)
+            elif isinstance(value, int):
                 builder.int64_field(field_name, value)
             elif isinstance(value, float):
                 builder.float64_field(field_name, value)
@@ -1102,7 +1147,7 @@ def write_data(
                     "max_retries": max_retries,
                     "records": record_count,
                     "database": db_name,
-                    "error": str(e),
+                    "error": _exc(e),
                 }
                 influxdb3_local.warn(
                     f"[{task_id}] Error write attempt {tries + 1}", retry_log
@@ -1117,10 +1162,10 @@ def write_data(
             "database": db_name,
             "measurement": target_measurement,
             "retries": retry_count,
-            "error": str(e),
+            "error": _exc(e),
         }
         influxdb3_local.error(f"[{task_id}] Write failed with exception, {failure_log}")
-        return False, str(e), retry_count
+        return False, _exc(e), retry_count
 
 
 def _normalize_temp_unit_alias(part: str) -> str | None:
@@ -1211,7 +1256,9 @@ def apply_unit_conversion_numeric(
 
     # 2) Parse transform_name
     m = re.fullmatch(
-        r"convert_([^_]+(?:_per_[^_]+)?)_to_([^_]+(?:_per_[^_]+)?)", transform_name
+        r"convert_([A-Za-z][A-Za-z0-9]*(?:_per_[A-Za-z][A-Za-z0-9]*)?)"
+        r"_to_([A-Za-z][A-Za-z0-9]*(?:_per_[A-Za-z][A-Za-z0-9]*)?)",
+        transform_name,
     )
     if not m:
         influxdb3_local.warn(
@@ -1241,7 +1288,7 @@ def apply_unit_conversion_numeric(
             )
         except Exception as e:
             influxdb3_local.warn(
-                f"[{task_id}] Temperature conversion from '{from_part}' to '{to_part}' failed for value {value}: {e}"
+                f"[{task_id}] Temperature conversion from '{from_part}' to '{to_part}' failed for value {value}: {_exc(e)}"
             )
             return value
     # If one is temperature but the other is not, skip
@@ -1256,7 +1303,7 @@ def apply_unit_conversion_numeric(
         quantity = value * ureg(from_unit_str)
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Failed to interpret {value} as '{from_unit_str}': {e}. Skipping conversion."
+            f"[{task_id}] Failed to interpret {value} as '{from_unit_str}': {_exc(e)}. Skipping conversion."
         )
         return value
 
@@ -1265,7 +1312,7 @@ def apply_unit_conversion_numeric(
         return q2.magnitude
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Conversion from '{from_unit_str}' to '{to_unit_str}' failed for value {value}: {e}."
+            f"[{task_id}] Conversion from '{from_unit_str}' to '{to_unit_str}' failed for value {value}: {_exc(e)}."
         )
         return value
 
@@ -1311,7 +1358,7 @@ def apply_value_transformation(
             )
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Error in transformation '{transform_name}' for field '{field_name}': {str(e)}"
+            f"[{task_id}] Error in transformation '{transform_name}' for field '{field_name}': {_exc(e)}"
         )
 
     return value
@@ -1350,7 +1397,7 @@ def apply_name_transformation(
             )
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Error in transformation '{transform_name}' for '{name}': {str(e)}"
+            f"[{task_id}] Error in transformation '{transform_name}' for '{name}': {_exc(e)}"
         )
 
     return name
@@ -1389,6 +1436,11 @@ def process_scheduled_call(
     # Override args with config file
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
                 if not plugin_dir_var:
@@ -1409,6 +1461,11 @@ def process_scheduled_call(
         else:
             args["use_config_file"] = False
 
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str((args or {}).get("enable_full_logging", False)).lower() == "true"
+    )
+
     required_keys: list = ["measurement", "window", "target_measurement"]
 
     if not args or any(key not in args for key in required_keys):
@@ -1423,6 +1480,13 @@ def process_scheduled_call(
         target_measurement: str = args["target_measurement"]
         window: timedelta = parse_time_interval(args["window"], task_id)
         target_database: str | None = args.get("target_database", None)
+        if target_measurement == measurement and not target_database:
+            influxdb3_local.warn(
+                f"[{task_id}] target_measurement '{target_measurement}' equals source measurement "
+                f"and 'target_database' is not set — each run will overwrite rows in the source "
+                f"table at the same tag+time. Set a different target_measurement or target_database "
+                f"if this is unintended."
+            )
         included_fields: list = parse_fields(args, "included_fields")
         excluded_fields: list = parse_fields(args, "excluded_fields")
         if included_fields and excluded_fields:
@@ -1671,7 +1735,7 @@ def process_scheduled_call(
             )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
+        influxdb3_local.error(f"[{task_id}] Unexpected error: {_exc(e)}")
 
 
 def apply_filters(filters: list, fields: list, tags: list, rows: list):
@@ -1725,6 +1789,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
     # Override args with config file
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
                 influxdb3_local.info(
@@ -1748,6 +1817,11 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         else:
             args["use_config_file"] = False
 
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str((args or {}).get("enable_full_logging", False)).lower() == "true"
+    )
+
     required_keys: list = ["measurement", "target_measurement"]
 
     if not args or any(key not in args for key in required_keys):
@@ -1761,6 +1835,13 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         measurement: str = args["measurement"]
         target_measurement: str = args["target_measurement"]
         target_database: str | None = args.get("target_database", None)
+        if target_measurement == measurement and not target_database:
+            influxdb3_local.error(
+                f"[{task_id}] target_measurement '{target_measurement}' equals source measurement "
+                f"and 'target_database' is not set — this would create an infinite write loop on an "
+                f"on-write trigger. Set a different target_measurement or target_database."
+            )
+            return
         included_fields: list = parse_fields(args, "included_fields")
         excluded_fields: list = parse_fields(args, "excluded_fields")
         if included_fields and excluded_fields:
@@ -2006,4 +2087,4 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                 )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
+        influxdb3_local.error(f"[{task_id}] Unexpected error: {_exc(e)}")

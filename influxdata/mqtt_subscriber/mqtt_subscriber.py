@@ -93,6 +93,12 @@
             "required": false
         },
         {
+            "name": "allow_insecure_auth",
+            "example": "true",
+            "description": "Permit sending username/password when TLS is not configured (no ca_cert). By default the plugin refuses this, because credentials are transmitted in cleartext over an unencrypted connection. Only enable on a trusted network. Default: false.",
+            "required": false
+        },
+        {
             "name": "ca_cert",
             "example": "certs/ca.crt",
             "description": "Path to CA certificate file for TLS (absolute or relative to PLUGIN_DIR).",
@@ -108,6 +114,12 @@
             "name": "client_key",
             "example": "certs/client.key",
             "description": "Path to client private key for mutual TLS. Both client_cert and client_key must be provided together.",
+            "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
             "required": false
         }
     ]
@@ -126,6 +138,15 @@ from typing import Any, Protocol, runtime_checkable
 
 from jsonpath_ng.ext import parse as jsonpath_parse
 from paho.mqtt.client import CallbackAPIVersion, Client
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 """
@@ -213,6 +234,7 @@ class MQTTConfig:
 
     VALID_TIMESTAMP_FORMATS = {"ns", "ms", "s", "datetime"}
     VALID_FIELD_TYPES = {"int", "uint", "float", "string", "bool"}
+    FORBIDDEN_JSONPATH_TOKENS = ("=~", "sub(")
 
     def __init__(self, influxdb3_local, args: dict[str, str] | None, task_id: str):
         self.influxdb3_local = influxdb3_local
@@ -230,6 +252,58 @@ class MQTTConfig:
         else:
             # Use command-line arguments as config
             self.config = self._build_config_from_args()
+
+        # Security validation regardless of the configuration source
+        self._validate_secure_auth(self.config.get("mqtt", {}))
+        self._validate_jsonpath_safety(self.config)
+
+    @classmethod
+    def _validate_jsonpath_safety(cls, config: dict[str, Any]):
+        """Reject JSONPath expressions that embed a regex evaluated against
+        broker data.
+
+        jsonpath_ng.ext runs an admin-supplied regex through Python `re` in
+        exactly two places: the `=~` filter operator and the `sub()` string
+        function. Both are vulnerable to ReDoS on hostile message data.
+        Every other construct - comparison filters, nesting, recursive descent,
+        wildcards - runs in linear time and is left intact.
+        """
+        json_mapping: dict | None = (config.get("mapping") or {}).get("json")
+        if not json_mapping:
+            return
+
+        paths: list[str] = []
+        table_name_field = json_mapping.get("table_name_field")
+        if isinstance(table_name_field, str):
+            paths.append(table_name_field)
+        for json_path in (json_mapping.get("tags") or {}).values():
+            if isinstance(json_path, str):
+                paths.append(json_path)
+        for field_spec in (json_mapping.get("fields") or {}).values():
+            if (
+                isinstance(field_spec, (list, tuple))
+                and field_spec
+                and isinstance(field_spec[0], str)
+            ):
+                paths.append(field_spec[0])
+        timestamp_config = json_mapping.get("timestamp_config")
+        if isinstance(timestamp_config, dict) and isinstance(
+            timestamp_config.get("field"), str
+        ):
+            paths.append(timestamp_config["field"])
+
+        for path in paths:
+            lowered: str = path.lower()
+            for token in cls.FORBIDDEN_JSONPATH_TOKENS:
+                if token in lowered:
+                    raise ValueError(
+                        f"Unsupported JSONPath operator '{token.rstrip('(')}' "
+                        f"in '{path}': regex-based JSONPath operators ('=~' "
+                        f"and 'sub()') are disabled because they are "
+                        f"vulnerable to backtracking (ReDoS) on "
+                        f"hostile message data. Use comparison filters, or "
+                        f"extract the raw value and transform it downstream."
+                    )
 
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
@@ -256,18 +330,48 @@ class MQTTConfig:
             )
         return os.path.join(plugin_dir, path)
 
+    @staticmethod
+    def _validate_secure_auth(mqtt_config: dict[str, Any]):
+        """Refuse username/password authentication over an unencrypted channel.
+
+        paho's ``username_pw_set`` and ``tls_set`` are configured by
+        independent gates, so credentials would otherwise be sent in cleartext
+        whenever auth is provided without a CA certificate. Require an explicit
+        'allow_insecure_auth' opt-in before permitting that.
+        """
+        auth: dict = mqtt_config.get("auth") or {}
+        if not (auth.get("username") and auth.get("password")):
+            return
+
+        tls: dict = mqtt_config.get("tls") or {}
+        if tls.get("ca_cert"):
+            return
+
+        allow_insecure: bool = (
+            str(mqtt_config.get("allow_insecure_auth", False)).lower() == "true"
+        )
+        if not allow_insecure:
+            raise ValueError(
+                "Refusing to send username/password over an unencrypted "
+                "connection: TLS is not configured (no 'ca_cert'). Configure "
+                "TLS, or set 'allow_insecure_auth' to true to permit cleartext "
+                "credentials (only on a trusted network)."
+            )
+
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
-        config_path: str = self._resolve_path(config_file, "configuration file")
+        if not config_file.endswith(".toml"):
+            raise ValueError(
+                "Invalid config file format: expected a .toml file"
+            )
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found or not accessible: {config_file}")
+        config_path: str = self._resolve_path(config_file, "configuration file")
 
         try:
             with open(config_path, "rb") as f:
                 config: dict[str, Any] = tomllib.load(f)
-        except OSError:
-            raise OSError(f"Configuration file not found or not accessible: {config_file}") from None
+        except Exception:
+            raise ValueError("Failed to read config file") from None
 
         # Validate required MQTT configuration
         self._validate_toml_config(config)
@@ -313,6 +417,16 @@ class MQTTConfig:
 
         mqtt_config: dict[str, Any] = config["mqtt"]
 
+        enable_full_logging = mqtt_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'mqtt.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
+
         # Check required MQTT parameters
         if "broker_host" not in mqtt_config:
             raise ValueError(
@@ -336,6 +450,35 @@ class MQTTConfig:
                 raise ValueError(
                     "Parameter 'mqtt.max_queue_bytes' must be a positive integer"
                 )
+
+        # Validate optional broker_port if present (accept int or numeric string)
+        if "broker_port" in mqtt_config:
+            broker_port = mqtt_config["broker_port"]
+            if isinstance(broker_port, bool) or not isinstance(broker_port, (int, str)):
+                raise ValueError(
+                    "Parameter 'mqtt.broker_port' must be an integer between 1 and 65535"
+                )
+            try:
+                broker_port = int(broker_port)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid 'mqtt.broker_port': {mqtt_config['broker_port']!r}. "
+                    f"Must be an integer between 1 and 65535"
+                )
+            if not (1 <= broker_port <= 65535):
+                raise ValueError(
+                    "Parameter 'mqtt.broker_port' must be an integer between 1 and 65535"
+                )
+            mqtt_config["broker_port"] = broker_port
+
+        # Validate optional allow_insecure_auth if present (accepts bool or string)
+        allow_insecure_auth = mqtt_config.get("allow_insecure_auth")
+        if allow_insecure_auth is not None and not isinstance(
+            allow_insecure_auth, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'mqtt.allow_insecure_auth' must be a boolean or string (true/false)"
+            )
 
         # Get message format (default to json if not specified)
         message_format: str = mqtt_config.get("format", "json")
@@ -430,6 +573,12 @@ class MQTTConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["topics", "broker_host"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -477,10 +626,26 @@ class MQTTConfig:
         if max_queue_bytes <= 0:
             raise ValueError("Parameter 'max_queue_bytes' must be a positive integer")
 
+        broker_port_arg = self.args.get("broker_port")
+        try:
+            broker_port: int = (
+                int(broker_port_arg) if broker_port_arg is not None else 1883
+            )
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid 'broker_port': {broker_port_arg!r}. Must be an integer.")
+        if not 1 <= broker_port <= 65535:
+            raise ValueError(
+                "Parameter 'broker_port' must be an integer between 1 and 65535"
+            )
+
+        allow_insecure_auth: bool = (
+            str(self.args.get("allow_insecure_auth", "false")).lower() == "true"
+        )
+
         return {
             "mqtt": {
                 "broker_host": self.args.get("broker_host"),
-                "broker_port": int(self.args.get("broker_port", 1883)),
+                "broker_port": broker_port,
                 "topics": topics_list,
                 "qos": int(self.args.get("qos", 1)),
                 "client_id": self.args.get("client_id", "influxdb3_mqtt_subscriber"),
@@ -488,6 +653,8 @@ class MQTTConfig:
                 "max_queue_bytes": max_queue_bytes,
                 "auth": auth_config,
                 "tls": tls_config,
+                "allow_insecure_auth": allow_insecure_auth,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -809,27 +976,12 @@ class MQTTConnectionManager:
             )
             return
 
-        # Save user-provided paths for error messages before resolving
-        ca_cert_orig = ca_cert
-        client_cert_orig = client_cert
-        client_key_orig = client_key
-
         # Resolve paths (absolute used as-is, relative resolved from PLUGIN_DIR)
         ca_cert = self._resolve_path(ca_cert, "CA certificate")
         if client_cert:
             client_cert = self._resolve_path(client_cert, "client certificate")
         if client_key:
             client_key = self._resolve_path(client_key, "client key")
-
-        # Validate certificate files exist
-        if not os.path.exists(ca_cert):
-            raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
-
-        if client_cert and not os.path.exists(client_cert):
-            raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
-
-        if client_key and not os.path.exists(client_key):
-            raise FileNotFoundError(f"TLS configuration failed. client_key not found: {client_key_orig}")
 
         try:
             self.client.tls_set(ca_certs=ca_cert, certfile=client_cert, keyfile=client_key)
@@ -896,7 +1048,7 @@ class MQTTConnectionManager:
                 )
             else:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error connecting to MQTT broker: {str(e)}"
+                    f"[{self.task_id}] Error connecting to MQTT broker: {_exc(e)}"
                 )
             return False
 
@@ -921,7 +1073,7 @@ class MQTTConnectionManager:
                         )
                     except Exception as e:
                         self.influxdb3_local.error(
-                            f"[{self.task_id}] Error subscribing to topic {topic}: {str(e)}"
+                            f"[{self.task_id}] Error subscribing to topic {topic}: {_exc(e)}"
                         )
         else:
             self.connected = False
@@ -991,7 +1143,7 @@ class MQTTConnectionManager:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error processing MQTT message: {str(e)}"
+                f"[{self.task_id}] Error processing MQTT message: {_exc(e)}"
             )
 
     def get_messages(self) -> list[dict[str, Any]]:
@@ -1102,7 +1254,7 @@ class JSONParser:
                     except Exception as e:
                         # Log but continue processing other array elements
                         self.influxdb3_local.warn(
-                            f"[{self.task_id}] Error parsing array element {i}: {str(e)}"
+                            f"[{self.task_id}] Error parsing array element {i}: {_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -1122,10 +1274,10 @@ class JSONParser:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]) -> LineBuilder:
@@ -1229,15 +1381,16 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(self, data: dict[str, Any], path: str, cache_key: str | None = None) -> Any:
         """Get value from JSON using JSONPath notation.
@@ -1325,7 +1478,7 @@ class LineProtocolParser:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1601,7 +1754,7 @@ class TextParser:
                         add_field_with_type(line, field_key, value, field_type)
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
-                            f"[{self.task_id}] Failed to convert field '{field_key}' value '{value}' to type '{field_type}': {str(e)}"
+                            f"[{self.task_id}] Failed to convert field '{field_key}' value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1616,7 +1769,7 @@ class TextParser:
             return line
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
 
     def _extract_value(
@@ -1682,17 +1835,18 @@ class TextParser:
 
         timestamp_value: Any = self._extract_value(payload, pattern_str, "timestamp", "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         # Convert timestamp based on format
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class MQTTStats:
@@ -1805,7 +1959,7 @@ def write_stats(influxdb3_local, stats: MQTTStats, broker_host: str, task_id: st
             )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1841,7 +1995,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1875,12 +2029,16 @@ def process_scheduled_call(
                     "text": config_loader.get_mapping_config("text"),
                 },
             }
-            influxdb3_local.cache.put("mqtt_config", cached_config)
+            influxdb3_local.cache.put("mqtt_config", cached_config, 60 * 60)
             influxdb3_local.info(
                 f"[{task_id}] MQTT Plugin initialized, format: {cached_config['mqtt']['format']}"
             )
 
         mqtt_config: dict = cached_config["mqtt"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(mqtt_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = mqtt_config["format"]
 
         # Get or create stats tracker from cache
@@ -1976,7 +2134,7 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
         # Phase 3: Update stats based on results
@@ -2021,7 +2179,7 @@ def process_scheduled_call(
         write_stats(influxdb3_local, stats, broker_str, task_id)
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {_exc(e)}")
         # Clean up cached state on fatal error
         influxdb3_local.cache.delete("mqtt_config")
 

@@ -34,10 +34,15 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Authentication parameters
 
-| Parameter  | Type   | Default | Description                                     |
-|------------|--------|---------|-------------------------------------------------|
-| `username` | string | "guest" | AMQP broker username                            |
-| `password` | string | "guest" | AMQP broker password                            |
+| Parameter        | Type   | Default | Description                                                       |
+|------------------|--------|---------|-------------------------------------------------------------------|
+| `auth_mechanism` | string | "plain" | Authentication mechanism: `plain` or `external`                   |
+| `username`       | string | none    | AMQP broker username. Required when `auth_mechanism` is `plain`   |
+| `password`       | string | none    | AMQP broker password. Required when `auth_mechanism` is `plain`   |
+
+**Authentication mechanisms:**
+- `plain` - Username/password authentication (SASL PLAIN). Both `username` and `password` are required; the plugin no longer falls back to the RabbitMQ default `guest`/`guest` credentials.
+- `external` - Client TLS certificate authentication (SASL EXTERNAL). Requires `ssl_ca_cert`, `ssl_client_cert`, and `ssl_client_key`. `username`/`password` are ignored.
 
 ### TLS/SSL parameters
 
@@ -60,6 +65,14 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 **Acknowledgement policies:**
 - `on_success` - Acknowledge only after successful processing. Failed messages are rejected (requeue controlled by `requeue_on_failure`).
 - `always` - Acknowledge all messages at the end of processing, regardless of success or failure.
+
+### Logging parameters
+
+In TOML configuration, `enable_full_logging` is placed directly under the `[amqp]` section.
+
+| Parameter             | Type    | Default | Description                                                                                                                                                                                                                              |
+|-----------------------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enable_full_logging` | boolean | false   | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths) into log output. Enable temporarily for debugging. |
 
 ### Message format parameters
 
@@ -448,6 +461,7 @@ ls /etc/amqp/my_amqp_config.toml
 - Check network connectivity
 - For TLS connections, verify certificate paths
 - Verify authentication credentials
+- Verify `auth_mechanism` matches the broker configuration (`plain` requires `username`/`password`; `external` requires client certificates)
 
 #### "Both ssl_client_cert and ssl_client_key must be provided for mutual TLS"
 

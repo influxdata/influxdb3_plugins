@@ -25,6 +25,12 @@
             "example": "true",
             "description": "Use timestamp from weather data instead of current time. Defaults to 'true'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -37,6 +43,15 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+# Default True so errors before args are parsed log in full; set from args
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 def process_scheduled_call(
@@ -55,6 +70,11 @@ def process_scheduled_call(
             - use_data_timestamp: Use timestamp from weather data instead of current time (default: 'true')
     """
     task_id = str(uuid.uuid4())
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str((args or {}).get("enable_full_logging", "false")).lower() == "true"
+    )
 
     # Default configuration
     default_stations = [
@@ -130,7 +150,7 @@ def process_scheduled_call(
 
                 except Exception as e:
                     influxdb3_local.error(
-                        f"[{task_id}] Error processing station {station_id}: {str(e)}"
+                        f"[{task_id}] Error processing station {station_id}: {_exc(e)}"
                     )
                     error_count += 1
 
@@ -146,7 +166,7 @@ def process_scheduled_call(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Unexpected error while processing NWS data: {str(e)}"
+            f"[{task_id}] Unexpected error while processing NWS data: {_exc(e)}"
         )
 
 
@@ -200,19 +220,19 @@ def fetch_station_data(
 
     except URLError as e:
         influxdb3_local.error(
-            f"[{task_id}] Network error fetching {station_id}: {str(e)}"
+            f"[{task_id}] Network error fetching {station_id}: {_exc(e)}"
         )
         return None
 
     except json.JSONDecodeError as e:
         influxdb3_local.error(
-            f"[{task_id}] JSON decode error for {station_id}: {str(e)}"
+            f"[{task_id}] JSON decode error for {station_id}: {_exc(e)}"
         )
         return None
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Unexpected error for {station_id}: {str(e)}"
+            f"[{task_id}] Unexpected error for {station_id}: {_exc(e)}"
         )
         return None
 
@@ -333,7 +353,7 @@ def write_weather_data(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Error writing data for {station_id}: {str(e)}"
+            f"[{task_id}] Error writing data for {station_id}: {_exc(e)}"
         )
 
 
@@ -413,4 +433,4 @@ def write_plugin_stats(
         influxdb3_local.write(line)
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error writing plugin stats: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error writing plugin stats: {_exc(e)}")

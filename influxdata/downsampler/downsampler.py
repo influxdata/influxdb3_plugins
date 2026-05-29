@@ -73,6 +73,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -87,6 +93,16 @@ import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Default True so config-load errors log in full; set from config (default
+# False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
 
 def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
@@ -1073,7 +1089,7 @@ def write_downsampled_data(
                     "max_retries": max_retries,
                     "records": record_count,
                     "database": db_name,
-                    "error": str(e),
+                    "error": _exc(e),
                 }
 
                 influxdb3_local.warn(
@@ -1092,11 +1108,11 @@ def write_downsampled_data(
             "database": db_name,
             "measurement": target_measurement,
             "retries": retry_count,
-            "error": str(e),
+            "error": _exc(e),
         }
 
         influxdb3_local.error(f"[{task_id}] Write failed with exception, {failure_log}")
-        return False, str(e), retry_count
+        return False, _exc(e), retry_count
 
 
 def transform_to_influx_line(
@@ -1177,6 +1193,11 @@ def process_scheduled_call(
     # Override args with config file if specified
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
                 if not plugin_dir_var:
@@ -1196,6 +1217,11 @@ def process_scheduled_call(
                 return
         else:
             args["use_config_file"] = False
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str(args.get("enable_full_logging", False)).lower() == "true"
+    )
 
     influxdb3_local.info(
         f"[{task_id}] Starting downsampling schedule for call_time: {call_time}."
@@ -1375,7 +1401,7 @@ def process_scheduled_call(
         influxdb3_local.info(f"[{task_id}] Downsampling job finished", summary_log)
 
     except Exception as e:
-        influxdb3_local.error(str(e))
+        influxdb3_local.error(f"[{task_id}] {_exc(e)}")
 
 
 def process_request(
@@ -1397,12 +1423,29 @@ def process_request(
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Downsampling task started")
 
-    if request_body:
-        data: dict = json.loads(request_body)
-        influxdb3_local.info(f"[{task_id}] Request received.")
-    else:
+    if not request_body:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"message": f"[{task_id}] Error: No request body provided."}
+
+    max_body_bytes: int = 10 * 1024 * 1024  # 10 MiB
+    body_size: int = (
+        len(request_body)
+        if isinstance(request_body, (bytes, bytearray))
+        else len(request_body.encode("utf-8"))
+    )
+    if body_size > max_body_bytes:
+        influxdb3_local.error(
+            f"[{task_id}] Request body too large: {body_size} bytes (max {max_body_bytes})."
+        )
+        return {"message": f"[{task_id}] Error: Request body exceeds size limit."}
+
+    data: dict = json.loads(request_body)
+    influxdb3_local.info(f"[{task_id}] Request received.")
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str(data.get("enable_full_logging", False)).lower() == "true"
+    )
 
     try:
         start_time: float = time.time()
@@ -1474,8 +1517,19 @@ def process_request(
             "minutes": lambda x: timedelta(minutes=x),
             "hours": lambda x: timedelta(hours=x),
             "days": lambda x: timedelta(days=x),
+            "weeks": lambda x: timedelta(weeks=x),
         }
         batch_delta: timedelta = unit_mapping[unit.lower()](magnitude)
+
+        max_batches: int = 100_000
+        estimated_batches: float = (backfill_end - backfill_start) / batch_delta
+        if estimated_batches > max_batches:
+            influxdb3_local.error(
+                f"[{task_id}] Backfill range and batch_size would produce {int(estimated_batches)} "
+                f"batches, exceeding limit of {max_batches}. Increase batch_size or narrow the "
+                f"backfill window."
+            )
+            return {"message": f"[{task_id}] Error: Backfill range too large for batch_size."}
 
         influxdb3_local.info(
             f"[{task_id}] Starting downsampling for measurement {source_measurement} with fields: {fields} and tags: {tags} to query")
@@ -1598,5 +1652,5 @@ def process_request(
         }
 
     except Exception as e:
-        influxdb3_local.error(str(e))
-        return {"message": str(e)}
+        influxdb3_local.error(f"[{task_id}] {_exc(e)}")
+        return {"message": _exc(e)}

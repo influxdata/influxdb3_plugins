@@ -127,12 +127,19 @@
             "example": "500",
             "description": "Maximum number of messages to retrieve per scheduled call. Default: 500. Set to 0 for unlimited.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
 """
 
 import json
+import math
 import os
 import re
 import time
@@ -148,6 +155,20 @@ from jsonpath_ng.ext import parse as jsonpath_parse
 _POLL_TIMEOUT_MS = 1000
 _POLL_TIMEOUT_MS_FAST = 100
 _MAX_POLL_RECORDS = 500
+
+# InfluxDB integer field ranges
+_INT64_MIN: int = -9223372036854775808
+_INT64_MAX: int = 9223372036854775807
+_UINT64_MAX: int = 18446744073709551615
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 """
 Helper for batching multiple line protocol builders into a single write.
@@ -179,11 +200,26 @@ def add_field_with_type(line, field_key: str, value: Any, field_type: str):
     Supported types: int, uint, float, string, bool
     """
     if field_type == "int":
-        line.int64_field(field_key, int(value))
+        ival: int = int(value)
+        if not (_INT64_MIN <= ival <= _INT64_MAX):
+            raise ValueError(
+                f"int field '{field_key}' out of int64 range "
+                f"[{_INT64_MIN}, {_INT64_MAX}]: {ival}"
+            )
+        line.int64_field(field_key, ival)
     elif field_type == "uint":
-        line.uint64_field(field_key, int(value))
+        uval: int = int(value)
+        if not (0 <= uval <= _UINT64_MAX):
+            raise ValueError(
+                f"uint field '{field_key}' out of uint64 range "
+                f"[0, {_UINT64_MAX}]: {uval}"
+            )
+        line.uint64_field(field_key, uval)
     elif field_type == "float":
-        line.float64_field(field_key, float(value))
+        fval: float = float(value)
+        if not math.isfinite(fval):
+            raise ValueError(f"float field '{field_key}' is not finite: {fval}")
+        line.float64_field(field_key, fval)
     elif field_type == "string":
         line.string_field(field_key, str(value))
     elif field_type == "bool":
@@ -271,18 +307,40 @@ class KafkaConfig:
             )
         return os.path.join(plugin_dir, path)
 
+    @staticmethod
+    def _validate_topics(topics: list) -> None:
+        """Reject regex topic subscriptions (leading '^')."""
+        for topic in topics:
+            if isinstance(topic, str) and topic.startswith("^"):
+                raise ValueError(
+                    f"Invalid topic '{topic}': regex topic subscriptions "
+                    f"(leading '^') are not allowed"
+                )
+
+    @staticmethod
+    def _validate_bootstrap_servers(servers: list) -> None:
+        """Validate each bootstrap server is in 'host:port' form."""
+        for server in servers:
+            if not isinstance(server, str) or not re.match(r"^[^,\s]+:\d+$", server):
+                raise ValueError(
+                    f"Invalid bootstrap server '{server}'. "
+                    f"Expected 'host:port' format."
+                )
+
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
-        config_path: str = self._resolve_path(config_file, "configuration file")
+        if not config_file.endswith(".toml"):
+            raise ValueError(
+                "Invalid config file format: expected a .toml file"
+            )
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found or not accessible: {config_file}")
+        config_path: str = self._resolve_path(config_file, "configuration file")
 
         try:
             with open(config_path, "rb") as f:
                 config: dict[str, Any] = tomllib.load(f)
-        except OSError:
-            raise OSError(f"Configuration file not found or not accessible: {config_file}") from None
+        except Exception:
+            raise ValueError("Failed to read config file") from None
 
         self._validate_toml_config(config)
         return config
@@ -313,6 +371,16 @@ class KafkaConfig:
 
         kafka_config: dict[str, Any] = config["kafka"]
 
+        enable_full_logging = kafka_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'kafka.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
+
         if "bootstrap_servers" not in kafka_config:
             raise ValueError(
                 "Missing required parameter 'kafka.bootstrap_servers' in configuration"
@@ -334,11 +402,13 @@ class KafkaConfig:
             raise ValueError(
                 "Parameter 'kafka.bootstrap_servers' must be a non-empty list"
             )
+        self._validate_bootstrap_servers(servers)
 
         # Validate topics is a non-empty list
         topics: list[str] = kafka_config["topics"]
         if not isinstance(topics, list) or len(topics) == 0:
             raise ValueError("Parameter 'kafka.topics' must be a non-empty list")
+        self._validate_topics(topics)
 
         # Validate security_protocol if present
         security_protocol = kafka_config.get("security_protocol", "PLAINTEXT")
@@ -475,6 +545,12 @@ class KafkaConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["topics", "bootstrap_servers", "group_id"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -489,6 +565,9 @@ class KafkaConfig:
         # Parse space-separated values into lists
         topics_list: list[str] = self.args.get("topics").split()
         servers_list: list[str] = self.args.get("bootstrap_servers").split()
+
+        self._validate_topics(topics_list)
+        self._validate_bootstrap_servers(servers_list)
 
         # Validate offset_commit_policy
         commit_policy = self.args.get("offset_commit_policy", "on_success")
@@ -576,6 +655,7 @@ class KafkaConfig:
                 "sasl": sasl_config,
                 "ssl": ssl_config,
                 "max_poll_records": max_poll_records,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -814,6 +894,7 @@ class KafkaConsumerManager:
         self.consumer: Consumer | None = None
         self.connected: bool = False
         self._pending_messages: list = []  # Messages received during assignment wait
+        self.poll_error: bool = False  # Set when a poll fails (auth/cert/transport)
 
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
@@ -863,27 +944,25 @@ class KafkaConsumerManager:
         if "SSL" in security_protocol:
             ssl_config = self.config.get("ssl", {})
 
+            # Pin TLS verification explicitly
+            consumer_config["enable.ssl.certificate.verification"] = True
+            consumer_config["ssl.endpoint.identification.algorithm"] = "https"
+
             ca_cert = ssl_config.get("ca_cert")
             if ca_cert:
-                ca_cert_orig = ca_cert
-                ca_cert = self._resolve_path(ca_cert, "CA certificate")
-                if not os.path.exists(ca_cert):
-                    raise FileNotFoundError(f"TLS configuration failed. ca_cert not found: {ca_cert_orig}")
-                consumer_config["ssl.ca.location"] = ca_cert
+                consumer_config["ssl.ca.location"] = self._resolve_path(
+                    ca_cert, "CA certificate"
+                )
 
             client_cert = ssl_config.get("client_cert")
             client_key = ssl_config.get("client_key")
             if client_cert and client_key:
-                client_cert_orig = client_cert
-                client_key_orig = client_key
-                client_cert = self._resolve_path(client_cert, "client certificate")
-                client_key = self._resolve_path(client_key, "client key")
-                if not os.path.exists(client_cert):
-                    raise FileNotFoundError(f"TLS configuration failed. client_cert not found: {client_cert_orig}")
-                if not os.path.exists(client_key):
-                    raise FileNotFoundError(f"TLS configuration failed. client_key not found: {client_key_orig}")
-                consumer_config["ssl.certificate.location"] = client_cert
-                consumer_config["ssl.key.location"] = client_key
+                consumer_config["ssl.certificate.location"] = self._resolve_path(
+                    client_cert, "client certificate"
+                )
+                consumer_config["ssl.key.location"] = self._resolve_path(
+                    client_key, "client key"
+                )
 
                 key_password = ssl_config.get("key_password")
                 if key_password:
@@ -909,21 +988,34 @@ class KafkaConsumerManager:
             # First polls trigger the rebalance process
             assignment_timeout = 10  # seconds
             start_time = time.time()
+            assignment = None
             while time.time() - start_time < assignment_timeout:
                 # Poll to trigger rebalance - save any messages received
                 msg = self.consumer.poll(timeout=0.5)
-                if msg is not None and not msg.error():
-                    self._pending_messages.append(msg)
+                if msg is not None:
+                    if msg.error():
+                        if msg.error().code() != KafkaError._PARTITION_EOF:
+                            self.influxdb3_local.error(
+                                f"[{self.task_id}] Error connecting to Kafka"
+                            )
+                            return False
+                    else:
+                        self._pending_messages.append(msg)
                 assignment = self.consumer.assignment()
                 if assignment:
                     self.influxdb3_local.info(
                         f"[{self.task_id}] Partitions assigned: {assignment}"
                     )
                     break
-            else:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] No partitions assigned within {assignment_timeout}s"
+
+            if not assignment:
+                # No assignment within the timeout is treated as a failure
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] No partitions assigned within "
+                    f"{assignment_timeout}s. Check broker availability, "
+                    f"credentials, certificates, and topic names."
                 )
+                return False
 
             self.connected = True
             self.influxdb3_local.info(
@@ -941,7 +1033,7 @@ class KafkaConsumerManager:
                 )
             else:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error connecting to Kafka: {str(e)}"
+                    f"[{self.task_id}] Error connecting to Kafka: {_exc(e)}"
                 )
             return False
 
@@ -1018,6 +1110,18 @@ class KafkaConsumerManager:
                     # No more messages
                     break
 
+                if msg.error():
+                    # _PARTITION_EOF is a normal end-of-partition marker; any
+                    # other error means the poll itself failed (authentication,
+                    # certificate, transport). Flag it and stop polling.
+                    if msg.error().code() != KafkaError._PARTITION_EOF:
+                        self.poll_error = True
+                        self.influxdb3_local.error(
+                            f"[{self.task_id}] Error polling Kafka messages"
+                        )
+                        break
+                    continue
+
                 message_data = self._process_message(msg)
                 if message_data:
                     messages.append(message_data)
@@ -1026,8 +1130,9 @@ class KafkaConsumerManager:
                 poll_timeout = _POLL_TIMEOUT_MS_FAST / 1000.0
 
         except Exception as e:
+            self.poll_error = True
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error polling Kafka messages: {str(e)}"
+                f"[{self.task_id}] Error polling Kafka messages: {_exc(e)}"
             )
 
         return messages
@@ -1042,25 +1147,39 @@ class KafkaConsumerManager:
             if not assignment:
                 return
 
+            # When there is no position yet (new/empty topic), bootstrap the
+            # offset from the watermark matching auto_offset_reset.
+            offset_reset = self.config.get("auto_offset_reset", "earliest")
             offsets_to_commit = []
             for tp in assignment:
                 # First try to get current position
                 position = self.consumer.position([tp])
                 if position and position[0] and position[0].offset >= 0:
                     offsets_to_commit.append(position[0])
-                else:
-                    # No position yet - get high watermark (end of partition)
+                elif not self.poll_error:
+                    # No fetch position yet and the poll was healthy. Bootstrap
+                    # an offset only for a group that has never committed one -
+                    # if a committed offset already exists, leave it untouched
+                    committed = self.consumer.committed([tp], timeout=10)
+                    if committed and committed[0] and committed[0].offset >= 0:
+                        # An offset already exists for this partition.
+                        continue
                     low, high = self.consumer.get_watermark_offsets(tp)
-                    if high >= 0:
-                        tp_to_commit = TopicPartition(tp.topic, tp.partition, high)
+                    bootstrap = low if offset_reset == "earliest" else high
+                    if bootstrap >= 0:
+                        tp_to_commit = TopicPartition(
+                            tp.topic, tp.partition, bootstrap
+                        )
                         offsets_to_commit.append(tp_to_commit)
+                # else: poll failed and no valid position - skip this partition
+                #       so the previously committed offset stays intact.
 
             if offsets_to_commit:
                 self.consumer.commit(offsets=offsets_to_commit)
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error committing offsets: {str(e)}"
+                f"[{self.task_id}] Error committing offsets: {_exc(e)}"
             )
 
     def disconnect(self):
@@ -1074,7 +1193,7 @@ class KafkaConsumerManager:
                 )
             except Exception as e:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error disconnecting from Kafka: {str(e)}"
+                    f"[{self.task_id}] Error disconnecting from Kafka: {_exc(e)}"
                 )
 
 
@@ -1139,7 +1258,7 @@ class JSONParser:
                     except Exception as e:
                         self.influxdb3_local.warn(
                             f"[{self.task_id}] Error parsing array element {i}: "
-                            f"{str(e)}"
+                            f"{_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -1158,10 +1277,10 @@ class JSONParser:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]):
@@ -1248,16 +1367,17 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(
         self, data: dict[str, Any], path: str, cache_key: str | None = None
@@ -1300,7 +1420,14 @@ class LineProtocolParser:
 
             measurement_and_tags: str = parts[0]
             fields_str: str = parts[1]
-            timestamp_ns: int | None = int(parts[2]) if len(parts) == 3 else None
+            timestamp_ns: int | None = None
+            if len(parts) == 3:
+                timestamp_ns = int(parts[2])
+                if not (_INT64_MIN <= timestamp_ns <= _INT64_MAX):
+                    raise ValueError(
+                        f"line protocol timestamp out of int64 range "
+                        f"[{_INT64_MIN}, {_INT64_MAX}]: {timestamp_ns}"
+                    )
 
             measurement, tags = self._parse_measurement_and_tags(measurement_and_tags)
 
@@ -1323,7 +1450,7 @@ class LineProtocolParser:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1546,7 +1673,7 @@ class TextParser:
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
                             f"[{self.task_id}] Failed to convert field '{field_key}' "
-                            f"value '{value}' to type '{field_type}': {str(e)}"
+                            f"value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1560,39 +1687,33 @@ class TextParser:
             return line
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
 
     def _extract_value(
         self, text: str, pattern_str: str, field_name: str, cache_key: str | None = None
     ) -> str | None:
-        """Extract value from text using regex pattern"""
-        try:
-            if cache_key and cache_key in self._compiled_patterns:
-                pattern = self._compiled_patterns[cache_key]
-            else:
-                pattern = re.compile(pattern_str)
-
-            match = pattern.search(text)
-
-            if not match:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] Pattern for '{field_name}' did not match: "
-                    f"{pattern_str}"
-                )
-                return None
-
-            if match.groups():
-                return match.group(1)
-            else:
-                return match.group(0)
-
-        except re.error as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Invalid regex pattern for '{field_name}': "
-                f"{pattern_str} - {e}"
+        """Extract value from text using a pre-compiled regex pattern"""
+        pattern = self._compiled_patterns.get(cache_key) if cache_key else None
+        if pattern is None:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] No compiled pattern for '{field_name}' "
+                f"(pattern failed to compile at init): {pattern_str}"
             )
             return None
+
+        match = pattern.search(text)
+        if not match:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Pattern for '{field_name}' did not match: "
+                f"{pattern_str}"
+            )
+            return None
+
+        if match.groups():
+            return match.group(1)
+        else:
+            return match.group(0)
 
     def _get_timestamp(self, payload: str) -> int:
         """Extract and convert timestamp from text payload"""
@@ -1608,17 +1729,18 @@ class TextParser:
             payload, pattern_str, "timestamp", "timestamp"
         )
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class KafkaStats:
@@ -1735,7 +1857,7 @@ def write_stats(
             )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1764,7 +1886,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1805,6 +1927,10 @@ def process_scheduled_call(
             )
 
         kafka_config: dict = cached_config["kafka"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(kafka_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = kafka_config["format"]
         offset_commit_policy: str = kafka_config.get(
             "offset_commit_policy", "on_success"
@@ -1826,6 +1952,7 @@ def process_scheduled_call(
 
         # Retrieve messages
         messages: list = kafka_consumer.get_messages()
+        poll_error: bool = kafka_consumer.poll_error
 
         # Commit offsets immediately if policy is "always"
         if offset_commit_policy == "always" and messages:
@@ -1835,8 +1962,15 @@ def process_scheduled_call(
         group_id: str = kafka_config.get("group_id", "unknown")
 
         if len(messages) == 0:
-            # Still commit to save current position (important for auto_offset_reset=latest)
-            kafka_consumer.commit_offsets()
+            if poll_error:
+                # Do not commit after a failed poll
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping offset commit: poll finished with "
+                    f"an error and no messages were retrieved"
+                )
+            else:
+                # Commit to save current position (e.g. bootstrap a new topic)
+                kafka_consumer.commit_offsets()
             write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
             return
 
@@ -1898,7 +2032,7 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
         # Phase 3: Update stats based on results
@@ -1958,7 +2092,7 @@ def process_scheduled_call(
         write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {_exc(e)}")
         influxdb3_local.cache.delete("kafka_config")
 
     finally:

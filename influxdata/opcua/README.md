@@ -39,10 +39,10 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Required parameters
 
-| Parameter    | Type   | TOML Section | Description                                                   |
-|--------------|--------|--------------|---------------------------------------------------------------|
-| `server_url` | string | `[opcua]`    | OPC UA server endpoint URL (e.g., `opc.tcp://localhost:4840`) |
-| `table_name` | string | `[opcua]`    | InfluxDB measurement name for storing data                    |
+| Parameter    | Type   | TOML Section | Description                                                                                                                                                               |
+|--------------|--------|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `server_url` | string | `[opcua]`    | OPC UA server endpoint URL (e.g., `opc.tcp://localhost:4840`). Must use the `opc.tcp://` or `opc.tls://` scheme; other schemes (`file://`, `http://`, etc.) are rejected. |
+| `table_name` | string | `[opcua]`    | InfluxDB measurement name for storing data                                                                                                                                |
 
 **One of the following is required** (mutually exclusive):
 
@@ -124,6 +124,8 @@ quality_filter = ["good", "uncertain"]
 
 **Note:** Both `username` and `password` must be provided together.
 
+**Security:** When `security_policy` is not set, the connection is unencrypted and credentials are sent in cleartext. The plugin refuses to send `username`/`password` in that case unless `allow_insecure_auth` is explicitly set to `true`. Prefer configuring a `security_policy` for an encrypted connection.
+
 ### Security parameters
 
 | Parameter         | Type   | Default          | TOML Section        | Description                                                                                                        |
@@ -137,10 +139,12 @@ quality_filter = ["good", "uncertain"]
 
 ### Advanced parameters
 
-| Parameter              | Type   | Default | TOML Section | Description                                                                                  |
-|------------------------|--------|---------|--------------|----------------------------------------------------------------------------------------------|
-| `config_file_path`     | string | none    | CLI only     | Path to TOML config file (absolute or relative to `PLUGIN_DIR`)                              |
-| `disable_config_cache` | bool   | false   | `[opcua]`    | Reload configuration on every call instead of caching for 1 hour. Useful during development. |
+| Parameter              | Type   | Default | TOML Section | Description                                                                                                                                                                                                              |
+|------------------------|--------|---------|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `config_file_path`     | string | none    | CLI only     | Path to TOML config file (absolute or relative to `PLUGIN_DIR`)                                                                                                                                                          |
+| `disable_config_cache` | bool   | false   | `[opcua]`    | Reload configuration on every call instead of caching for 1 hour. Useful during development.                                                                                                                             |
+| `allow_insecure_auth`  | bool   | false   | `[opcua]`    | Permit sending `username`/`password` when `security_policy` is not set (credentials sent in cleartext over an unencrypted connection). Only enable on a trusted network.                                                 |
+| `enable_full_logging`  | bool   | false   | `[opcua]`    | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths). Enable temporarily for debugging. |
 
 ### Static and dynamic tags
 
@@ -312,16 +316,16 @@ If a relative path is specified and `PLUGIN_DIR` is not set, the plugin will ret
 
 ### TOML section reference
 
-| TOML section         | Description                                      |
-|----------------------|--------------------------------------------------|
-| `[opcua]`            | Required. `server_url`, `table_name`, `quality_filter`, `disable_config_cache` |
-| `[opcua.default_tags]` | Static tags as `key = "value"` pairs           |
-| `[opcua.namespaces]` | Namespace alias mappings as `alias = "uri"` pairs. Validated but not used for alias substitution in TOML — use `nsu=<uri>;...` directly in node IDs |
-| `[opcua.tag_nodes]`  | Dynamic tags from OPC UA nodes                   |
-| `[opcua.nodes]`      | Explicit node mappings (mutually exclusive with `[opcua.browse]`) |
-| `[opcua.browse]`     | Browse mode settings: `browse_root`, `browse_depth`, `path_tags`, `filter`, `exclude_branches`, `browse_tags`, `name_separator`, `name_tags` |
-| `[opcua.security]`   | `security_policy`, `security_mode`, `certificate`, `private_key` |
-| `[opcua.auth]`       | `username`, `password`                           |
+| TOML section           | Description                                                                                                                                         |
+|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `[opcua]`              | Required. `server_url`, `table_name`, `quality_filter`, `disable_config_cache`, `allow_insecure_auth`                                               |
+| `[opcua.default_tags]` | Static tags as `key = "value"` pairs                                                                                                                |
+| `[opcua.namespaces]`   | Namespace alias mappings as `alias = "uri"` pairs. Validated but not used for alias substitution in TOML — use `nsu=<uri>;...` directly in node IDs |
+| `[opcua.tag_nodes]`    | Dynamic tags from OPC UA nodes                                                                                                                      |
+| `[opcua.nodes]`        | Explicit node mappings (mutually exclusive with `[opcua.browse]`)                                                                                   |
+| `[opcua.browse]`       | Browse mode settings: `browse_root`, `browse_depth`, `path_tags`, `filter`, `exclude_branches`, `browse_tags`, `name_separator`, `name_tags`        |
+| `[opcua.security]`     | `security_policy`, `security_mode`, `certificate`, `private_key`                                                                                    |
+| `[opcua.auth]`         | `username`, `password`                                                                                                                              |
 
 ## Node Mapping Format
 
@@ -830,6 +834,17 @@ When using a security policy, both files are required:
 - `certificate`: Client certificate in DER format (`.der`)
 - `private_key`: Client private key in PEM format (`.pem`)
 
+#### "Invalid 'server_url' scheme"
+
+- `server_url` must use the `opc.tcp://` or `opc.tls://` scheme
+- Other schemes (`file://`, `http://`, etc.) are rejected
+
+#### "Refusing to send username/password over an unencrypted connection"
+
+- `username`/`password` are set but no `security_policy` is configured
+- Configure a `security_policy` for an encrypted connection (recommended)
+- Or, only on a trusted network, set `allow_insecure_auth = true` to permit cleartext credentials
+
 #### "Namespace URI not found on server"
 
 - The `nsu=` URI does not match any namespace registered on the server
@@ -867,6 +882,14 @@ When using a security policy, both files are required:
 
 - Configuration is cached for 1 hour — either wait for expiry or set `disable_config_cache = true`
 - Any plugin error automatically clears the cache
+
+#### "Previous opcua call still running, skipping this tick"
+
+- The plugin reuses a single cached connection and event loop, which cannot be used by two calls at once. With an asynchronous trigger (`--run-asynchronous`), scheduled invocations may overlap; if a call is still running when the next tick fires, that tick is skipped instead of failing.
+- Occasional skips are harmless. Frequent skips mean each read takes longer than the interval — reduce the per-call runtime or give it more time:
+  - Read fewer nodes per trigger, or narrow browse mode (smaller `browse_depth`, tighter `filter`/`exclude_branches`)
+  - Increase the trigger interval (e.g. `--trigger-spec "every:30s"` instead of `every:10s`)
+  - Check for a slow or unreachable server adding connection latency
 
 ## Limitations
 

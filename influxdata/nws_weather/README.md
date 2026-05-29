@@ -31,11 +31,12 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Optional parameters
 
-| Parameter            | Type    | Default                    | Description                                                                           |
-|----------------------|---------|----------------------------|---------------------------------------------------------------------------------------|
-| `measurement`        | string  | weather_observations       | Destination measurement for weather data                                              |
-| `user_agent`         | string  | InfluxDB3-NWS-Plugin/1.0   | Custom User-Agent header for NWS API requests                                         |
-| `use_data_timestamp` | boolean | true                       | Use timestamp from weather observation data instead of current time when writing data |
+| Parameter             | Type    | Default                    | Description                                                                                                                                                                               |
+|-----------------------|---------|----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `measurement`         | string  | weather_observations       | Destination measurement for weather data                                                                                                                                                  |
+| `user_agent`          | string  | InfluxDB3-NWS-Plugin/1.0   | Custom User-Agent header for NWS API requests                                                                                                                                             |
+| `use_data_timestamp`  | boolean | true                       | Use timestamp from weather observation data instead of current time when writing data                                                                                                     |
+| `enable_full_logging` | boolean | false                      | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values. Enable temporarily for debugging. |
 
 **Note:** Station IDs are separated by dots (`.`) in trigger arguments. Example: `stations=KSEA.KSFO.KLAX`
 

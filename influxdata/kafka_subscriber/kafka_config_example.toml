@@ -53,6 +53,10 @@ max_poll_records = 500                 # Max messages per call (0 = unlimited)
 # Security (PLAINTEXT for development)
 security_protocol = "PLAINTEXT"
 
+# When true, full exception messages are logged. When false (default), only the
+# exception type is logged, to avoid leaking sensitive values into log output.
+# enable_full_logging = false
+
 [mapping.json]
 table_name = "sensor_data"
 

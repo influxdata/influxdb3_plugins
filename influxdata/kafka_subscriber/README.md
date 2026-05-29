@@ -92,6 +92,14 @@ In TOML configuration, these parameters are placed under the `[kafka.ssl]` secti
 
 **Note:** For mutual TLS, both `ssl_cert` and `ssl_key` must be provided together.
 
+### Logging parameters
+
+In TOML configuration, `enable_full_logging` is placed directly under the `[kafka]` section.
+
+| Parameter             | Type    | Default | Description                                                                                                                                                                                                                              |
+|-----------------------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enable_full_logging` | boolean | false   | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths) into log output. Enable temporarily for debugging. |
+
 ### Message format parameters
 
 In TOML configuration, `format` is placed under the `[kafka]` section; `timestamp_field` is placed under `[mapping.json]` or `[mapping.text]` section.

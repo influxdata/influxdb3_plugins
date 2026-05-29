@@ -11,7 +11,7 @@
         {
             "name": "server_url",
             "example": "opc.tcp://localhost:4840",
-            "description": "OPC UA server endpoint URL.",
+            "description": "OPC UA server endpoint URL. Must use the opc.tcp:// or opc.tls:// scheme.",
             "required": true
         },
         {
@@ -139,6 +139,18 @@
             "example": "true",
             "description": "Disable configuration caching. When set to 'true', the configuration is reloaded from file/arguments on every scheduled call instead of being cached for 1 hour. Useful during development or when the config file changes frequently. Default: false.",
             "required": false
+        },
+        {
+            "name": "allow_insecure_auth",
+            "example": "true",
+            "description": "Permit sending username/password when 'security_policy' is not set. By default the plugin refuses this, because credentials are transmitted in cleartext over an unencrypted connection. Only enable on a trusted network. Default: false.",
+            "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -147,11 +159,13 @@
 import asyncio
 import os
 import re
+import threading
 import time
 import tomllib
 import uuid
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 from asyncua import Client, ua
 
@@ -191,11 +205,26 @@ _VALID_SECURITY_POLICIES = {
     "Aes128Sha256RsaOaep",
     "Aes256Sha256RsaPss",
 }
+# Deprecated / cryptographically weak policies (SHA-1, RSA PKCS#1 v1.5).
+# Accepted for backward compatibility but warned about.
+_DEPRECATED_SECURITY_POLICIES = {"Basic128Rsa15", "Basic256"}
 _VALID_SECURITY_MODES = {"Sign", "SignAndEncrypt"}
 _VALID_QUALITY_CATEGORIES = {"good", "uncertain", "bad"}
 _DEFAULT_QUALITY_FILTER = {"good"}
 
 _CONFIG_CACHE_TTL = 60 * 60  # seconds — TTL for config and browse structure cache
+
+# Allowed URL schemes for 'server_url'. Restricted to OPC UA transport schemes
+_ALLOWED_OPCUA_SCHEMES = ("opc.tcp", "opc.tls")
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 """
@@ -305,18 +334,72 @@ class OPCUAConfig:
         else:
             self.config = self._build_config_from_args()
 
+        # Security validation regardless of the configuration source
+        opcua_config: dict[str, Any] = self.config.get("opcua", {})
+        self._validate_server_url(opcua_config.get("server_url"))
+        self._validate_secure_auth(opcua_config)
+
+    @staticmethod
+    def _validate_secure_auth(opcua_config: dict[str, Any]):
+        """Refuse username/password authentication over an unencrypted channel.
+
+        When 'security_policy' is unset, asyncua connects with
+        SecurityPolicyNone and the credentials are sent in cleartext during
+        session activation. Require an explicit 'allow_insecure_auth' opt-in
+        before permitting that.
+        """
+        auth: dict = opcua_config.get("auth", {})
+        if not (auth.get("username") and auth.get("password")):
+            return
+
+        security: dict = opcua_config.get("security", {})
+        if security.get("security_policy"):
+            return
+
+        allow_insecure: bool = (
+            str(opcua_config.get("allow_insecure_auth", False)).lower() == "true"
+        )
+        if not allow_insecure:
+            raise ValueError(
+                "Refusing to send username/password over an unencrypted "
+                "connection: 'security_policy' is not set. Configure a security "
+                "policy, or set 'allow_insecure_auth' to true to permit "
+                "cleartext credentials (only on a trusted network)."
+            )
+
+    @staticmethod
+    def _validate_server_url(server_url: Any):
+        """Validate that 'server_url' uses an allowed OPC UA transport scheme.
+
+        Rejects schemes such as file:// or http:// that would let the plugin
+        be abused for local file disclosure or TCP port scanning.
+        """
+        if not isinstance(server_url, str) or not server_url.strip():
+            raise ValueError("Parameter 'server_url' must be a non-empty string")
+
+        parsed = urlparse(server_url.strip())
+        if parsed.scheme not in _ALLOWED_OPCUA_SCHEMES:
+            allowed = ", ".join(f"{s}://" for s in _ALLOWED_OPCUA_SCHEMES)
+            raise ValueError(
+                f"Invalid 'server_url' scheme: only {allowed} is allowed"
+            )
+        if not parsed.hostname:
+            raise ValueError("Parameter 'server_url' must include a host")
+
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
-        config_path: str = _resolve_path(config_file, "configuration file")
+        if not config_file.endswith(".toml"):
+            raise ValueError(
+                "Invalid config file format: expected a .toml file"
+            )
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found or not accessible: {config_file}")
+        config_path: str = _resolve_path(config_file, "configuration file")
 
         try:
             with open(config_path, "rb") as f:
                 config: dict[str, Any] = tomllib.load(f)
-        except OSError:
-            raise OSError(f"Configuration file not found or not accessible: {config_file}") from None
+        except Exception:
+            raise ValueError("Failed to read config file") from None
 
         self._validate_toml_config(config)
 
@@ -334,6 +417,16 @@ class OPCUAConfig:
             raise ValueError("Missing required 'opcua' section in configuration")
 
         opcua_config: dict[str, Any] = config["opcua"]
+
+        enable_full_logging = opcua_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'opcua.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
 
         if "server_url" not in opcua_config:
             raise ValueError(
@@ -415,6 +508,12 @@ class OPCUAConfig:
                     f"Invalid security_policy: {policy}. "
                     f"Supported: {', '.join(sorted(_VALID_SECURITY_POLICIES))}"
                 )
+            if policy in _DEPRECATED_SECURITY_POLICIES:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] security_policy '{policy}' is deprecated and "
+                    f"cryptographically weak (SHA-1 / RSA PKCS#1 v1.5). Prefer "
+                    f"Basic256Sha256 or an Aes*Sha256* policy."
+                )
             mode = security.get("security_mode", "SignAndEncrypt")
             if mode not in _VALID_SECURITY_MODES:
                 raise ValueError(
@@ -461,6 +560,15 @@ class OPCUAConfig:
         if disable_cache is not None and not isinstance(disable_cache, (bool, str)):
             raise ValueError(
                 "Parameter 'opcua.disable_config_cache' must be a boolean or string (true/false)"
+            )
+
+        # Validate allow_insecure_auth if present (accepts bool or string)
+        allow_insecure_auth = opcua_config.get("allow_insecure_auth")
+        if allow_insecure_auth is not None and not isinstance(
+            allow_insecure_auth, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'opcua.allow_insecure_auth' must be a boolean or string (true/false)"
             )
 
     @staticmethod
@@ -601,6 +709,12 @@ class OPCUAConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         if not self.args:
             raise ValueError("No arguments provided")
 
@@ -776,6 +890,12 @@ class OPCUAConfig:
                     f"Invalid security_policy: {security_policy}. "
                     f"Supported: {', '.join(sorted(_VALID_SECURITY_POLICIES))}"
                 )
+            if security_policy in _DEPRECATED_SECURITY_POLICIES:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] security_policy '{security_policy}' is "
+                    f"deprecated and cryptographically weak (SHA-1 / RSA PKCS#1 "
+                    f"v1.5). Prefer Basic256Sha256 or an Aes*Sha256* policy."
+                )
             security_config["security_policy"] = security_policy
 
             if security_mode:
@@ -822,6 +942,10 @@ class OPCUAConfig:
             str(self.args.get("disable_config_cache", "false")).lower() == "true"
         )
 
+        allow_insecure_auth: bool = (
+            str(self.args.get("allow_insecure_auth", "false")).lower() == "true"
+        )
+
         result = {
             "opcua": {
                 "server_url": self.args.get("server_url"),
@@ -833,6 +957,8 @@ class OPCUAConfig:
                 "security": security_config,
                 "auth": auth_config,
                 "disable_config_cache": disable_config_cache,
+                "allow_insecure_auth": allow_insecure_auth,
+                "enable_full_logging": enable_full_logging,
             }
         }
 
@@ -952,18 +1078,14 @@ class OPCUAConnectionManager:
 
             if policy:
                 mode = security.get("security_mode", "SignAndEncrypt")
-                cert_orig = security["certificate"]
-                key_orig = security["private_key"]
-                cert_path = _resolve_path(cert_orig, "client certificate")
-                key_path = _resolve_path(key_orig, "client private key")
+                cert_path = _resolve_path(security["certificate"], "client certificate")
+                key_path = _resolve_path(security["private_key"], "client private key")
 
-                if not os.path.exists(cert_path):
-                    raise FileNotFoundError(
-                        f"Security configuration failed. certificate not found: {cert_orig}"
-                    )
-                if not os.path.exists(key_path):
-                    raise FileNotFoundError(
-                        f"Security configuration failed. private_key not found: {key_orig}"
+                # set_security_string is comma-delimited; a comma in a path would
+                # break parsing and silently apply the wrong policy/files.
+                if "," in cert_path or "," in key_path:
+                    raise ValueError(
+                        "certificate and private_key paths must not contain commas"
                     )
 
                 security_string = f"{policy},{mode},{cert_path},{key_path}"
@@ -991,7 +1113,7 @@ class OPCUAConnectionManager:
 
             return True
 
-        except Exception as e:
+        except Exception:
             if self.config.get("security", {}).get("security_policy"):
                 self.influxdb3_local.error(
                     f"[{self.task_id}] Error connecting to OPC UA server: "
@@ -1000,7 +1122,8 @@ class OPCUAConnectionManager:
                 )
             else:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error connecting to OPC UA server: {str(e)}"
+                    f"[{self.task_id}] Error connecting to OPC UA server: "
+                    f"connection failed. Check server address and availability."
                 )
             return False
 
@@ -1119,7 +1242,7 @@ class OPCUAConnectionManager:
             )
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error browsing from {root_node_id}: {str(e)}"
+                f"[{self.task_id}] Error browsing from {root_node_id}: {_exc(e)}"
             )
             return []
 
@@ -1156,7 +1279,11 @@ class OPCUAConnectionManager:
 
         try:
             children = await node.get_children()
-        except Exception:
+        except Exception as e:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Browse: cannot read children of "
+                f"{node.nodeid.to_string()}: {type(e).__name__}: {e}"
+            )
             return
 
         variables: dict[str, str] = {}
@@ -1189,7 +1316,11 @@ class OPCUAConnectionManager:
                             child, remaining_depth - 1, filter_re, exclude_re,
                             f"{browse_name}_", variables,
                         )
-            except Exception:
+            except Exception as e:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] Browse: skipping node "
+                    f"{child.nodeid.to_string()}: {type(e).__name__}: {e}"
+                )
                 continue
 
         if variables:
@@ -1216,7 +1347,11 @@ class OPCUAConnectionManager:
 
         try:
             children = await node.get_children()
-        except Exception:
+        except Exception as e:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Browse: cannot read children of "
+                f"{node.nodeid.to_string()}: {type(e).__name__}: {e}"
+            )
             return
 
         for child in children:
@@ -1236,7 +1371,11 @@ class OPCUAConnectionManager:
                         child, remaining_depth - 1, filter_re, exclude_re,
                         f"{prefix}{browse_name}_", variables,
                     )
-            except Exception:
+            except Exception as e:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] Browse: skipping node "
+                    f"{child.nodeid.to_string()}: {type(e).__name__}: {e}"
+                )
                 continue
 
     async def read_browsed_nodes(
@@ -1387,7 +1526,7 @@ class OPCUAConnectionManager:
                 )
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error disconnecting from OPC UA server: {str(e)}"
+                f"[{self.task_id}] Error disconnecting from OPC UA server: {_exc(e)}"
             )
 
 
@@ -1497,7 +1636,7 @@ def write_stats(
         )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1525,7 +1664,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1680,6 +1819,11 @@ async def _async_scheduled_call(
                 )
         else:
             influxdb3_local.info(f"[{task_id}] Using cached configuration")
+
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(cached_config.get("enable_full_logging", False)).lower() == "true"
+        )
 
         server_url: str = cached_config["server_url"]
         table_name: str = cached_config["table_name"]
@@ -1859,18 +2003,13 @@ async def _async_scheduled_call(
                 stats.record_point_written(len(all_lines))
             except Exception as e:
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
                 total_errors += total_fields
                 total_fields = 0
 
-        # ── 7. Stats every 10 calls ──────────────────────────────────────────
-        call_count: int = influxdb3_local.cache.get("opcua_call_count") or 0
-        call_count += 1
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, server_url, table_name, task_id)
-            call_count = 0
-        influxdb3_local.cache.put("opcua_call_count", call_count)
+        # ── 7. Write stats every call ────────────────────────────────────────
+        write_stats(influxdb3_local, stats, server_url, table_name, task_id)
 
         # ── 7. Summary log ───────────────────────────────────────────────────
         if total_fields > 0 or total_errors > 0:
@@ -1883,7 +2022,7 @@ async def _async_scheduled_call(
             influxdb3_local.warn(f"[{task_id}] No fields to write - all nodes failed")
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in OPC UA plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in OPC UA plugin: {_exc(e)}")
         # Close and drop connection so next call starts fresh
         if opcua_client is not None:
             await opcua_client.disconnect_silent()
@@ -1910,12 +2049,29 @@ def process_scheduled_call(
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Starting opcua plugin")
 
-    loop: asyncio.AbstractEventLoop | None = influxdb3_local.cache.get(
-        "opcua_event_loop"
-    )
-    if loop is None or loop.is_closed():
-        loop = asyncio.new_event_loop()
-        influxdb3_local.info(f"[{task_id}] Creating a new event loop")
-        influxdb3_local.cache.put("opcua_event_loop", loop)
+    # Lock lives in the shared cache so it is shared across async invocations.
+    # Skip this tick if a previous call still holds the loop.
+    lock = influxdb3_local.cache.get("opcua_call_lock")
+    if lock is None:
+        lock = threading.Lock()
+        influxdb3_local.cache.put("opcua_call_lock", lock)
 
-    loop.run_until_complete(_async_scheduled_call(influxdb3_local, task_id, args))
+    if not lock.acquire(blocking=False):
+        influxdb3_local.warn(
+            f"[{task_id}] Previous opcua call still running, skipping this tick. "
+            f"Reduce plugin runtime (fewer nodes) or increase the trigger interval."
+        )
+        return
+
+    try:
+        loop: asyncio.AbstractEventLoop | None = influxdb3_local.cache.get(
+            "opcua_event_loop"
+        )
+        if loop is None or loop.is_closed():
+            loop = asyncio.new_event_loop()
+            influxdb3_local.info(f"[{task_id}] Creating a new event loop")
+            influxdb3_local.cache.put("opcua_event_loop", loop)
+
+        loop.run_until_complete(_async_scheduled_call(influxdb3_local, task_id, args))
+    finally:
+        lock.release()

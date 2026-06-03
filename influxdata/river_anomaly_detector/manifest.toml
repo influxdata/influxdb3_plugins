@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "river_anomaly_detector"
 version = "0.1.0"
-description = "Online time-series anomaly detection on writes using River ML, combining rolling statistics with HalfSpaceTrees for per-series scoring and optional auto-tuning."
+description = "Detects time-series anomalies on writes using River ML models, combining rolling statistics with HalfSpaceTrees for per-series anomaly scoring and optional auto-tuning from River Auto Profiler output."
 triggers = ["process_writes"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/river_anomaly_detector"

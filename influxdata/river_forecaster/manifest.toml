@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "river_forecaster"
 version = "0.1.0"
-description = "Online time-series forecasting using River ML SNARIMAX models, learning from writes and producing scheduled multi-step forecasts with optional auto-horizon."
+description = "Provides online time-series forecasting with River ML SNARIMAX models, learning from writes and producing scheduled multi-step forecasts with per-series model state and optional auto-horizon support."
 triggers = ["process_writes"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/river_forecaster"

@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "state_change"
 version = "1.0.0"
-description = "Field change and threshold monitoring via scheduler and data writes plugins. Detects changes in field values or threshold conditions with customizable notification templates."
+description = "Provides field change and threshold monitoring capabilities through scheduler and data writes plugins. Detects changes in field values or threshold conditions with customizable notification templates."
 triggers = ["process_writes", "process_scheduled_call"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/state_change"

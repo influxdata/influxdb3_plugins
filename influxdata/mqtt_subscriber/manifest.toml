@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "mqtt_subscriber"
 version = "0.1.0"
-description = "Real-time ingestion of MQTT messages into InfluxDB 3. Subscribe to MQTT broker topics and transform messages into time-series data (JSON, Line Protocol, custom text formats)."
+description = "Enables real-time ingestion of MQTT messages into InfluxDB 3. Subscribe to MQTT topics and transform messages into time-series data with support for JSON, Line Protocol, and custom text formats."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/mqtt_subscriber"

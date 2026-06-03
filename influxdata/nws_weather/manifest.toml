@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "nws_weather"
 version = "1.0.0"
-description = "Real-time weather data from the US National Weather Service API for demonstration and sample data. Fetches live observations from multiple US weather stations."
+description = "Provides real-time weather data from the National Weather Service API for demonstration and sample data purposes. Fetches live observations from multiple weather stations across the United States."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/nws_weather"

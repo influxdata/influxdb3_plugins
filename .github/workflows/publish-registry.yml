@@ -1,0 +1,150 @@
+name: Publish Registry
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'influxdata/**'
+
+concurrency:
+  group: publish-registry
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_ROOT: influxdata
+  REGISTRY_RELEASE: registry
+  SDK_REPO: influxdata/influxdb3-plugin-sdk
+  SDK_VERSION: v0.5.0
+  EXCLUDE_DIRS: "library"
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install influxdb3-plugin CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="influxdb3-plugin-x86_64-unknown-linux-gnu.tar.gz"
+          gh release download "$SDK_VERSION" \
+            --repo "$SDK_REPO" \
+            --pattern "$asset" \
+            --pattern "SHA256SUMS" \
+            --dir /tmp/sdk --clobber
+          (cd /tmp/sdk && grep " ${asset}\$" SHA256SUMS | sha256sum -c -)
+          tar xzf "/tmp/sdk/${asset}" -C /usr/local/bin/ influxdb3-plugin
+          influxdb3-plugin --version
+
+      - name: Fetch registry index
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The registry release + index.json must already exist (one-time
+          # bootstrap). Fail with a clear message if they don't.
+          if ! gh release download "$REGISTRY_RELEASE" \
+            --pattern "index.json" --dir /tmp --clobber; then
+            echo "Could not download index.json from the '${REGISTRY_RELEASE}' release." >&2
+            echo "Run the one-time registry bootstrap first (see registry docs)." >&2
+            exit 1
+          fi
+
+      - name: Find plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          if [ ! -d "$PLUGIN_ROOT" ]; then
+            echo "Plugin root does not exist: ${PLUGIN_ROOT}" >&2
+            exit 1
+          fi
+
+          # Exclude set: EXCLUDE_DIRS is a space-separated list of basenames
+          # under PLUGIN_ROOT that are not plugins.
+          read -ra excluded <<< "${EXCLUDE_DIRS:-}"
+
+          : > /tmp/plugin-directories.txt
+          for dir in "${PLUGIN_ROOT}"/*/; do
+            name="$(basename "$dir")"
+            skip=false
+            for ex in "${excluded[@]:-}"; do
+              if [ "$name" = "$ex" ]; then skip=true; break; fi
+            done
+            if [ "$skip" = true ]; then
+              echo "Excluding non-plugin directory: ${name}"
+              continue
+            fi
+            printf '%s\n' "$dir" >> /tmp/plugin-directories.txt
+          done
+
+          if [ -s /tmp/plugin-directories.txt ]; then
+            echo "Plugin directories to publish:"
+            cat /tmp/plugin-directories.txt
+          else
+            echo "No plugin directories found under ${PLUGIN_ROOT}."
+          fi
+
+      - name: Package plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          new_artifacts_dir=/tmp/plugin-artifacts
+          working_index=/tmp/index.json
+          mkdir -p "$new_artifacts_dir"
+
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            name="$(basename "$dir")"
+            ws="/tmp/package-${name}"
+            log="${ws}/package.log"
+            rm -rf "$ws"; mkdir -p "$ws"
+
+            echo "Packaging ${name}..."
+            # On success the CLI writes one .tar.gz and one updated index.json
+            # into $ws. The index rolls forward so one run can publish many
+            # plugins and finish with a single index.json.
+            if influxdb3-plugin package "$dir" \
+              --index "$working_index" \
+              --out "$ws" \
+              --output json >"$log" 2>&1; then
+              cat "$log"
+              mv "$ws"/*.tar.gz "$new_artifacts_dir/"
+              working_index="$ws/index.json"
+            elif grep -q '"package::already_published"' "$log"; then
+              echo "Already published; skipping ${name}."
+            else
+              echo "Packaging failed for ${name}:" >&2
+              cat "$log" >&2
+              exit 1
+            fi
+          done < /tmp/plugin-directories.txt
+
+          if [ "$working_index" != "/tmp/index.json" ]; then
+            cp "$working_index" /tmp/index.json
+          fi
+
+      - name: Upload new artifacts
+        shell: bash
+        run: |
+          shopt -s nullglob
+          artifacts=(/tmp/plugin-artifacts/*.tar.gz)
+          if [ "${#artifacts[@]}" -eq 0 ]; then
+            echo "No new plugin artifacts to upload."
+            exit 0
+          fi
+          for a in "${artifacts[@]}"; do
+            echo "Uploading $(basename "$a")..."
+            gh release upload "$REGISTRY_RELEASE" "$a" --clobber
+          done
+
+      - name: Upload updated index
+        run: |
+          gh release upload "$REGISTRY_RELEASE" /tmp/index.json --clobber

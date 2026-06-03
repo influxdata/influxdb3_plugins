@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "system_metrics"
+version = "1.0.0"
+description = "Collects system-level metrics (CPU, memory, disk, and network) using psutil and writes them to InfluxDB. Designed to run on a schedule and provide observability into host-level performance."
+triggers = ["process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/system_metrics"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/system_metrics/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!system_metrics.py",
+]
+
+[dependencies]
+database_version = ">=3.0.0"
+python = ["psutil"]

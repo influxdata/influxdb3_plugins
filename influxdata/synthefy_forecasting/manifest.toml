@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "synthefy_forecasting"
+version = "0.1.0"
+description = "Integrates Synthefy Forecasting API with InfluxDB 3 for on-demand time series forecasting via HTTP. Reads data from InfluxDB, generates forecasts with Synthefy models, and writes results back."
+triggers = ["process_request"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/synthefy_forecasting"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/synthefy_forecasting/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!synthefy_forecasting.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["pandas", "requests"]

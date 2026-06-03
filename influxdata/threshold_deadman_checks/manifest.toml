@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "threshold_deadman_checks"
+version = "1.0.0"
+description = "Provides comprehensive monitoring capabilities including deadman alerts and aggregation-based threshold checks. Supports both scheduler and data write triggers with multi-channel notifications."
+triggers = ["process_writes", "process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/threshold_deadman_checks"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/threshold_deadman_checks/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!threshold_deadman_checks_plugin.py",
+]
+
+[dependencies]
+database_version = ">=3.0.0"
+python = ["requests"]

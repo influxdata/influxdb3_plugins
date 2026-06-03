@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "notifier"
+version = "1.0.0"
+description = "Notification dispatcher sending alerts via Slack, Discord, HTTP, SMS, or WhatsApp based on incoming HTTP requests. Features retry logic and environment variable support."
+triggers = ["process_request"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/notifier"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/notifier/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!notifier_plugin.py",
+]
+
+[dependencies]
+database_version = ">=3.0.0"
+python = ["httpx", "twilio"]

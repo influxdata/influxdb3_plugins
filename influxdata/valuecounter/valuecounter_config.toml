@@ -1,0 +1,22 @@
+# valuecounter plugin — example configuration
+#
+# Pick ONE shape: either the Mode A (WAL) block or the Mode B (scheduled) block.
+# Do not combine them. The plugin auto-detects which entry point is invoked.
+
+# ------------------------------------------------------------
+# Mode A — WAL trigger (process_writes)
+# ------------------------------------------------------------
+# 'table' is determined by the WAL trigger spec (`table:<name>`); do NOT set it here.
+# period = "60s"
+# fields = ["status", "method"]
+# output_suffix = "_valuecounts"
+# dest_database = "rollups"
+
+# ------------------------------------------------------------
+# Mode B — Scheduled trigger (process_scheduled_call)
+# ------------------------------------------------------------
+# Mode B is drift-based; there is NO 'period'/'period_seconds' key.
+table = "http_requests"
+fields = ["status", "method"]
+output_suffix = "_valuecounts"
+dest_database = "rollups"

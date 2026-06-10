@@ -130,6 +130,7 @@ import time
 import tomllib
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import boto3
@@ -1214,18 +1215,30 @@ class SageMakerConfig:
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
         """Resolve path — absolute as-is, relative resolved from the plugin dir
-        (INFLUXDB3_PLUGIN_DIR or PLUGIN_DIR)."""
+        (INFLUXDB3_PLUGIN_DIR or PLUGIN_DIR), falling back to server-derivable
+        locations."""
         if os.path.isabs(path):
             return path
         plugin_dir: str | None = os.environ.get(
             "INFLUXDB3_PLUGIN_DIR"
         ) or os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"Neither INFLUXDB3_PLUGIN_DIR nor PLUGIN_DIR environment "
-                f"variable is set. Required for relative {description} path."
-            )
-        return os.path.join(plugin_dir, path)
+        if plugin_dir:
+            return os.path.join(plugin_dir, path)
+
+        # Fallback for servers where neither variable is present in the
+        # process environment: VIRTUAL_ENV is exported by the processing
+        # engine and its default venv location is <plugin-dir>/.venv.
+        if virtual_env := os.environ.get("VIRTUAL_ENV"):
+            candidate = os.path.join(str(Path(virtual_env).parent), path)
+            if os.path.exists(candidate):
+                return candidate
+
+        raise ValueError(
+            f"Neither INFLUXDB3_PLUGIN_DIR nor PLUGIN_DIR environment "
+            f"variable is set and {description} path '{path}' was not "
+            f"found via the VIRTUAL_ENV fallback. Required for relative "
+            f"{description} path."
+        )
 
     def _normalize_from_args(self, args: dict) -> dict[str, Any]:
         """Convert trigger args (all strings) to the internal normalized format."""

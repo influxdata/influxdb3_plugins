@@ -1,40 +1,40 @@
-"""InfluxDB 3 Processing Engine plugin: stock portfolio tracker.
-
-Scheduled plugin that fetches stock prices from Yahoo Finance (via
-yfinance) and writes per-symbol holdings plus per-portfolio totals to
-InfluxDB. Trigger cadence is controlled by the Processing Engine trigger
-spec, typically `every:15m`.
-
-Per-symbol fetch gating:
-  * stocks/etfs: fetched every tick UNLESS write_during_closed_hours is
-    false AND the configured market (default NYSE) regular session is
-    currently closed. Market hours come from pandas_market_calendars
-    (handles holidays and early closes). Set market_calendar and
-    market_timezone in TOML to gate against a non-US exchange (LSE,
-    JPX, TSX, XETR, etc.).
-  * mutual funds: fetched at most once per local calendar day, at the
-    first tick at or after mutual_fund_check_time. Bootstrap exception:
-    a mutual fund with no cached asset_type is fetched on its first tick
-    regardless of time so the plugin can learn its type and record an
-    initial row.
-  * cold-cache bootstrap: if a symbol would be skipped but has no cached
-    last price, it is fetched once so carry-forward totals can work on
-    later skipped ticks.
-
-Per-symbol asset_type is detected from yfinance.fast_info.quote_type on
-first fetch and cached (no TTL) in influxdb3_local.cache.
-
-The InfluxDB runtime injects `influxdb3_local` and `LineBuilder` as
-globals. These are referenced ONLY inside process_scheduled_call (and
-_main, which takes them as parameters). The module imports cleanly in
-plain Python; yfinance and pandas_market_calendars are imported lazily
-inside the functions that use them.
+"""
+{
+    "plugin_type": ["scheduled"],
+    "scheduled_args_config": [
+        {
+            "name": "database",
+            "example": "stocks",
+            "description": "Target database for writes. Overrides the TOML database key if both are set. Defaults to stocks.",
+            "required": false
+        },
+        {
+            "name": "portfolio",
+            "example": "AAPL:10:401k|MSFT:5:401k|GOOG:2.5:brokerage",
+            "description": "Inline holdings as pipe-separated SYMBOL:QUANTITY[:PORTFOLIO_NAME] entries. Required unless config_path points to a TOML file with holdings.",
+            "required": false
+        },
+        {
+            "name": "categories",
+            "example": "401k:Retirement|brokerage:Investment",
+            "description": "Inline category map as pipe-separated PORTFOLIO:CATEGORY entries.",
+            "required": false
+        },
+        {
+            "name": "config_path",
+            "example": "stock_plugin.toml",
+            "description": "Path to TOML configuration file. Supports absolute paths or relative paths resolved from INFLUXDB3_PLUGIN_DIR, PLUGIN_DIR, VIRTUAL_ENV parent, or the plugin directory.",
+            "required": false
+        }
+    ]
+}
 """
 
 from __future__ import annotations
 
 import os
 import tomllib
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -420,8 +420,6 @@ def resolve_config(
     Other TOML scalars (write_during_closed_hours, mutual_fund_check_time,
     market_calendar, market_timezone) come only from TOML — there is no
     inline-arg override for them. Defaults apply when the key is absent.
-    Legacy `stock_interval_minutes`, if present, is ignored; the trigger
-    spec controls cadence.
 
     Raises ValueError if neither inline holdings nor a usable TOML file is
     found, or if any TOML scalar has an invalid value.
@@ -674,6 +672,7 @@ def _main(
     line_builder_cls,
     plugin_dir: Path,
     now_ns: int,
+    task_id: str,
 ) -> None:
     """The core plugin flow. process_scheduled_call delegates here.
 
@@ -694,7 +693,7 @@ def _main(
     try:
         config = resolve_config(args, default_toml)
     except (ValueError, OSError, tomllib.TOMLDecodeError) as e:
-        local.error(f"stock_plugin: configuration error: {e}")
+        local.error(f"[{task_id}] stock_plugin: configuration error: {e}")
         return
 
     market_tz = ZoneInfo(config.market_timezone)
@@ -708,13 +707,13 @@ def _main(
     except Exception as e:
         if not config.write_during_closed_hours:
             local.error(
-                f"stock_plugin: market-calendar lookup failed for "
+                f"[{task_id}] stock_plugin: market-calendar lookup failed for "
                 f"{config.market_calendar!r} ({e}); skipping run to avoid "
                 f"fetching during possible closed hours"
             )
             return
         local.warn(
-            f"stock_plugin: market-calendar lookup failed for "
+            f"[{task_id}] stock_plugin: market-calendar lookup failed for "
             f"{config.market_calendar!r} ({e}); continuing because "
             f"write_during_closed_hours=true"
         )
@@ -724,7 +723,7 @@ def _main(
 
     total_symbols = sum(len(h) for h in config.holdings_by_portfolio.values())
     local.info(
-        f"stock_plugin: starting run with {total_symbols} symbol(s) "
+        f"[{task_id}] stock_plugin: starting run with {total_symbols} symbol(s) "
         f"across {len(config.holdings_by_portfolio)} portfolio(s) "
         f"→ database={config.database}, "
         f"calendar={config.market_calendar}, market_open={market_open_now}, "
@@ -790,7 +789,7 @@ def _main(
                 quote = fetcher(holding.symbol)
             except Exception as e:
                 local.warn(
-                    f"stock_plugin: failed to fetch {holding.symbol}: {e}"
+                    f"[{task_id}] stock_plugin: failed to fetch {holding.symbol}: {e}"
                 )
                 failures.append((holding.symbol, str(e)))
                 continue
@@ -931,7 +930,7 @@ def _main(
         parts.append(
             "Failed: " + ", ".join(f"{s} ({e})" for s, e in failures)
         )
-    local.info("stock_plugin: " + ". ".join(parts))
+    local.info(f"[{task_id}] stock_plugin: " + ". ".join(parts))
 
 
 def process_scheduled_call(influxdb3_local, call_time, args):
@@ -955,6 +954,7 @@ def process_scheduled_call(influxdb3_local, call_time, args):
     """
     plugin_dir = Path(os.environ.get("INFLUXDB3_PLUGIN_DIR", "."))
     now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    task_id = uuid.uuid4().hex[:8]
     _main(
         local=influxdb3_local,
         args=args or {},
@@ -962,4 +962,5 @@ def process_scheduled_call(influxdb3_local, call_time, args):
         line_builder_cls=LineBuilder,  # runtime-injected global
         plugin_dir=plugin_dir,
         now_ns=now_ns,
+        task_id=task_id,
     )

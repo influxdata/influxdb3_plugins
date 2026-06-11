@@ -36,7 +36,6 @@ The TOML file is the recommended way to configure anything more than a handful o
 | Key                         | Type    | Default     | Description                                                                                                                                                          |
 |-----------------------------|---------|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `database`                  | string  | `stocks`            | Target database for writes.                                                                                                                                          |
-| `stock_interval_minutes`    | integer | ignored             | Legacy compatibility key. Ignored if present; the Processing Engine trigger spec controls how often the plugin runs and fetches.                                      |
 | `write_during_closed_hours` | boolean | `true`              | When `false`, stocks/ETFs are skipped outside the configured exchange's regular session (the calendar handles holidays and early closes). Mutual funds always follow their own daily check schedule. |
 | `mutual_fund_check_time`    | string  | `"18:00"`           | Time of day in `market_timezone` after which the plugin fetches mutual fund NAV. Mutual funds are fetched at most once per local calendar day, at the first tick at or after this time. Bootstrap exception: a mutual fund with no cached asset type is fetched on its first tick regardless of time. |
 | `market_calendar`           | string  | `"NYSE"`            | Exchange calendar used for the market-hours check. Any name accepted by [pandas_market_calendars](https://pandas-market-calendars.readthedocs.io/) (e.g. `NYSE`, `LSE`, `TSX`, `JPX`, `XETR`, `ASX`, `HKEX`). |
@@ -44,7 +43,7 @@ The TOML file is the recommended way to configure anything more than a handful o
 | `[portfolio_categories]`    | table   | empty               | Maps portfolio name to category name. Portfolios not listed are uncategorized (omitted from `category_totals`).                                                      |
 | `[holdings.<portfolio>]`    | table   | required            | Holdings for each portfolio. Each entry is `SYMBOL = quantity`. Fractional quantities supported. Quote symbols containing dots, for example `"VOD.L" = 10`. Duplicate same-symbol entries in one portfolio are aggregated. The portfolio name `_total` is reserved. |
 
-The trigger spec is the source of truth for cadence. For example, `--trigger-spec "every:15m"` runs the plugin every 15 minutes. `stock_interval_minutes`, if present in TOML, is ignored and does not throttle plugin execution.
+The trigger spec is the source of truth for cadence. For example, `--trigger-spec "every:15m"` runs the plugin every 15 minutes.
 
 #### Example TOML configuration
 

@@ -50,6 +50,18 @@ auto_offset_reset = "earliest"         # "earliest" or "latest"
 # Performance tuning
 max_poll_records = 500                 # Max messages per call (0 = unlimited)
 
+# The consumer is reused across scheduled invocations (cached) so it stays in
+# its group and no rebalance happens every cycle. It is only kept in the group
+# while the gap between scheduled calls stays below max_poll_interval (seconds).
+# Increase this if your trigger runs less often than every ~5 minutes.
+max_poll_interval = 300                 # Seconds (maps to max.poll.interval.ms)
+
+# Optional dead-letter queue: messages that fail to parse are published to this
+# Kafka topic with the original payload/key and error details in the headers.
+# The topic MUST already exist on the broker - the plugin does not create it.
+# If auto-creation is disabled (typical in production), create it beforehand.
+# dlq_topic = "sensor_data_dlq"
+
 # Security (PLAINTEXT for development)
 security_protocol = "PLAINTEXT"
 
@@ -328,3 +340,52 @@ online = ["$.online", "bool"]
 
 # [mapping.json.fields]
 # temperature = ["$.temperature", "float"]
+
+
+# #############################################################################
+# EXAMPLE 10: Deduplication by message id (no message timestamp)
+# #############################################################################
+# When messages carry no timestamp, the plugin assigns the ingest time, so a
+# re-delivered message (e.g. after a crash before the offset was committed)
+# would create a duplicate point. dedup_id_field holds the extractor for a
+# unique id carried in the message; the id is written under dedup_id_name and,
+# before writing, the plugin checks whether that id already exists within
+# dedup_window and skips duplicates.
+#
+# NOTE: deduplication is ONLY active when no timestamp_field is configured -
+# with a message timestamp InfluxDB already overwrites by (tags, time).
+#
+# Performance: the check is a single query per table per cycle, constrained by
+# both the time window and the batch ids. For very high-volume topics prefer a
+# shorter dedup_window.
+#
+# Example Kafka message:
+# {"event_id": "evt-8f3c1", "host": "server01", "value": 42.0}
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["events.dedup"]
+# group_id = "influxdb3_dedup_consumer"
+# format = "json"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+# dedup_window = "24h"                  # e.g. "30m", "24h", "7d" (default 24h)
+
+# [mapping.json]
+# table_name = "events"
+# # Do NOT set timestamp_field here - dedup is disabled when a timestamp is used.
+# dedup_id_field = "$.event_id"        # JSONPath extractor for the unique id
+# dedup_id_name = "event_id"           # Field to write/track the id under (default "dedup_id")
+
+# [mapping.json.tags]
+# host = "$.host"
+
+# [mapping.json.fields]
+# value = ["$.value", "float"]
+
+# # Text format: dedup_id_field is a regex pattern with a capturing group:
+# # [mapping.text]
+# # dedup_id_field = "id=([\\w-]+)"
+# # dedup_id_name = "event_id"

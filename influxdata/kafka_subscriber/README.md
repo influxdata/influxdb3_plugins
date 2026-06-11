@@ -6,7 +6,7 @@
 
 ## Description
 
-The Kafka Subscriber Plugin enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats. The plugin uses consumer groups for reliable message delivery and provides flexible offset commit policies for different use cases.
+The Kafka Subscriber Plugin enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats. The plugin uses consumer groups for reliable message delivery and provides flexible offset commit policies for different use cases. The consumer is reused across scheduled invocations to avoid a consumer-group rebalance every cycle, and it optionally supports a dead-letter queue topic for failed messages and id-based deduplication for messages without their own timestamp.
 
 **Important:** Protobuf and Avro formats are NOT supported as they require Schema Registry integration. For these formats, consider using an external deserialization layer before writing to Kafka in a supported format.
 
@@ -22,22 +22,23 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 In TOML configuration, `bootstrap_servers`, `topics`, and `group_id` are placed under the `[kafka]` section; `table_name` and `table_name_field` are placed under `[mapping.json]` or `[mapping.text]` section.
 
-| Parameter           | Type   | Default                   | Description                                                                         |
-|---------------------|--------|---------------------------|-------------------------------------------------------------------------------------|
-| `bootstrap_servers` | string | required                  | Space-separated list of Kafka broker addresses (e.g., "kafka1:9092 kafka2:9092")    |
-| `topics`            | string | required                  | Space-separated list of topics (e.g., "sensor_data metrics")                        |
-| `group_id`          | string | required                  | Kafka consumer group ID (must be unique per consumer group)                         |
-| `table_name`        | string | required (json/text only) | InfluxDB measurement name for storing data. Not required for `lineprotocol` format or when `table_name_field` is set. |
+| Parameter           | Type   | Default                   | Description                                                                                                               |
+|---------------------|--------|---------------------------|---------------------------------------------------------------------------------------------------------------------------|
+| `bootstrap_servers` | string | required                  | Space-separated list of Kafka broker addresses (e.g., "kafka1:9092 kafka2:9092")                                          |
+| `topics`            | string | required                  | Space-separated list of topics (e.g., "sensor_data metrics")                                                              |
+| `group_id`          | string | required                  | Kafka consumer group ID (must be unique per consumer group)                                                               |
+| `table_name`        | string | required (json/text only) | InfluxDB measurement name for storing data. Not required for `lineprotocol` format or when `table_name_field` is set.     |
 | `table_name_field`  | string | none                      | JSON field name or regex pattern to extract table name dynamically from each message. Alternative to static `table_name`. |
 
 ### Connection parameters
 
 In TOML configuration, these parameters are placed under the `[kafka]` section.
 
-| Parameter           | Type   | Default     | Description                                                    |
-|---------------------|--------|-------------|----------------------------------------------------------------|
-| `auto_offset_reset` | string | "earliest"  | Where to start consuming on first connect: "earliest" or "latest" |
-| `max_poll_records`  | int    | 500         | Maximum messages per scheduled call. Set to 0 for unlimited.   |
+| Parameter            | Type   | Default     | Description                                                                                                                                                                                                                                                                              |
+|----------------------|--------|-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `auto_offset_reset`  | string | "earliest"  | Where to start consuming on first connect: "earliest" or "latest"                                                                                                                                                                                                                        |
+| `max_poll_records`   | int    | 500         | Maximum messages per scheduled call. Set to 0 for unlimited.                                                                                                                                                                                                                             |
+| `max_poll_interval`  | int    | 300         | Maximum seconds between scheduled poll cycles before the broker considers the consumer dead (maps to `max.poll.interval.ms`). The consumer is reused across invocations, so it must stay in the group between polls — increase this when the trigger interval is longer than ~5 minutes. |
 
 ### Offset Commit Policy
 
@@ -58,6 +59,14 @@ In TOML configuration, this parameter is placed under the `[kafka]` section.
 
 - **on_success (recommended)**: Use when data integrity is important. Failed messages will be reprocessed on the next trigger execution.
 - **always**: Use in high-throughput scenarios where occasional data loss is acceptable, or when you have external error handling (failed messages are logged to `kafka_exceptions` table).
+
+**Interaction with `dlq_topic`:**
+
+Because the consumer is reused across invocations, its fetch position advances as messages are polled. Under `on_success`, when a message still needs reprocessing — a transient InfluxDB write failure, or a parse failure (poison message) that could **not** be offloaded — the plugin **rewinds the consumer** to the lowest such offset on each affected partition, so those messages are re-read on the next cycle. Only the affected partitions are rewound; partitions whose messages all succeeded are not. A parse failure that is **successfully** published to `dlq_topic` is treated as handled: the consumer is not rewound for it, and it is preserved in the DLQ instead of being re-read.
+
+Without `dlq_topic`, a poison message under `on_success` is rewound and reprocessed on every cycle until it is resolved (its original payload is not stored in `kafka_exceptions`, so configure `dlq_topic` if you need to skip past and preserve poison messages). With `always`, the offset is committed immediately regardless and the consumer is never rewound, so a failed message is **not** reprocessed; `dlq_topic` simply preserves the failed messages that would otherwise be dropped.
+
+> **Note:** Rewinding re-reads from the failed offset, so messages on the same partition that succeeded *after* the failed one are re-read and re-written. Enable [deduplication](#deduplication-parameters) (or use messages carrying their own timestamp) to avoid duplicate points from this at-least-once retry.
 
 ### Security parameters
 
@@ -99,6 +108,40 @@ In TOML configuration, `enable_full_logging` is placed directly under the `[kafk
 | Parameter             | Type    | Default | Description                                                                                                                                                                                                                              |
 |-----------------------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `enable_full_logging` | boolean | false   | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths) into log output. Enable temporarily for debugging. |
+
+### Dead-letter queue parameters
+
+In TOML configuration, `dlq_topic` is placed under the `[kafka]` section.
+
+| Parameter   | Type   | Default | Description                                                                                                                                              |
+|-------------|--------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `dlq_topic` | string | none    | Kafka topic to publish messages that fail to parse. The original payload and key are produced unchanged, with `source_topic`, `error_type` and `error_message` set as Kafka headers. When unset, no DLQ topic is used. |
+
+**Behavior:**
+
+- Only **parse failures** (poison messages) are routed to the DLQ topic — including messages missing a required `dedup_id_field`. Transient write failures to InfluxDB are **not** sent to the DLQ; they keep their offsets uncommitted (with `on_success`) so they are retried on the next cycle.
+- Failures continue to be recorded in the `kafka_exceptions` table regardless of `dlq_topic`.
+- The DLQ producer reuses the same `bootstrap_servers` and security settings as the consumer.
+- **The DLQ topic must already exist on the broker.** The plugin does not create it. If your broker has `auto.create.topics.enable=false` (typical for production and managed services such as Confluent Cloud or MSK), create the topic beforehand. When the topic is missing, delivery fails and — under `on_success` — the offset is not committed, so the batch is reprocessed until the topic exists. The real broker reason (for example `Unknown topic or partition`) is logged so you can fix it quickly.
+
+### Deduplication parameters
+
+In TOML configuration, `dedup_window` is placed under the `[kafka]` section; `dedup_id_field` and `dedup_id_name` are placed under `[mapping.json]` or `[mapping.text]` section.
+
+| Parameter        | Type   | Default    | Description                                                                                                                                                              |
+|------------------|--------|------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `dedup_id_field` | string | none       | Extractor for a unique message id (enables deduplication). Holds **only** the extractor: JSON — a field name in CLI args (extracted via `$.<name>`) or a JSONPath in TOML (e.g. `$.event_id`); Text — a regex pattern with a capturing group. |
+| `dedup_id_name`  | string | "dedup_id" | Field name the extracted id is written under and tracked by. Optional; only used with `dedup_id_field`.                                                                  |
+| `dedup_window`   | string | "24h"      | Lookback window for the duplicate check (e.g. `30m`, `24h`, `7d`). Only used with `dedup_id_field`.                                                                     |
+
+**Behavior:**
+
+- Deduplication is **only active when no `timestamp_field` is configured**. When messages carry their own timestamp, InfluxDB already overwrites duplicates by `(measurement, tags, time)`, so no extra check is needed.
+- When active, the plugin extracts the id, writes it under the `dedup_id_name` field (default `dedup_id`), and — before writing — checks whether that id already exists within `dedup_window`. The check is a **single query per table per cycle**, constrained by both the time window and the batch's ids (`... WHERE time >= <cutoff> AND "<dedup_id_name>" IN (...)`), so it returns few rows. Duplicates within the same batch are also dropped.
+- If the dedup query fails, the plugin **fails open** (writes the records) rather than dropping data.
+- A message that is missing the configured id is treated as a parse failure (routed to the DLQ / `kafka_exceptions`). For JSON arrays, individual elements missing the id are skipped with a warning.
+- **Performance:** for very high-volume topics prefer a shorter `dedup_window` to keep the query light.
+- Pick a `dedup_id_name` that does not collide with a field you already map — it would be written twice.
 
 ### Message format parameters
 
@@ -434,6 +477,18 @@ influxdb3 query --database mydb \
   "SELECT * FROM kafka_exceptions ORDER BY time DESC LIMIT 10"
 ```
 
+### Dead-letter queue
+
+When `dlq_topic` is configured, messages that fail to parse are additionally republished to that Kafka topic with the original payload and key, so they can be inspected or replayed without re-reading the source topic. Error context is attached as Kafka headers:
+
+| Header          | Description                                  |
+|-----------------|----------------------------------------------|
+| `source_topic`  | Topic the message was originally consumed from |
+| `error_type`    | Exception type (e.g. `JSONDecodeError`)      |
+| `error_message` | Error detail (truncated to 1KB)              |
+
+Transient InfluxDB write failures are not sent to the DLQ — they are retried on the next cycle (with `offset_commit_policy=on_success`).
+
 ## Troubleshooting
 
 ### Check Plugin Logs
@@ -512,18 +567,21 @@ If using `offset_commit_policy=on_success` and seeing repeated message processin
 
 1. **Scheduled Trigger**: Plugin runs on schedule (e.g., `every:10s`)
 2. **Configuration Caching**: Plugin configuration is parsed once and cached between executions
-3. **Consumer Poll**: Kafka consumer polls for available messages (drains all available messages)
-4. **Offset Commit**: Based on `offset_commit_policy`:
+3. **Persistent Consumer**: The Kafka consumer is created once and reused across invocations (cached), so it stays in its consumer group and no rebalance happens every cycle
+4. **Consumer Poll**: Consumer polls for available messages (drains all available messages)
+5. **Offset Commit**: Based on `offset_commit_policy`:
    - `always`: Commits immediately after poll
    - `on_success`: Commits only after successful processing of all messages
-5. **Parse & Write**: Messages parsed according to format and written to InfluxDB
-6. **Error Tracking**: Parse errors logged to `kafka_exceptions` table
-7. **Statistics**: Written to `kafka_stats` table every 10 plugin calls
+6. **Deduplication** (optional): When `dedup_id_field` is set and no message timestamp is configured, duplicate ids within `dedup_window` are skipped
+7. **Parse & Write**: Messages parsed according to format and written to InfluxDB
+8. **Error Tracking**: Parse errors logged to `kafka_exceptions` table (and `dlq_topic` if configured)
+9. **Statistics**: Written to `kafka_stats` table on every plugin invocation
 
 ### Performance Optimization
 
 The plugin includes several optimizations for high-throughput scenarios:
 
+- **Persistent Consumer**: The consumer is reused across trigger executions instead of reconnecting each cycle, eliminating the consumer-group rebalance (and its latency/broker overhead) that a connect/disconnect-per-cycle would cause. It stays in the group while the schedule interval stays below `max_poll_interval`.
 - **Configuration Caching**: Plugin configuration is parsed once and reused across all trigger executions
 - **Pre-compiled Patterns**: JSONPath expressions and regex patterns are compiled once during parser initialization
 - **Batch Polling**: Consumer drains available messages in a single trigger execution (limited by `max_poll_records`, default 500)
@@ -531,7 +589,8 @@ The plugin includes several optimizations for high-throughput scenarios:
 
 ### Consumer Group Behavior
 
-- Each trigger execution creates a new consumer connection
+- A single consumer connection is created and reused across trigger executions; it is only rebuilt after a fatal connection/poll error or a configuration change
+- Set `max_poll_interval` above your trigger interval so the broker does not evict the reused consumer between polls (this would force a rebalance)
 - Consumer group ID ensures partitions are assigned consistently
 - Offsets are committed to Kafka for durability
 - Multiple plugin instances with the same `group_id` will share partitions (load balancing)

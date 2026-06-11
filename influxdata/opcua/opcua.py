@@ -164,6 +164,7 @@ import time
 import tomllib
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
@@ -261,17 +262,33 @@ def _classify_quality(sc_value: int) -> str:
 
 
 def _resolve_path(path: str, description: str) -> str:
-    """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
+    """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR, falling back to server-derivable locations."""
     if os.path.isabs(path):
         return path
 
     plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-    if not plugin_dir:
-        raise ValueError(
-            f"PLUGIN_DIR environment variable not set. "
-            f"Required for relative {description} path."
-        )
-    return os.path.join(plugin_dir, path)
+    if plugin_dir:
+        return os.path.join(plugin_dir, path)
+
+    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+    candidates: list[str] = []
+    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+        candidates.append(influxdb3_plugin_dir)
+    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+        candidates.append(str(Path(virtual_env).parent))
+
+    for base in candidates:
+        candidate = os.path.join(base, path)
+        if os.path.exists(candidate):
+            return candidate
+
+    raise ValueError(
+        f"PLUGIN_DIR environment variable not set and {description} path "
+        f"'{path}' was not found via fallbacks "
+        f"(tried: {', '.join(candidates) or 'none available'})."
+    )
 
 
 def add_field_with_type(line, field_key: str, value: Any, field_type: str):

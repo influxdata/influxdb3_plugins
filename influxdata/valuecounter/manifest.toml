@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "valuecounter"
+version = "0.2.0"
+description = "Counts unique field values from data-write or scheduled inputs and writes rollup measurements with per-value counts."
+triggers = ["process_writes", "process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/valuecounter"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/valuecounter/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!valuecounter.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = []

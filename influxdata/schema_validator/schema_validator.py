@@ -110,19 +110,39 @@ def load_schema(influxdb3_local, schema_file_path: str, task_id: str) -> dict | 
     if cached is not None:
         return cached
 
-    plugin_dir_var = os.getenv("PLUGIN_DIR", None)
-    if not plugin_dir_var:
-        influxdb3_local.error(f"[{task_id}] PLUGIN_DIR environment variable is not set")
-        return None
-
     if not schema_file_path.endswith(".json"):
         influxdb3_local.error(
             f"[{task_id}] Invalid schema file format: expected a .json file"
         )
         return None
 
-    plugin_dir = Path(plugin_dir_var)
-    file_path = plugin_dir / schema_file_path
+    plugin_dir_var = os.getenv("PLUGIN_DIR", None)
+    if plugin_dir_var:
+        plugin_dir = Path(plugin_dir_var)
+        file_path = plugin_dir / schema_file_path
+    else:
+        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+        candidates: list[str] = []
+        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+            candidates.append(influxdb3_plugin_dir)
+        if virtual_env := os.environ.get("VIRTUAL_ENV"):
+            candidates.append(str(Path(virtual_env).parent))
+
+        resolved = None
+        for base in candidates:
+            candidate = Path(base) / schema_file_path
+            if candidate.exists():
+                resolved = candidate
+                break
+
+        if resolved is None:
+            candidates_str = ", ".join(candidates) if candidates else "none available"
+            influxdb3_local.error(f"[{task_id}] PLUGIN_DIR env var not set and schema file path '{schema_file_path}' was not found via fallbacks (tried: {candidates_str})")
+            return None
+
+        file_path = resolved
 
     try:
         with open(file_path, "r") as f:
@@ -459,10 +479,31 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                 try:
                     plugin_dir_var = os.getenv("PLUGIN_DIR", None)
                     if not plugin_dir_var:
-                        influxdb3_local.error(f"[{task_id}] PLUGIN_DIR env var not set")
-                        return
-                    plugin_dir = Path(plugin_dir_var)
-                    file_path = plugin_dir / path
+                        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+                        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+                        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+                        candidates: list[str] = []
+                        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                            candidates.append(influxdb3_plugin_dir)
+                        if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                            candidates.append(str(Path(virtual_env).parent))
+
+                        resolved = None
+                        for base in candidates:
+                            candidate = Path(base) / path
+                            if candidate.exists():
+                                resolved = candidate
+                                break
+
+                        if resolved is None:
+                            candidates_str = ", ".join(candidates) if candidates else "none available"
+                            influxdb3_local.error(f"[{task_id}] PLUGIN_DIR env var not set and config file path '{path}' was not found via fallbacks (tried: {candidates_str})")
+                            return
+
+                        file_path = resolved
+                    else:
+                        plugin_dir = Path(plugin_dir_var)
+                        file_path = plugin_dir / path
                     influxdb3_local.info(f"[{task_id}] Reading trigger config from {file_path}")
                     with open(file_path, "rb") as f:
                         args = tomllib.load(f)

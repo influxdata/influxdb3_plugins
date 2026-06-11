@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "system_metrics"
-version = "1.0.0"
+version = "1.1.0"
 description = "Collects system-level metrics (CPU, memory, disk, and network) using psutil and writes them to InfluxDB. Designed to run on a schedule and provide observability into host-level performance."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

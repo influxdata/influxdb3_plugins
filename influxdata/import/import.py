@@ -239,14 +239,35 @@ def load_config(
             raise Exception("Invalid config file format: expected a .toml file")
 
         plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-        if not plugin_dir_var:
-            influxdb3_local.error(f"[{task_id}] Failed to get PLUGIN_DIR env var")
-            raise Exception("PLUGIN_DIR environment variable not set")
+        if plugin_dir_var:
+            config_file = Path(plugin_dir_var) / config_file_path
+        else:
+            # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+            #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+            #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+            candidates: list[str] = []
+            if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                candidates.append(influxdb3_plugin_dir)
+            if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                candidates.append(str(Path(virtual_env).parent))
+
+            resolved = None
+            for base in candidates:
+                candidate = Path(base) / config_file_path
+                if candidate.exists():
+                    resolved = candidate
+                    break
+
+            if resolved is None:
+                candidates_str = ", ".join(candidates) if candidates else "none available"
+                influxdb3_local.error(
+                    f"[{task_id}] PLUGIN_DIR env var not set and config file path "
+                    f"'{config_file_path}' was not found via fallbacks (tried: {candidates_str})"
+                )
+                raise Exception("PLUGIN_DIR environment variable not set")
+            config_file = resolved
 
         try:
-            plugin_dir: Path = Path(plugin_dir_var)
-            config_file = plugin_dir / config_file_path
-
             with open(config_file, "rb") as f:
                 file_config = tomllib.load(f)
             # Override config_data with values from file

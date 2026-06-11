@@ -295,6 +295,28 @@
                 "required_libraries": ["pandas", "requests"],
                 "last_update": "2026-01-08",
                 "trigger_types_supported": ["http"]
+            },
+            {
+                "name": "SageMaker Inference",
+                "path": "influxdata/sagemaker/sagemaker.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Runs scheduled inference against Amazon SageMaker endpoints using recent InfluxDB 3 rows, supports multiple request and response shapes, and writes prediction results back to InfluxDB.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/sagemaker/README.md",
+                "required_plugins": [],
+                "required_libraries": ["boto3", "jmespath", "pandas"],
+                "last_update": "2026-06-10",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Value Counter",
+                "path": "influxdata/valuecounter/valuecounter.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Counts how often unique field values appear in incoming writes or scheduled query windows, then writes per-series rollup measurements with one count field per observed value.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/valuecounter/README.md",
+                "required_plugins": [],
+                "required_libraries": [],
+                "last_update": "2026-06-10",
+                "trigger_types_supported": ["scheduler", "data_writes"]
             }
         ]
     }

@@ -1512,7 +1512,14 @@ def process_request(
             escaped_src = source_measurement.replace("'", "''")
             q: str = f"SELECT MIN(time) as _t FROM '{escaped_src}'"
             res: list = influxdb3_local.query(q)
-            oldest: int = res[0].get("_t")
+            oldest: int | None = res[0].get("_t") if res else None
+            if oldest is None:
+                influxdb3_local.error(
+                    f"[{task_id}] Source measurement '{source_measurement}' has no data."
+                )
+                return {
+                    "message": f"[{task_id}] Error: source measurement '{source_measurement}' is empty."
+                }
 
             backfill_start: datetime = datetime.fromtimestamp(
                 oldest / 1e9, tz=timezone.utc

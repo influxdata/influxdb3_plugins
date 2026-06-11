@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "forecast_error_evaluator"
-version = "1.0.0"
+version = "1.1.0"
 description = "Evaluates accuracy of forecast models by comparing predicted values with actual observations. Computes error metrics and detects anomalies based on elevated errors with multi-channel notifications."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

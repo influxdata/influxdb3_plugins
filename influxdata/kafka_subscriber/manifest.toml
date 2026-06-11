@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "kafka_subscriber"
-version = "0.1.0"
+version = "0.2.0"
 description = "Enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and transform messages into time-series data with support for JSON, Line Protocol, and custom text formats."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

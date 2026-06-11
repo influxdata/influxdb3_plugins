@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "river_auto_profiler"
-version = "0.1.0"
+version = "0.2.0"
 description = "Incrementally profiles time-series data with River ML streaming statistics and writes per-series recommendations for anomaly detection tuning, including thresholds, fading factors, and maturity."
 triggers = ["process_writes"]
 homepage = "https://www.influxdata.com/"

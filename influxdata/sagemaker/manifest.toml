@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "sagemaker"
-version = "0.1.0"
+version = "0.2.0"
 description = "Runs scheduled inference against Amazon SageMaker endpoints using recent InfluxDB 3 rows and writes prediction results back to InfluxDB."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

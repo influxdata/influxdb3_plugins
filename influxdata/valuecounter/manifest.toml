@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "valuecounter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Counts unique field values from data-write or scheduled inputs and writes rollup measurements with per-value counts."
 triggers = ["process_writes", "process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

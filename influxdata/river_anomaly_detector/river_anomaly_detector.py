@@ -189,11 +189,32 @@ def load_detector_toml_config(influxdb3_local, args: dict, task_id: str) -> dict
         else:
             plugin_dir_var = os.getenv("PLUGIN_DIR", None)
             if not plugin_dir_var:
-                influxdb3_local.error(
-                    f"[{task_id}] PLUGIN_DIR env var not set and config_file_path is relative"
-                )
-                return None
-            file_path = Path(plugin_dir_var) / path
+                # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+                #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+                #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+                candidates: list[str] = []
+                if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                    candidates.append(influxdb3_plugin_dir)
+                if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                    candidates.append(str(Path(virtual_env).parent))
+
+                resolved = None
+                for base in candidates:
+                    candidate = os.path.join(base, path)
+                    if os.path.exists(candidate):
+                        resolved = candidate
+                        break
+
+                if resolved:
+                    file_path = Path(resolved)
+                else:
+                    candidates_str = ", ".join(candidates) if candidates else "none available"
+                    influxdb3_local.error(
+                        f"[{task_id}] PLUGIN_DIR env var not set and config_file_path '{path}' was not found via fallbacks (tried: {candidates_str})"
+                    )
+                    return None
+            else:
+                file_path = Path(plugin_dir_var) / path
         influxdb3_local.info(f"[{task_id}] Reading config from {file_path}")
         with open(file_path, "rb") as f:
             return tomllib.load(f)

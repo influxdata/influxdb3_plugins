@@ -75,6 +75,7 @@ import time
 import tomllib
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 # At server runtime LineBuilder is injected as a builtin. In test environments
 # pytest patches this module-level name to a vendored copy. The reference in
@@ -225,7 +226,27 @@ def _resolve_config(args, plugin_dir, mode):
         raise ValueError("set either config_file_path or inline args, not both")
 
     if cfp is not None:
-        path = os.path.join(plugin_dir, cfp)
+        if plugin_dir is not None:
+            path = os.path.join(plugin_dir, cfp)
+        else:
+            # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+            #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+            #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+            candidates = []
+            if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                candidates.append(influxdb3_plugin_dir)
+            if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                candidates.append(str(Path(virtual_env).parent))
+
+            path = None
+            for base in candidates:
+                candidate = os.path.join(base, cfp)
+                if os.path.exists(candidate):
+                    path = candidate
+                    break
+            if path is None:
+                # Original default: resolve against the current directory.
+                path = os.path.join(".", cfp)
         cfg = _load_toml_config(path, mode=mode)
     else:
         cfg = _parse_inline_args(args, mode=mode)
@@ -344,7 +365,7 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
     # call_time arrives as a PyDateTime per system_py.rs:847,867
     call_time_ns = int(call_time.timestamp()) * 1_000_000_000 + call_time.microsecond * 1000
 
-    cfg = _resolve_config(args or {}, os.environ.get("PLUGIN_DIR", "."), mode="scheduled")
+    cfg = _resolve_config(args or {}, os.environ.get("PLUGIN_DIR"), mode="scheduled")
 
     anchor_key = f"vc:scheduled:last_call_ns:{cfg.table}"
     last_call_ns = influxdb3_local.cache.get(anchor_key)
@@ -436,7 +457,7 @@ def process_writes(influxdb3_local, table_batches, args=None):
     task_id = uuid.uuid4().hex[:8]
     now_ns = time.time_ns()
 
-    cfg = _resolve_config(args or {}, os.environ.get("PLUGIN_DIR", "."), mode="wal")
+    cfg = _resolve_config(args or {}, os.environ.get("PLUGIN_DIR"), mode="wal")
 
     period_ns = cfg.period_seconds * 1_000_000_000
     ttl = 2 * cfg.period_seconds

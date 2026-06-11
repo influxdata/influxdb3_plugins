@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "river_forecaster"
+version = "0.2.0"
+description = "Provides online time-series forecasting with River ML SNARIMAX models, learning from writes and producing scheduled multi-step forecasts with per-series model state and optional auto-horizon support."
+triggers = ["process_writes"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/river_forecaster"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_forecaster/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!river_forecaster.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["river>=0.23.0"]

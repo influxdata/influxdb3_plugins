@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "bird_data_simulator"
+version = "1.0.0"
+description = "Generates synthetic bird tracking telemetry with persistent birds, ranges, simulated movement, speed, heading, and body temperature. Exposes only simple volume controls."
+triggers = ["process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/bird_data_simulator"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/bird_data_simulator/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!bird_data_simulator.py",
+]
+
+[dependencies]
+database_version = ">=3.0.0"
+python = ["Faker"]

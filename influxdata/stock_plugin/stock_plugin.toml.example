@@ -1,0 +1,56 @@
+# Example stock_plugin configuration.
+# Copy to stock_plugin.toml in your InfluxDB plugin directory.
+
+# Target database for writes. Optional — defaults to "stocks".
+# Overridden by --trigger-arguments database=... if set.
+database = "stocks"
+
+# Write rows even when US markets are closed? When false, stocks/ETFs
+# are skipped outside 9:30-16:00 ET on weekdays (and on US market
+# holidays). If the cache is cold, the plugin may fetch once anyway to
+# seed a last-known price for future carry-forward totals. Defaults to true.
+write_during_closed_hours = true
+
+# Time of day (in market_timezone, below) after which to fetch mutual fund
+# NAV. Mutual funds get fetched at most once per local calendar day, at
+# the first trigger tick at or after this time. Bootstrap exception: a
+# mutual fund with no asset_type cached yet is fetched on the next tick
+# regardless of time, so the plugin can learn its type and write an
+# initial row. Defaults to "18:00".
+mutual_fund_check_time = "18:00"
+
+# Stock exchange whose calendar governs the market-open check. Any name
+# accepted by pandas_market_calendars works (NYSE, LSE, TSX, JPX, XETR,
+# etc. — see https://pandas-market-calendars.readthedocs.io/ for the
+# full list). The timezone below should be the exchange's local time.
+# Defaults: NYSE / America/New_York.
+market_calendar = "NYSE"
+market_timezone = "America/New_York"
+
+# Optional: assign each portfolio to a user-defined category. Categories
+# roll up into a separate category_totals measurement so you can see
+# things like "total retirement value" at a glance. Portfolios not
+# listed here are uncategorized (omitted from category_totals).
+[portfolio_categories]
+"401k" = "Retirement"
+brokerage = "Investment"
+
+# Holdings, grouped by portfolio name.
+# Each [holdings.<portfolio_name>] table is a {symbol = quantity} mapping.
+# Fractional quantities are supported. Quote ticker symbols that contain
+# dots; unquoted dots are TOML nested-key syntax, not literal symbol text.
+# Duplicate same-symbol entries in one portfolio are aggregated.
+
+[holdings.401k]
+AAPL = 10
+MSFT = 5
+
+[holdings.brokerage]
+GOOG = 2.5
+TSLA = 3
+"VOD.L" = 10
+
+# If you only have one portfolio, pick any name for it:
+# [holdings.main]
+# AAPL = 10
+# "BRK.B" = 1

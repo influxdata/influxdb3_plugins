@@ -317,6 +317,17 @@
                 "required_libraries": [],
                 "last_update": "2026-06-10",
                 "trigger_types_supported": ["scheduler", "data_writes"]
+            },
+            {
+                "name": "Stock Portfolio Tracker",
+                "path": "influxdata/stock_plugin/stock_plugin.py",
+                "description": "[BETA] Tracks stock, ETF, and mutual fund portfolio values from Yahoo Finance with market-hours gating and rollups.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/stock_plugin/README.md",
+                "required_plugins": [],
+                "required_libraries": ["yfinance", "pandas_market_calendars"],
+                "last_update": "2026-06-10",
+                "trigger_types_supported": ["scheduler"]
             }
         ]
     }

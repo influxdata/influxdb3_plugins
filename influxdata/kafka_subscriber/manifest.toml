@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "kafka_subscriber"
+version = "0.3.0"
+description = "Enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and transform messages into time-series data with support for JSON, Line Protocol, and custom text formats."
+triggers = ["process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/kafka_subscriber"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/kafka_subscriber/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!kafka_subscriber.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["confluent-kafka", "jsonpath-ng"]

@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "sagemaker"
+version = "0.2.0"
+description = "Runs scheduled inference against Amazon SageMaker endpoints using recent InfluxDB 3 rows and writes prediction results back to InfluxDB."
+triggers = ["process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/sagemaker"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/sagemaker/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!sagemaker.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["boto3", "jmespath", "pandas"]

@@ -31,18 +31,21 @@ In TOML configuration, `broker_host` and `topics` are placed under the `[mqtt]` 
 
 In TOML configuration, these parameters are placed under the `[mqtt]` section.
 
-| Parameter     | Type    | Default        | Description                                        |
-|---------------|---------|----------------|----------------------------------------------------|
-| `broker_port` | integer | 1883           | MQTT broker port (1883 for non-TLS, 8883 for TLS)  |
-| `qos`         | integer | 1              | MQTT Quality of Service level (0, 1, or 2)         |
-| `client_id`   | string  | auto-generated | MQTT client identifier (must be unique per broker) |
+| Parameter         | Type    | Default        | Description                                                                              |
+|-------------------|---------|----------------|------------------------------------------------------------------------------------------|
+| `broker_port`     | integer | 1883           | MQTT broker port (1883 for non-TLS, 8883 for TLS)                                        |
+| `qos`             | integer | 1              | MQTT Quality of Service level (0, 1, or 2)                                               |
+| `client_id`       | string  | auto-generated | MQTT client identifier (must be unique per broker)                                       |
+| `max_queue_bytes` | integer | 67108864       | Maximum total bytes of MQTT payloads buffered between scheduled drains (default: 64 MiB) |
 
 
 **Recommendation:** Use QoS 1 for most IoT scenarios. It provides reliable delivery with minimal overhead.
 
+**About `max_queue_bytes`:** Between two scheduled fires, paho's network thread buffers incoming MQTT messages in an in-memory queue inside the plugin. To protect InfluxDB from a misbehaving or malicious broker, the plugin tracks the running total of buffered payload sizes; once it would exceed `max_queue_bytes`, new messages are dropped (the existing queue is still processed normally). Drop counts are reported per-topic in the `mqtt_stats` table (`messages_dropped` field) and a summary error is logged at the end of each cycle when any drops occurred. Raise this value if you expect high-throughput bursts; lower it on memory-constrained hosts.
+
 ### Authentication parameters
 
-In TOML configuration, these parameters are placed under the `[mqtt.auth]` section.
+In TOML configuration, `username` and `password` are placed under the `[mqtt.auth]` section.
 
 | Parameter  | Type   | Default | Description                                     |
 |------------|--------|---------|-------------------------------------------------|
@@ -50,6 +53,18 @@ In TOML configuration, these parameters are placed under the `[mqtt.auth]` secti
 | `password` | string | none    | MQTT broker password (required with username)   |
 
 **Note:** Both `username` and `password` must be provided together for authentication.
+
+`allow_insecure_auth` is placed directly under the `[mqtt]` section (not `[mqtt.auth]`):
+
+| Parameter             | Type    | Default | Description                                                                 |
+|-----------------------|---------|---------|-----------------------------------------------------------------------------|
+| `allow_insecure_auth` | boolean | false   | Permit sending `username`/`password` when TLS is not configured             |
+
+**Security note:** When `username`/`password` are provided without a `ca_cert` (TLS),
+credentials are transmitted in cleartext over an unencrypted connection. The plugin
+refuses this by default and raises a configuration error. Configure TLS (`ca_cert`),
+or explicitly set `allow_insecure_auth = true` to permit cleartext credentials — only
+do this on a trusted network.
 
 ### TLS/SSL parameters
 
@@ -62,6 +77,14 @@ In TOML configuration, these parameters are placed under the `[mqtt.tls]` sectio
 | `client_key`  | string | none    | Path to client private key for mutual TLS |
 
 **Note:** For mutual TLS, both `client_cert` and `client_key` must be provided together.
+
+### Logging parameters
+
+In TOML configuration, `enable_full_logging` is placed directly under the `[mqtt]` section.
+
+| Parameter             | Type    | Default | Description                                                                                                                                                                                                                              |
+|-----------------------|---------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enable_full_logging` | boolean | false   | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths) into log output. Enable temporarily for debugging. |
 
 ### Message format parameters
 
@@ -103,6 +126,14 @@ In TOML configuration, `tags` are placed under `[mapping.json.tags]` section and
 **Field specification format:** `"temp:float=temperature hum:int=humidity status:bool=online"`
 
 **Supported field types:** `int`, `uint`, `float`, `string`, `bool`
+
+**JSONPath restriction:** The regex-based JSONPath operators `=~` (filter
+regex-match) and `sub()` (regex substitution) are disabled. They run a
+configured regex against untrusted broker data and are vulnerable to
+backtracking (ReDoS). A configuration that uses them is rejected
+at startup. All other JSONPath constructs — nesting, recursive descent (`..`),
+wildcards (`*`), and comparison filters such as `[?(@.type=="temp")]` — are
+fully supported.
 
 ### Text format parameters
 
@@ -374,23 +405,24 @@ location=warehouse_a,temp:22.5,hum:65,status:true,ts:1638360000000
 
 ## Statistics and Monitoring
 
-The plugin tracks comprehensive statistics and writes them to the `mqtt_stats` table every 10 plugin calls.
+The plugin tracks comprehensive statistics and writes them to the `mqtt_stats` table on every plugin invocation.
 
 **Important notes:**
-- Statistics are written **every 10 plugin invocations**, not based on time intervals
+- Statistics are written **on every plugin invocation**
 - Each topic is tracked separately with independent statistics
 - Statistics persist across plugin restarts using the InfluxDB cache
 
 ### mqtt_stats Table
 
-| Field                 | Type  | Description                            |
-|-----------------------|-------|----------------------------------------|
-| `topic` (tag)         | tag   | MQTT topic name                        |
-| `broker_host` (tag)   | tag   | MQTT broker address                    |
-| `messages_received`   | int   | Total messages received on this topic  |
-| `messages_processed`  | int   | Successfully processed messages        |
-| `messages_failed`     | int   | Failed messages                        |
-| `success_rate`        | float | Percentage of successful messages      |
+| Field                 | Type  | Description                                                                                       |
+|-----------------------|-------|---------------------------------------------------------------------------------------------------|
+| `topic` (tag)         | tag   | MQTT topic name                                                                                   |
+| `broker_host` (tag)   | tag   | MQTT broker address                                                                               |
+| `messages_received`   | int   | Total messages received on this topic (includes dropped messages)                                 |
+| `messages_processed`  | int   | Successfully processed messages                                                                   |
+| `messages_failed`     | int   | Failed messages                                                                                   |
+| `messages_dropped`    | int   | Messages dropped because the `max_queue_bytes` budget was exhausted                               |
+| `success_rate`        | float | Percentage of successfully processed messages: `processed / (processed + failed + dropped) * 100` |
 
 ### Querying Statistics
 
@@ -471,6 +503,13 @@ ls /etc/mqtt/my_mqtt_config.toml
 
 Either provide both `username` and `password`, or omit both for anonymous connection.
 
+#### "Refusing to send username/password over an unencrypted connection"
+
+`username`/`password` were provided without a `ca_cert`, so the credentials would be
+sent in cleartext. Configure TLS by providing `ca_cert` (and `client_cert`/`client_key`
+for mutual TLS), or set `allow_insecure_auth = true` to permit cleartext credentials on
+a trusted network.
+
 #### "Both client_cert and client_key must be provided for mutual TLS"
 
 For mutual TLS authentication, both client certificate and key are required.
@@ -480,6 +519,13 @@ For mutual TLS authentication, both client certificate and key are required.
 - Verify JSONPath expressions in field mappings (use `$.` prefix)
 - Check that JSON structure matches your paths
 - Review `mqtt_exceptions` table for detailed errors
+
+#### "Unsupported JSONPath operator '=~' / 'sub'"
+
+A tag, field, timestamp, or `table_name_field` mapping uses a regex-based
+JSONPath operator. These are disabled for security (ReDoS). Remove the `=~`
+filter or `sub()` call — use a comparison filter (`[?(@.x=="value")]`)
+instead, or extract the raw value and transform it downstream.
 
 #### Messages not being processed
 
@@ -497,7 +543,7 @@ For mutual TLS authentication, both client certificate and key are required.
 4. **Batch Processing**: Each trigger execution processes all queued messages
 5. **Parse & Write**: Messages parsed according to format and written to InfluxDB
 6. **Error Tracking**: Parse errors logged to `mqtt_exceptions` table
-7. **Statistics**: Written to `mqtt_stats` table every 10 plugin calls (not time-based)
+7. **Statistics**: Written to `mqtt_stats` table on every plugin invocation
 
 ### Performance Optimization
 

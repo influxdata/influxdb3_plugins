@@ -440,15 +440,40 @@ def process_scheduled_call(
     # Override args with config file if specified
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if not plugin_dir_var:
-                    influxdb3_local.error(
-                        f"[{task_id}] Failed to get PLUGIN_DIR env var"
-                    )
-                    return
-                plugin_dir: Path = Path(plugin_dir_var)
-                file_path = plugin_dir / path
+                if plugin_dir_var:
+                    file_path = Path(plugin_dir_var) / path
+                else:
+                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+                    candidates: list[str] = []
+                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                        candidates.append(influxdb3_plugin_dir)
+                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                        candidates.append(str(Path(virtual_env).parent))
+
+                    resolved = None
+                    for base in candidates:
+                        candidate = Path(base) / path
+                        if candidate.exists():
+                            resolved = candidate
+                            break
+
+                    if resolved is None:
+                        candidates_str = ", ".join(candidates) if candidates else "none available"
+                        influxdb3_local.error(
+                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
+                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
+                        )
+                        return
+                    file_path = resolved
                 influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)

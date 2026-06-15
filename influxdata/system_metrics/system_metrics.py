@@ -52,6 +52,7 @@ import psutil
 import uuid
 import os
 import tomllib
+from pathlib import Path
 
 def collect_cpu_metrics(influxdb3_local, hostname, task_id):
     # Get CPU frequencies
@@ -251,19 +252,52 @@ def process_scheduled_call(influxdb3_local, time, args=None):
     try:
         # Load configuration from TOML file if provided
         if args and 'config_file_path' in args:
-            plugin_dir = os.environ.get('PLUGIN_DIR')
-            if plugin_dir:
-                config_path = os.path.join(plugin_dir, args['config_file_path'])
-                try:
-                    with open(config_path, 'rb') as f:
-                        config = tomllib.load(f)
-                    # Override args with config values
-                    args.update(config)
-                    influxdb3_local.info(f"[{task_id}] Loaded configuration from {config_path}")
-                except FileNotFoundError:
-                    influxdb3_local.warn(f"[{task_id}] Config file not found: {config_path}")
-                except Exception as e:
-                    influxdb3_local.error(f"[{task_id}] Error loading config file: {e}")
+            config_file = args['config_file_path']
+            if not config_file.endswith('.toml'):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+            else:
+                plugin_dir = os.environ.get('PLUGIN_DIR')
+                if plugin_dir:
+                    config_path = os.path.join(plugin_dir, config_file)
+                else:
+                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+                    candidates = []
+                    if influxdb3_plugin_dir := os.environ.get('INFLUXDB3_PLUGIN_DIR'):
+                        candidates.append(influxdb3_plugin_dir)
+                    if virtual_env := os.environ.get('VIRTUAL_ENV'):
+                        candidates.append(str(Path(virtual_env).parent))
+
+                    resolved = None
+                    for base in candidates:
+                        candidate = os.path.join(base, config_file)
+                        if os.path.exists(candidate):
+                            resolved = candidate
+                            break
+
+                    if resolved:
+                        config_path = resolved
+                    else:
+                        # Match original behavior: continue with inline args
+                        # when the config file cannot be resolved.
+                        config_path = None
+                        candidate_str = ', '.join(candidates) if candidates else 'none available'
+                        influxdb3_local.error(
+                            f"[{task_id}] PLUGIN_DIR env var not set and config file path '{config_file}' was not found via fallbacks (tried: {candidate_str})"
+                        )
+
+                if config_path:
+                    try:
+                        with open(config_path, 'rb') as f:
+                            config = tomllib.load(f)
+                        # Override args with config values
+                        args.update(config)
+                        influxdb3_local.info(f"[{task_id}] Loaded configuration from {config_path}")
+                    except Exception:
+                        influxdb3_local.error(f"[{task_id}] Failed to read config file")
         
         # Set default values if args is None
         if args is None:

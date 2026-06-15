@@ -1,0 +1,68 @@
+# Chronos Forecasting Plugin Scheduler Configuration Template
+# Copy this file to your PLUGIN_DIR (e.g., /plugins) and reference it with
+#   --trigger-arguments config_file_path=<relative_path>
+# Example: If the file is at /plugins/configs/chronos_forecasting_scheduler.toml, use
+#   config_file_path=configs/chronos_forecasting_scheduler.toml
+
+########## Required Parameters ##########
+# InfluxDB table to query for historical data
+# Specify the table name (string) from your source InfluxDB database
+measurement = "your_measurement"  # e.g., "sensor_data", "cpu_metrics"
+
+# Field within the table to forecast
+# Specify a numeric field name (string)
+field = "your_field"  # e.g., "temperature", "cpu_usage"
+
+# Historical lookback window for context data
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days)
+window = "your_window"  # e.g., "6h", "1d", "30min"
+
+# Number of forecast steps to generate
+# Specify an integer
+horizon = 64  # e.g., 28, 64, 128
+
+########## Optional Parameters ##########
+# Destination table for writing forecast results
+# Default: _forecasts.{measurement}
+#target_measurement = "_forecasts.sensor_data"  # e.g., "temperature_forecast"
+# HuggingFace model ID
+# Supports: amazon/chronos-bolt-tiny, amazon/chronos-bolt-small, amazon/chronos-bolt-base,
+#           amazon/chronos-2, amazon/chronos-t5-tiny, amazon/chronos-t5-small, etc.
+# Default: amazon/chronos-bolt-tiny
+#model_id = "amazon/chronos-bolt-tiny"  # e.g., "amazon/chronos-2"
+
+# Maximum number of data points fed to the model
+# Specify an integer; default is 512
+#context_limit = 512  # e.g., 128, 256, 1024
+
+# Aggregation interval for date_bin query
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days)
+# Default: 30s
+#agg_interval = "30s"  # e.g., "1min", "5min", "1h"
+
+# Covariate field names (Chronos-2 models only)
+# Setting this enables multivariate forecasting; specify a list of field names
+#covariate_fields = ["humidity", "pressure"]  # e.g., ["field1", "field2"]
+
+# How covariate_fields are used (Chronos-2 only)
+# "covariate": auxiliary past covariates (default); "target": jointly forecast all series
+#covariate_mode = "covariate"  # e.g., "target"
+
+# InfluxDB database for writing results
+# Specify the target database name (string); default is current database
+#target_database = "your_target_database"  # e.g., "forecast_db"
+
+# Tag filters for querying specific tag values
+# Format: {tag_name = "tag_value", ...}
+# Keep this table LAST: in TOML, keys after a table header belong to that table.
+#[tag_values]
+#host = "server1"
+#region = "us-west"
+
+###### Example: Create Trigger Using This Config ######
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --path chronos_forecasting.py \
+#   --trigger-spec "every:5m" \
+#   --trigger-arguments config_file_path=chronos_forecasting_scheduler.toml \
+#   your_trigger_name

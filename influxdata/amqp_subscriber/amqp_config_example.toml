@@ -38,13 +38,18 @@
 host = "localhost"
 port = 5672
 virtual_host = "/"
-username = "guest"
-password = "guest"
+# Authentication mechanism: "plain" (username/password) or "external" (client TLS cert)
+auth_mechanism = "plain"
+username = "amqp_user"
+password = "amqp_password"
 queues = ["sensor_data", "alerts"]
 format = "json"
 ack_policy = "on_success"
 requeue_on_failure = false
 max_messages = 500
+# When true, full exception messages are logged. When false (default), only the
+# exception type is logged, to avoid leaking sensitive values into log output.
+# enable_full_logging = false
 
 # Optional SSL/TLS configuration (uncomment if needed)
 # [amqp.ssl]
@@ -183,8 +188,8 @@ online = ["$.online", "bool"]
 # host = "broker.example.com"
 # port = 5672
 # virtual_host = "/"
-# username = "guest"
-# password = "guest"
+# username = "amqp_user"
+# password = "amqp_password"
 # queues = ["multi_metrics"]
 # format = "json"
 # ack_policy = "on_success"
@@ -197,3 +202,26 @@ online = ["$.online", "bool"]
 
 # [mapping.json.fields]
 # value = ["$.usage", "float"]
+
+
+# #############################################################################
+# EXAMPLE 6: Certificate (EXTERNAL) Authentication
+# #############################################################################
+# Use auth_mechanism = "external" to authenticate with a client TLS certificate
+# (SASL EXTERNAL) instead of username/password. Requires mutual TLS: ca_cert,
+# client_cert, and client_key must all be provided. username/password are ignored.
+# #############################################################################
+
+# [amqp]
+# host = "secure-rabbitmq.company.com"
+# port = 5671
+# virtual_host = "/production"
+# auth_mechanism = "external"
+# queues = ["production_metrics"]
+# format = "lineprotocol"
+# ack_policy = "on_success"
+
+# [amqp.ssl]
+# ca_cert = "/etc/influxdb/certs/ca.crt"
+# client_cert = "/etc/influxdb/certs/client.crt"
+# client_key = "/etc/influxdb/certs/client.key"

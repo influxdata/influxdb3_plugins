@@ -75,6 +75,12 @@
             "required": false
         },
         {
+            "name": "max_queue_bytes",
+            "example": "67108864",
+            "description": "Maximum total bytes of MQTT payloads buffered between scheduled drains. New messages are dropped when this budget is exhausted to bound memory use. Default: 67108864 (64 MiB).",
+            "required": false
+        },
+        {
             "name": "username",
             "example": "mqtt_user",
             "description": "MQTT broker username. Both username and password must be provided together.",
@@ -84,6 +90,12 @@
             "name": "password",
             "example": "mqtt_password",
             "description": "MQTT broker password. Both username and password must be provided together.",
+            "required": false
+        },
+        {
+            "name": "allow_insecure_auth",
+            "example": "true",
+            "description": "Permit sending username/password when TLS is not configured (no ca_cert). By default the plugin refuses this, because credentials are transmitted in cleartext over an unencrypted connection. Only enable on a trusted network. Default: false.",
             "required": false
         },
         {
@@ -103,6 +115,12 @@
             "example": "certs/client.key",
             "description": "Path to client private key for mutual TLS. Both client_cert and client_key must be provided together.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -115,18 +133,26 @@ import time
 import tomllib
 import uuid
 from datetime import datetime
+from pathlib import Path
 from queue import Empty, Queue
 from typing import Any, Protocol, runtime_checkable
 
 from jsonpath_ng.ext import parse as jsonpath_parse
 from paho.mqtt.client import CallbackAPIVersion, Client
 
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
 
 """
 Helper for batching multiple line protocol builders into a single write.
 """
-
-
 @runtime_checkable
 class _LineBuilderInterface(Protocol):
     def build(self) -> str: ...
@@ -209,6 +235,7 @@ class MQTTConfig:
 
     VALID_TIMESTAMP_FORMATS = {"ns", "ms", "s", "datetime"}
     VALID_FIELD_TYPES = {"int", "uint", "float", "string", "bool"}
+    FORBIDDEN_JSONPATH_TOKENS = ("=~", "sub(")
 
     def __init__(self, influxdb3_local, args: dict[str, str] | None, task_id: str):
         self.influxdb3_local = influxdb3_local
@@ -226,6 +253,58 @@ class MQTTConfig:
         else:
             # Use command-line arguments as config
             self.config = self._build_config_from_args()
+
+        # Security validation regardless of the configuration source
+        self._validate_secure_auth(self.config.get("mqtt", {}))
+        self._validate_jsonpath_safety(self.config)
+
+    @classmethod
+    def _validate_jsonpath_safety(cls, config: dict[str, Any]):
+        """Reject JSONPath expressions that embed a regex evaluated against
+        broker data.
+
+        jsonpath_ng.ext runs an admin-supplied regex through Python `re` in
+        exactly two places: the `=~` filter operator and the `sub()` string
+        function. Both are vulnerable to ReDoS on hostile message data.
+        Every other construct - comparison filters, nesting, recursive descent,
+        wildcards - runs in linear time and is left intact.
+        """
+        json_mapping: dict | None = (config.get("mapping") or {}).get("json")
+        if not json_mapping:
+            return
+
+        paths: list[str] = []
+        table_name_field = json_mapping.get("table_name_field")
+        if isinstance(table_name_field, str):
+            paths.append(table_name_field)
+        for json_path in (json_mapping.get("tags") or {}).values():
+            if isinstance(json_path, str):
+                paths.append(json_path)
+        for field_spec in (json_mapping.get("fields") or {}).values():
+            if (
+                isinstance(field_spec, (list, tuple))
+                and field_spec
+                and isinstance(field_spec[0], str)
+            ):
+                paths.append(field_spec[0])
+        timestamp_config = json_mapping.get("timestamp_config")
+        if isinstance(timestamp_config, dict) and isinstance(
+            timestamp_config.get("field"), str
+        ):
+            paths.append(timestamp_config["field"])
+
+        for path in paths:
+            lowered: str = path.lower()
+            for token in cls.FORBIDDEN_JSONPATH_TOKENS:
+                if token in lowered:
+                    raise ValueError(
+                        f"Unsupported JSONPath operator '{token.rstrip('(')}' "
+                        f"in '{path}': regex-based JSONPath operators ('=~' "
+                        f"and 'sub()') are disabled because they are "
+                        f"vulnerable to backtracking (ReDoS) on "
+                        f"hostile message data. Use comparison filters, or "
+                        f"extract the raw value and transform it downstream."
+                    )
 
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
@@ -245,22 +324,71 @@ class MQTTConfig:
             return path
 
         plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
+        if plugin_dir:
+            return os.path.join(plugin_dir, path)
+
+        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+        candidates: list[str] = []
+        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+            candidates.append(influxdb3_plugin_dir)
+        if virtual_env := os.environ.get("VIRTUAL_ENV"):
+            candidates.append(str(Path(virtual_env).parent))
+
+        for base in candidates:
+            candidate = os.path.join(base, path)
+            if os.path.exists(candidate):
+                return candidate
+
+        raise ValueError(
+            f"PLUGIN_DIR environment variable not set and {description} path "
+            f"'{path}' was not found via fallbacks "
+            f"(tried: {', '.join(candidates) or 'none available'})."
+        )
+
+    @staticmethod
+    def _validate_secure_auth(mqtt_config: dict[str, Any]):
+        """Refuse username/password authentication over an unencrypted channel.
+
+        paho's ``username_pw_set`` and ``tls_set`` are configured by
+        independent gates, so credentials would otherwise be sent in cleartext
+        whenever auth is provided without a CA certificate. Require an explicit
+        'allow_insecure_auth' opt-in before permitting that.
+        """
+        auth: dict = mqtt_config.get("auth") or {}
+        if not (auth.get("username") and auth.get("password")):
+            return
+
+        tls: dict = mqtt_config.get("tls") or {}
+        if tls.get("ca_cert"):
+            return
+
+        allow_insecure: bool = (
+            str(mqtt_config.get("allow_insecure_auth", False)).lower() == "true"
+        )
+        if not allow_insecure:
             raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
+                "Refusing to send username/password over an unencrypted "
+                "connection: TLS is not configured (no 'ca_cert'). Configure "
+                "TLS, or set 'allow_insecure_auth' to true to permit cleartext "
+                "credentials (only on a trusted network)."
             )
-        return os.path.join(plugin_dir, path)
 
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
+        if not config_file.endswith(".toml"):
+            raise ValueError(
+                "Invalid config file format: expected a .toml file"
+            )
+
         config_path: str = self._resolve_path(config_file, "configuration file")
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
-        with open(config_path, "rb") as f:
-            config: dict[str, Any] = tomllib.load(f)
+        try:
+            with open(config_path, "rb") as f:
+                config: dict[str, Any] = tomllib.load(f)
+        except Exception:
+            raise ValueError("Failed to read config file") from None
 
         # Validate required MQTT configuration
         self._validate_toml_config(config)
@@ -306,6 +434,16 @@ class MQTTConfig:
 
         mqtt_config: dict[str, Any] = config["mqtt"]
 
+        enable_full_logging = mqtt_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'mqtt.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
+
         # Check required MQTT parameters
         if "broker_host" not in mqtt_config:
             raise ValueError(
@@ -321,6 +459,43 @@ class MQTTConfig:
         topics: list[str] = mqtt_config["topics"]
         if not isinstance(topics, list) or len(topics) == 0:
             raise ValueError("Parameter 'mqtt.topics' must be a non-empty list")
+
+        # Validate optional max_queue_bytes if present
+        if "max_queue_bytes" in mqtt_config:
+            max_queue_bytes = mqtt_config["max_queue_bytes"]
+            if not isinstance(max_queue_bytes, int) or max_queue_bytes <= 0:
+                raise ValueError(
+                    "Parameter 'mqtt.max_queue_bytes' must be a positive integer"
+                )
+
+        # Validate optional broker_port if present (accept int or numeric string)
+        if "broker_port" in mqtt_config:
+            broker_port = mqtt_config["broker_port"]
+            if isinstance(broker_port, bool) or not isinstance(broker_port, (int, str)):
+                raise ValueError(
+                    "Parameter 'mqtt.broker_port' must be an integer between 1 and 65535"
+                )
+            try:
+                broker_port = int(broker_port)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid 'mqtt.broker_port': {mqtt_config['broker_port']!r}. "
+                    f"Must be an integer between 1 and 65535"
+                )
+            if not (1 <= broker_port <= 65535):
+                raise ValueError(
+                    "Parameter 'mqtt.broker_port' must be an integer between 1 and 65535"
+                )
+            mqtt_config["broker_port"] = broker_port
+
+        # Validate optional allow_insecure_auth if present (accepts bool or string)
+        allow_insecure_auth = mqtt_config.get("allow_insecure_auth")
+        if allow_insecure_auth is not None and not isinstance(
+            allow_insecure_auth, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'mqtt.allow_insecure_auth' must be a boolean or string (true/false)"
+            )
 
         # Get message format (default to json if not specified)
         message_format: str = mqtt_config.get("format", "json")
@@ -415,6 +590,12 @@ class MQTTConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["topics", "broker_host"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -458,16 +639,39 @@ class MQTTConfig:
                     "Both client_cert and client_key must be provided for mutual TLS"
                 )
 
+        max_queue_bytes: int = int(self.args.get("max_queue_bytes", 67108864))
+        if max_queue_bytes <= 0:
+            raise ValueError("Parameter 'max_queue_bytes' must be a positive integer")
+
+        broker_port_arg = self.args.get("broker_port")
+        try:
+            broker_port: int = (
+                int(broker_port_arg) if broker_port_arg is not None else 1883
+            )
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid 'broker_port': {broker_port_arg!r}. Must be an integer.")
+        if not 1 <= broker_port <= 65535:
+            raise ValueError(
+                "Parameter 'broker_port' must be an integer between 1 and 65535"
+            )
+
+        allow_insecure_auth: bool = (
+            str(self.args.get("allow_insecure_auth", "false")).lower() == "true"
+        )
+
         return {
             "mqtt": {
                 "broker_host": self.args.get("broker_host"),
-                "broker_port": int(self.args.get("broker_port", 1883)),
+                "broker_port": broker_port,
                 "topics": topics_list,
                 "qos": int(self.args.get("qos", 1)),
                 "client_id": self.args.get("client_id", "influxdb3_mqtt_subscriber"),
                 "format": self.args.get("format", "json"),
+                "max_queue_bytes": max_queue_bytes,
                 "auth": auth_config,
                 "tls": tls_config,
+                "allow_insecure_auth": allow_insecure_auth,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -735,6 +939,12 @@ class MQTTConnectionManager:
         self.message_queue: Queue = Queue()
         self.connected: bool = False
         self.subscribed_topics: set[str] = set()
+        # Memory budget for queued payloads. Once exceeded, new messages are
+        # dropped to bound the plugin's memory footprint between drains.
+        self.max_queue_bytes: int = int(config.get("max_queue_bytes", 67108864))
+        self.queue_bytes: int = 0
+        self.dropped_by_topic: dict[str, int] = {}
+        self._drop_logged: bool = False
 
     @staticmethod
     def _create_mqtt_client(client_id: str):
@@ -763,12 +973,28 @@ class MQTTConnectionManager:
             return path
 
         plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
-            )
-        return os.path.join(plugin_dir, path)
+        if plugin_dir:
+            return os.path.join(plugin_dir, path)
+
+        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+        candidates: list[str] = []
+        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+            candidates.append(influxdb3_plugin_dir)
+        if virtual_env := os.environ.get("VIRTUAL_ENV"):
+            candidates.append(str(Path(virtual_env).parent))
+
+        for base in candidates:
+            candidate = os.path.join(base, path)
+            if os.path.exists(candidate):
+                return candidate
+
+        raise ValueError(
+            f"PLUGIN_DIR environment variable not set and {description} path "
+            f"'{path}' was not found via fallbacks "
+            f"(tried: {', '.join(candidates) or 'none available'})."
+        )
 
     def _configure_tls(self, tls_config: dict[str, Any]):
         """Configure TLS/SSL for the MQTT client"""
@@ -790,17 +1016,10 @@ class MQTTConnectionManager:
         if client_key:
             client_key = self._resolve_path(client_key, "client key")
 
-        # Validate certificate files exist
-        if not os.path.exists(ca_cert):
-            raise FileNotFoundError(f"CA certificate not found: {ca_cert}")
-
-        if client_cert and not os.path.exists(client_cert):
-            raise FileNotFoundError(f"Client certificate not found: {client_cert}")
-
-        if client_key and not os.path.exists(client_key):
-            raise FileNotFoundError(f"Client key not found: {client_key}")
-
-        self.client.tls_set(ca_certs=ca_cert, certfile=client_cert, keyfile=client_key)
+        try:
+            self.client.tls_set(ca_certs=ca_cert, certfile=client_cert, keyfile=client_key)
+        except Exception:
+            raise OSError("TLS configuration failed. Check certificate and key files.") from None
         self.influxdb3_local.info(f"[{self.task_id}] TLS configured successfully")
 
     def connect(self) -> bool:
@@ -854,9 +1073,16 @@ class MQTTConnectionManager:
             return True
 
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to MQTT broker: {str(e)}"
-            )
+            if "tls" in self.config:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to MQTT broker: "
+                    f"connection failed (TLS configured). "
+                    f"Check broker address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to MQTT broker: {_exc(e)}"
+                )
             return False
 
     def _on_connect(self, client, userdata, flags, reason_code, properties):
@@ -880,7 +1106,7 @@ class MQTTConnectionManager:
                         )
                     except Exception as e:
                         self.influxdb3_local.error(
-                            f"[{self.task_id}] Error subscribing to topic {topic}: {str(e)}"
+                            f"[{self.task_id}] Error subscribing to topic {topic}: {_exc(e)}"
                         )
         else:
             self.connected = False
@@ -902,13 +1128,31 @@ class MQTTConnectionManager:
     def _on_message(self, client, userdata, msg):
         """Callback when message is received"""
         try:
+            payload_size: int = len(msg.payload)
+
+            # Memory-budget guard
+            if self.queue_bytes + payload_size > self.max_queue_bytes:
+                self.dropped_by_topic[msg.topic] = (
+                    self.dropped_by_topic.get(msg.topic, 0) + 1
+                )
+                if not self._drop_logged:
+                    self._drop_logged = True
+                    self.influxdb3_local.error(
+                        f"[{self.task_id}] Queue memory budget exhausted "
+                        f"({self.queue_bytes}/{self.max_queue_bytes} bytes); "
+                        f"dropping messages (first drop on topic {msg.topic}, "
+                        f"payload {payload_size} bytes). "
+                        f"Further drops this cycle will be counted silently."
+                    )
+                return
+
             # Attempt to decode payload as UTF-8
             try:
                 payload: str = msg.payload.decode("utf-8")
             except UnicodeDecodeError:
                 # Binary payload - skip with warning
                 self.influxdb3_local.warn(
-                    f"[{self.task_id}] Skipping binary message on topic {msg.topic} ({len(msg.payload)} bytes) - only UTF-8 text supported"
+                    f"[{self.task_id}] Skipping binary message on topic {msg.topic} ({payload_size} bytes) - only UTF-8 text supported"
                 )
                 return
 
@@ -924,26 +1168,41 @@ class MQTTConnectionManager:
                 "topic": msg.topic,
                 "payload": payload,
                 "qos": msg.qos,
+                "_size": payload_size,
             }
 
+            self.queue_bytes += payload_size
             self.message_queue.put(message_data)
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error processing MQTT message: {str(e)}"
+                f"[{self.task_id}] Error processing MQTT message: {_exc(e)}"
             )
 
     def get_messages(self) -> list[dict[str, Any]]:
-        """Retrieve all messages from queue"""
+        """Retrieve all messages from queue and release their byte budget."""
         messages: list = []
+        drained_bytes: int = 0
         try:
             while True:
                 message = self.message_queue.get_nowait()
+                drained_bytes += message.pop("_size", 0)
                 messages.append(message)
         except Empty:
             pass
 
+        # Decrement (rather than reset to 0) so that any messages that arrive
+        # concurrently during drain remain accounted for.
+        self.queue_bytes = max(0, self.queue_bytes - drained_bytes)
+        self._drop_logged = False
+
         return messages
+
+    def get_drop_counters(self) -> dict[str, int]:
+        """Return per-topic drop counts accumulated since the last call and reset them."""
+        snapshot: dict[str, int] = dict(self.dropped_by_topic)
+        self.dropped_by_topic.clear()
+        return snapshot
 
     def disconnect(self):
         """Disconnect from MQTT broker"""
@@ -1028,7 +1287,7 @@ class JSONParser:
                     except Exception as e:
                         # Log but continue processing other array elements
                         self.influxdb3_local.warn(
-                            f"[{self.task_id}] Error parsing array element {i}: {str(e)}"
+                            f"[{self.task_id}] Error parsing array element {i}: {_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -1048,10 +1307,10 @@ class JSONParser:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]) -> LineBuilder:
@@ -1155,15 +1414,16 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(self, data: dict[str, Any], path: str, cache_key: str | None = None) -> Any:
         """Get value from JSON using JSONPath notation.
@@ -1251,7 +1511,7 @@ class LineProtocolParser:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1527,7 +1787,7 @@ class TextParser:
                         add_field_with_type(line, field_key, value, field_type)
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
-                            f"[{self.task_id}] Failed to convert field '{field_key}' value '{value}' to type '{field_type}': {str(e)}"
+                            f"[{self.task_id}] Failed to convert field '{field_key}' value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1542,7 +1802,7 @@ class TextParser:
             return line
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
 
     def _extract_value(
@@ -1608,17 +1868,18 @@ class TextParser:
 
         timestamp_value: Any = self._extract_value(payload, pattern_str, "timestamp", "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         # Convert timestamp based on format
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class MQTTStats:
@@ -1629,38 +1890,46 @@ class MQTTStats:
 
     def reset(self):
         """Reset all statistics"""
-        self.messages_received: int = 0
-        self.messages_processed: int = 0
-        self.messages_failed: int = 0
-        # Track detailed stats per topic: {topic: {received, processed, failed}}
+        # Track detailed stats per topic: {topic: {received, processed, failed, dropped}}
         self.stats_by_topic: dict = {}
-        self.last_message_time: int | None = None
         self.current_topic: str | None = None  # Track current topic being processed
+
+    @staticmethod
+    def _empty_topic_stats() -> dict[str, int]:
+        return {"received": 0, "processed": 0, "failed": 0, "dropped": 0}
 
     def record_message_received(self, topic: str, count: int = 1):
         """Record received message(s)"""
-        self.messages_received += count
-        self.last_message_time = time.time_ns()
         self.current_topic = topic
 
         # Initialize topic stats if needed
         if topic not in self.stats_by_topic:
-            self.stats_by_topic[topic] = {"received": 0, "processed": 0, "failed": 0}
+            self.stats_by_topic[topic] = self._empty_topic_stats()
 
         self.stats_by_topic[topic]["received"] += count
 
+    def record_message_dropped(self, topic: str, count: int = 1):
+        """Record message(s) dropped by the queue-bytes guard.
+
+        Dropped messages still increment the per-topic received counter because
+        they did arrive from the broker, we just refused to buffer them.
+        """
+        if topic not in self.stats_by_topic:
+            self.stats_by_topic[topic] = self._empty_topic_stats()
+        else:
+            self.stats_by_topic[topic].setdefault("dropped", 0)
+
+        self.stats_by_topic[topic]["received"] += count
+        self.stats_by_topic[topic]["dropped"] += count
+
     def record_message_processed(self, count: int = 1):
         """Record successfully processed message(s)"""
-        self.messages_processed += count
-
         # Update current topic stats
         if self.current_topic and self.current_topic in self.stats_by_topic:
             self.stats_by_topic[self.current_topic]["processed"] += count
 
     def record_message_failed(self, count: int = 1):
         """Record failed message(s)"""
-        self.messages_failed += count
-
         # Update current topic stats
         if self.current_topic and self.current_topic in self.stats_by_topic:
             self.stats_by_topic[self.current_topic]["failed"] += count
@@ -1669,7 +1938,8 @@ class MQTTStats:
         """Get statistics by topic with calculated success rates"""
         result: dict = {}
         for topic, stats in self.stats_by_topic.items():
-            total: int = stats["processed"] + stats["failed"]
+            dropped: int = stats.get("dropped", 0)
+            total: int = stats["processed"] + stats["failed"] + dropped
             success_rate: float = (
                 (stats["processed"] / total * 100) if total > 0 else 0.0
             )
@@ -1678,6 +1948,7 @@ class MQTTStats:
                 "received": stats["received"],
                 "processed": stats["processed"],
                 "failed": stats["failed"],
+                "dropped": stats.get("dropped", 0),
                 "success_rate": round(success_rate, 2),
             }
         return result
@@ -1708,6 +1979,7 @@ def write_stats(influxdb3_local, stats: MQTTStats, broker_host: str, task_id: st
             line.int64_field("messages_received", topic_data["received"])
             line.int64_field("messages_processed", topic_data["processed"])
             line.int64_field("messages_failed", topic_data["failed"])
+            line.int64_field("messages_dropped", topic_data["dropped"])
             line.float64_field("success_rate", topic_data["success_rate"])
 
             line.time_ns(time.time_ns())
@@ -1715,13 +1987,12 @@ def write_stats(influxdb3_local, stats: MQTTStats, broker_host: str, task_id: st
 
         if lines:
             influxdb3_local.write_sync(_BatchLines(lines), no_sync=True)
-
-        influxdb3_local.info(
-            f"[{task_id}] Wrote statistics for {len(topic_stats)} topics to mqtt_stats table"
-        )
+            influxdb3_local.info(
+                f"[{task_id}] Wrote statistics for {len(topic_stats)} topics to mqtt_stats table"
+            )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1757,7 +2028,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1791,12 +2062,16 @@ def process_scheduled_call(
                     "text": config_loader.get_mapping_config("text"),
                 },
             }
-            influxdb3_local.cache.put("mqtt_config", cached_config)
+            influxdb3_local.cache.put("mqtt_config", cached_config, 60 * 60)
             influxdb3_local.info(
                 f"[{task_id}] MQTT Plugin initialized, format: {cached_config['mqtt']['format']}"
             )
 
         mqtt_config: dict = cached_config["mqtt"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(mqtt_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = mqtt_config["format"]
 
         # Get or create stats tracker from cache
@@ -1819,23 +2094,24 @@ def process_scheduled_call(
         # Retrieve messages from queue
         messages: list = mqtt_client.get_messages()
 
-        # Write stats every 10 calls (even if no messages)
-        call_count: int = influxdb3_local.cache.get("mqtt_call_count")
-        if call_count is None:
-            call_count = 0
-
-        call_count += 1
+        # Fold per-topic drop counts (queue-bytes budget exhaustion) into stats.
+        drops: dict[str, int] = mqtt_client.get_drop_counters()
+        if drops:
+            total_dropped: int = sum(drops.values())
+            for dropped_topic, dropped_count in drops.items():
+                stats.record_message_dropped(dropped_topic, dropped_count)
+            influxdb3_local.error(
+                f"[{task_id}] Dropped {total_dropped} message(s) this cycle due to "
+                f"queue memory budget (max_queue_bytes={mqtt_client.max_queue_bytes}); "
+                f"per-topic drops: {drops}"
+            )
 
         broker_str: str = (
             f"{mqtt_config.get('broker_host')}:{mqtt_config.get('broker_port')}"
         )
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, broker_str, task_id)
-            call_count = 0
-
-        influxdb3_local.cache.put("mqtt_call_count", call_count)
 
         if len(messages) == 0:
+            write_stats(influxdb3_local, stats, broker_str, task_id)
             return
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
@@ -1891,7 +2167,7 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
         # Phase 3: Update stats based on results
@@ -1933,8 +2209,10 @@ def process_scheduled_call(
             f"[{task_id}] Data write complete: {success_count} records inserted into DB, {error_count} errors"
         )
 
+        write_stats(influxdb3_local, stats, broker_str, task_id)
+
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in MQTT plugin: {_exc(e)}")
         # Clean up cached state on fatal error
         influxdb3_local.cache.delete("mqtt_config")
 

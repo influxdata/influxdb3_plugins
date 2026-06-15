@@ -1,0 +1,77 @@
+# River Forecaster Plugin — Example TOML Configuration
+# Use this file with: --trigger-arguments config_file_path=river_forecaster_config.toml
+# Or with absolute path: --trigger-arguments config_file_path=/path/to/river_forecaster_config.toml
+
+# ---------------------------------------------------------------------------
+# Column selection
+# ---------------------------------------------------------------------------
+
+# Tables to forecast (REQUIRED). Plugin is idle if this list is empty.
+include_tables = ["system_cpu", "system_memory"]
+
+# Fields to forecast (TOML list). Omit to forecast all numeric fields.
+# include_fields = ["idle", "used", "available"]
+
+# String columns that are string fields, not tags (TOML list).
+# All other string columns are treated as tags.
+# string_fields = ["status_message", "description"]
+
+# ---------------------------------------------------------------------------
+# Series management
+# ---------------------------------------------------------------------------
+
+# Max unique series to track. Uses LRU eviction when exceeded.
+max_series = 50
+
+# ---------------------------------------------------------------------------
+# Forecast settings
+# ---------------------------------------------------------------------------
+
+# Minimum observations per series before forecasting starts.
+min_observations = 30
+
+# Fallback horizon if the model's own write-interval estimate is unavailable
+# (e.g. right after a checkpoint restore, before the second observation arrives).
+default_horizon = 12
+
+# Target forecast window in seconds — controls auto-horizon:
+#   horizon = max(1, round(forecast_target_seconds / write_interval))
+forecast_target_seconds = 3600
+
+# ---------------------------------------------------------------------------
+# SNARIMAX model parameters
+# ---------------------------------------------------------------------------
+
+# Autoregressive order. 0 = auto-tune from write frequency (~1h lookback,
+# clamped to [4, 30]). Set explicitly (e.g. 12) to skip calibration.
+snarimax_p = 0
+
+# Differencing order. 1 handles non-stationary trends.
+snarimax_d = 1
+
+# Moving average order. 1 gives basic error correction.
+snarimax_q = 1
+
+# Observations buffered before auto-finalizing SNARIMAX (only used when
+# snarimax_p=0). Larger = more reliable interval estimate, longer warm-up.
+calibration_count = 30
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+# Log forecast details and rolling MAE to the server log.
+log_forecasts = false
+
+# ---------------------------------------------------------------------------
+# Model persistence (checkpoint/restore)
+# ---------------------------------------------------------------------------
+
+# Seconds between model checkpoints to _system.model_checkpoints.
+checkpoint_interval_seconds = 1800
+
+# Ignore checkpoints older than this (in hours) when restoring on restart.
+max_checkpoint_age_hours = 24
+
+# Skip checkpointing cold-start models with fewer observations than this.
+min_checkpoint_observations = 10

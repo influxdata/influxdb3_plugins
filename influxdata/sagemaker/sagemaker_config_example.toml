@@ -1,0 +1,217 @@
+# =============================================================================
+# SageMaker Inference Plugin - Configuration Examples
+# =============================================================================
+# This file contains configuration examples for different SageMaker endpoint
+# types: array-based, object-based, CSV, and LLM (HuggingFace / JumpStart).
+#
+# To use one of these examples:
+# 1. Copy this file to your plugin directory (--plugin-dir / INFLUXDB3_PLUGIN_DIR)
+# 2. Keep only the example that matches your endpoint
+# 3. Adjust the values to match your endpoint and source measurement
+# 4. Pass "config_file_path = sagemaker_config.toml" in the trigger args
+#
+# File path resolution:
+# - Absolute paths (e.g., /etc/plugins/config.toml) are used as-is
+# - Relative paths (e.g., sagemaker_config.toml) are resolved from the plugin
+#   directory (INFLUXDB3_PLUGIN_DIR, falling back to PLUGIN_DIR)
+# =============================================================================
+
+
+# #############################################################################
+# EXAMPLE 1: Standard inference — instances_array (built-in algorithms)
+# #############################################################################
+# Use for SageMaker built-in algorithms (Linear Learner, k-NN, KMeans, etc.)
+# that expect {"instances": [[v1, v2, ...], ...]}.
+#
+# Source measurement columns: time, motor_speed, ambient_temperature, sensor_id
+# SageMaker response: {"predictions": [{"score": 0.9}, {"score": 0.7}]}
+# #############################################################################
+
+endpoint_name = "my-endpoint-2025-01-15"
+source_measurement = "motor_data"
+region = "eu-central-1"
+interval = "5min"
+limit = 10
+content_type = "application/json"
+accept = "application/json"
+json_shape = "instances_array"
+batch_inference = true
+
+# Each list element is one token: {column}, {column:alias}, or a literal value
+feature_order = ["{motor_speed}", "{ambient_temperature}", "0.0"]
+
+# Each list element is one "output_field_name=jmespath" mapping
+output_fields = ["score=predictions[*].score"]
+
+target_measurement = "motor_predictions"
+# target_database = "forecasts"   # omit to write to the trigger's database
+
+# Tag filters — only query rows where sensor_id is in the list
+[tag_values]
+sensor_id = ["A1", "A2"]
+
+
+# #############################################################################
+# EXAMPLE 2: Object-shaped request — instances_object
+# #############################################################################
+# Use when the endpoint expects named keys instead of positional arrays:
+# {"instances": [{"speed": 42.0, "temp": 21.5, "pad": 0.0}, ...]}
+# Literals MUST use the "literal:alias" form so they get a JSON key.
+# #############################################################################
+
+# endpoint_name = "my-object-endpoint"
+# source_measurement = "motor_data"
+# region = "eu-central-1"
+# interval = "10min"
+# limit = 5
+# content_type = "application/json"
+# accept = "application/json"
+# json_shape = "instances_object"
+# batch_inference = true
+
+# feature_order = ["{motor_speed:speed}", "{ambient_temperature:temp}", "0.0:pad"]
+# output_fields = ["label=predictions[*].label", "score=predictions[*].score"]
+
+# target_measurement = "motor_predictions_obj"
+
+# [tag_values]
+# env = ["prod"]
+
+
+# #############################################################################
+# EXAMPLE 3: CSV input/output
+# #############################################################################
+# Use for endpoints that consume and return text/csv.
+# output_fields paths are zero-based column indices (integers as strings).
+# #############################################################################
+
+# endpoint_name = "my-csv-endpoint"
+# source_measurement = "sensor_readings"
+# region = "us-east-1"
+# interval = "1min"
+# limit = 50
+# content_type = "text/csv"
+# accept = "text/csv"
+# batch_inference = true
+
+# feature_order = ["{temperature}", "{humidity}", "{pressure}"]
+
+# Column index 0 → first CSV column in response
+# output_fields = ["prediction=0", "confidence=1"]
+
+# target_measurement = "sensor_predictions"
+
+
+# #############################################################################
+# EXAMPLE 4: LLM / HuggingFace JumpStart — extra_body for generation params
+# #############################################################################
+# Use for HuggingFace text-generation endpoints that accept:
+# {"inputs": "...", "parameters": {"max_new_tokens": 50, "top_p": 0.95}}
+# extra_body entries are merged into the JSON body at their dotted paths.
+# #############################################################################
+
+# endpoint_name = "hf-llm-endpoint"
+# source_measurement = "prompts"
+# region = "eu-west-1"
+# interval = "30min"
+# limit = 1
+# content_type = "application/json"
+# accept = "application/json"
+# json_shape = "raw_object"
+# batch_inference = false
+
+# {col:alias} places the prompt under the "inputs" JSON key
+# feature_order = ["{prompt_text:inputs}"]
+# Most HuggingFace text-generation endpoints return [{"generated_text": "..."}];
+# use [0].generated_text for single-row inference (batch_inference = false).
+# output_fields = ["generated_text=[0].generated_text"]
+
+# Each list element is one "dotted.path=value" entry merged into the body
+# extra_body = [
+#     "parameters.max_new_tokens=200",
+#     "parameters.top_p=0.95",
+#     "parameters.do_sample=true",
+#     "parameters.temperature=0.7",
+# ]
+
+# target_measurement = "llm_outputs"
+
+
+# #############################################################################
+# EXAMPLE 5: Multi-model endpoint with per-row inference and timestamp
+# #############################################################################
+# Use when you target different models on the same endpoint and want to
+# extract a timestamp from the response body.
+# #############################################################################
+
+# endpoint_name = "multi-model-endpoint"
+# source_measurement = "telemetry"
+# region = "ap-southeast-1"
+# interval = "15min"
+# limit = 1
+# content_type = "application/json"
+# accept = "application/json"
+# json_shape = "instances_array"
+# batch_inference = false
+# target_model = "model-v2.tar.gz"
+
+# feature_order = ["{cpu_usage}", "{mem_usage}", "{disk_io}"]
+# output_fields = ["anomaly_score=prediction.score", "class=prediction.label"]
+# timestamp_path = "prediction.ts"
+
+# target_measurement = "anomaly_results"
+# target_database = "monitoring"
+
+# [tag_values]
+# region = ["us", "eu"]
+# tier  = ["prod"]
+
+
+# #############################################################################
+# EXAMPLE 6: Time-series forecasting — Chronos-Bolt (inputs_timeseries)
+# #############################################################################
+# Use for Amazon Chronos-Bolt and similar univariate forecasting models that
+# expect {"inputs": [{"target": [v1, v2, ..., vN]}]}.
+#
+# How it works:
+#   - limit=20 fetches 20 historical rows → all values collected into one target array
+#   - batch_inference=true sends them in a single request
+#   - forecast_output=true lets each output_fields path return an array;
+#     array length = number of written rows (prediction_length)
+#   - Scalar paths (if any) are broadcast to every forecast row
+#
+# Source measurement columns: time, value (univariate sensor reading)
+# SageMaker response:
+#   {"predictions": [{"mean": [...10 values...], "0.1": [...], "0.9": [...]}]}
+#
+# Note: quantile_levels uses semicolons as separator inside brackets.
+# #############################################################################
+
+# endpoint_name = "chronos-bolt-small-endpoint"
+# source_measurement = "sensor_readings"
+# region = "eu-central-1"
+# interval = "1h"
+# limit = 20
+# content_type = "application/json"
+# accept = "application/json"
+# json_shape = "inputs_timeseries"
+# batch_inference = true
+# forecast_output = true
+
+# Single {col} token required for inputs_timeseries
+# feature_order = ["{value}"]
+
+# mean is an array of prediction_length values → one row per forecast step
+# quantile paths use quoted keys because "0.1" starts with a digit
+# output_fields = [
+#     "mean=predictions[0].mean",
+#     "q10=predictions[0].\"0.1\"",
+#     "q90=predictions[0].\"0.9\"",
+# ]
+
+# extra_body = [
+#     "parameters.prediction_length=10",
+#     "parameters.quantile_levels=[0.1;0.5;0.9]",
+# ]
+
+# target_measurement = "sensor_forecasts"

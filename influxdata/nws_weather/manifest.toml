@@ -1,0 +1,18 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "nws_weather"
+version = "1.0.0"
+description = "Provides real-time weather data from the National Weather Service API for demonstration and sample data purposes. Fetches live observations from multiple weather stations across the United States."
+triggers = ["process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/nws_weather"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/nws_weather/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!nws_weather_sampler.py",
+]
+
+[dependencies]
+database_version = ">=3.0.0"

@@ -1,0 +1,116 @@
+# River Anomaly Detector Plugin — Example TOML Configuration
+# Use this file with: --trigger-arguments config_file_path=river_anomaly_detector_config.toml
+# Or with absolute path: --trigger-arguments config_file_path=/path/to/river_anomaly_detector_config.toml
+
+# ---------------------------------------------------------------------------
+# Column selection
+# ---------------------------------------------------------------------------
+
+# Fields to monitor (TOML list). If set, only these numeric fields are processed.
+# include_fields = ["temperature", "humidity"]
+
+# Fields to exclude from anomaly detection (TOML list)
+# exclude_fields = ["status", "version"]
+
+# Tables to skip when using all_tables trigger (TOML list)
+# exclude_tables = ["debug_info", "system_logs"]
+
+# String columns that are string fields, not tags (TOML list).
+# All other string columns are treated as tags.
+# string_fields = ["status_message", "description"]
+
+# ---------------------------------------------------------------------------
+# Rolling Z-score detector (always active for scoring)
+# ---------------------------------------------------------------------------
+
+# Standard deviations from the EW mean to flag as anomaly.
+rolling_std_threshold = 5.0
+
+# Fading factor for exponentially weighted mean/variance (lower = longer memory).
+ew_fading_factor = 0.3
+
+# Minimum total observations per series before the rolling Z-score starts
+# scoring. Lower values give faster cold start but more false positives.
+min_rolling_observations = 10
+
+# ---------------------------------------------------------------------------
+# Adaptive detection (driven by auto-profiler recommendations)
+# ---------------------------------------------------------------------------
+
+# Read per-series tuning from _meta.series_profiles (requires auto-profiler plugin).
+auto_tune = true
+
+# Observations per series between auto-tune refreshes from _meta.series_profiles.
+# Lower values pick up profiler changes faster at the cost of more queries.
+tune_refresh_interval = 100
+
+# How to combine active detector votes: "any" (OR), "majority", or "all" (AND).
+combination_mode = "any"
+
+# Explicit detector mode as a TOML list of components. Empty/unset = auto from profiler.
+#
+# Base components (pick one): "zscore_conservative", "zscore_low",
+#                              "zscore_high", "zscore_adaptive"
+# Add-ons (optional):          "seasonal", "adwin"
+#
+# Examples:
+#   detector_mode = ["zscore_conservative"]
+#   detector_mode = ["zscore_low", "seasonal"]
+#   detector_mode = ["zscore_high", "adwin"]
+#   detector_mode = ["zscore_conservative", "seasonal", "adwin"]
+
+# Force seasonal / ADWIN detection on or off regardless of the base mode.
+# "" or unset = auto from profiler, "true"/"false" = override.
+# enable_seasonal = "true"
+# enable_adwin = "false"
+
+# ---------------------------------------------------------------------------
+# Seasonal detector
+# ---------------------------------------------------------------------------
+
+# Seasonal bucket period: "hourly" (24 buckets, hour-of-day)
+# or "weekly" (168 buckets, hour-of-week). Empty/unset = auto from profiler.
+# seasonal_period = "hourly"
+
+# Fading factor for seasonal bucket stats (lower = longer memory).
+seasonal_fading_factor = 0.1
+
+# Standard deviations from the seasonal bucket mean to flag as anomaly.
+seasonal_threshold = 3.0
+
+# Minimum observations per bucket before it contributes to anomaly detection.
+min_seasonal_observations = 5
+
+# ---------------------------------------------------------------------------
+# ADWIN drift detector
+# ---------------------------------------------------------------------------
+
+# ADWIN sensitivity. Lower values = more sensitive to drift.
+# adwin_delta = 0.002
+
+# ---------------------------------------------------------------------------
+# Series management
+# ---------------------------------------------------------------------------
+
+# Max unique series to track. Uses LRU eviction when exceeded.
+max_series = 1000
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+# Log detected anomalies to the server log.
+log_anomalies = true
+
+# ---------------------------------------------------------------------------
+# Model persistence (checkpoint/restore)
+# ---------------------------------------------------------------------------
+
+# Seconds between model checkpoints to _system.model_checkpoints.
+checkpoint_interval_seconds = 1800
+
+# Ignore checkpoints older than this (in hours) when restoring on restart.
+max_checkpoint_age_hours = 24
+
+# Skip checkpointing cold-start models with fewer observations than this.
+min_checkpoint_observations = 10

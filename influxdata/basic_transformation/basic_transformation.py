@@ -79,6 +79,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ],
     "onwrite_args_config": [
@@ -153,6 +159,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -169,7 +181,32 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import math
 
+import pint
 from pint import UnitRegistry
+
+# pint old versions parsed unit strings with eval(); refuse to run on a version below.
+_MIN_PINT_VERSION = (0, 20)
+_pint_version = tuple(int(p) for p in re.findall(r"\d+", pint.__version__)[:2])
+if _pint_version < _MIN_PINT_VERSION:
+    raise RuntimeError(
+        f"basic_transformation requires pint >= "
+        f"{'.'.join(map(str, _MIN_PINT_VERSION))}, found {pint.__version__}. "
+        f"Older versions parsed unit strings with eval(). Upgrade pint."
+    )
+
+
+# Default True so config-load errors log in full; set from config (default
+# False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
 
 _OP_FUNCS = {
     ">": operator.gt,
@@ -816,7 +853,7 @@ def build_regex_pattern(
         return compiled
     except re.error as e:
         influxdb3_local.warn(
-            f"[{task_id}] Failed to compile regex: {e}, skipping"
+            f"[{task_id}] Failed to compile regex: {_exc(e)}, skipping"
         )
 
 
@@ -915,39 +952,47 @@ def generate_fields_string(tags: list[str], fields: list[str]) -> str:
         str: Formatted string with quoted field names separated by commas and newlines.
     """
     all_fields: list = tags + fields
-    return ",\n\t".join(f'"{field}"' for field in all_fields)
+    return ",\n\t".join(quote_identifier(field) for field in all_fields)
 
 
 def generate_filter_clause(
     filters: list[tuple[str, str, str | int | float]] | None,
-) -> str:
+    valid_columns: list[str] | None = None,
+) -> tuple[str, dict]:
     """
-    Generates the WHERE clause for filtering by field/operator/value tuples.
+    Generates the WHERE clause for filtering by field/operator/value tuples using parameter binding.
 
     Args:
         filters (list[tuple[str, str, str | int | float]] | None):
             A list of 3-tuples (field, operator, value) as returned by `parse_field_values`,
             or None.
+        valid_columns (list[str] | None): Known column names from the schema for cross-checking
+            filter field names. If provided, filter fields not in this list are rejected.
 
     Returns:
-        str: SQL WHERE clause string combining all filters with AND, or empty string if no filters.
+        tuple[str, dict]: SQL WHERE clause string and a dict of query parameters.
     """
     if not filters:
-        return ""
+        return "", {}
 
+    allowed_operators = {"=", "!=", ">", "<", ">=", "<="}
     clauses: list[str] = []
-    for field, op, val in filters:
-        # Determine whether to quote the value
-        if isinstance(val, (int, float)):
-            val_str = str(val)
-        else:
-            # escape single quotes in string values
-            escaped = val.replace("'", "''")
-            val_str = f"'{escaped}'"
+    params: dict = {}
 
-        clauses.append(f'AND\n\t"{field}" {op} {val_str}\n')
+    for idx, (field, op, val) in enumerate(filters):
+        if op not in allowed_operators:
+            raise Exception(
+                f"Invalid filter operator: '{op}' (must be one of {', '.join(sorted(allowed_operators))})"
+            )
+        if valid_columns is not None and field not in valid_columns:
+            raise Exception(
+                f"Filter field '{field}' does not exist in the measurement schema"
+            )
+        param_name = f"filter_val_{idx}"
+        params[param_name] = val
+        clauses.append(f'AND\n\t{quote_identifier(field)} {op} ${param_name}\n')
 
-    return "".join(clauses)
+    return "".join(clauses), params
 
 
 def generate_query(
@@ -957,9 +1002,9 @@ def generate_query(
     tag_names: list[str],
     start_time: datetime,
     end_time: datetime,
-) -> str:
+) -> tuple[str, dict]:
     """
-    Builds an SQL query.
+    Builds an SQL query with parameter binding for filter values.
 
     Args:
         measurement: source measurement name
@@ -970,25 +1015,28 @@ def generate_query(
         end_time:   UTC datetime for WHERE time < ...
 
     Returns:
-        A complete SQL query string.
+        tuple[str, dict]: A complete SQL query string and a dict of query parameters.
     """
+    escaped_measurement = measurement.replace("'", "''")
+
     # SELECT clause
     fields_clause: str = generate_fields_string(tag_names, field_names)
-    filter_clause: str = generate_filter_clause(filters)
+    valid_columns: list[str] = tag_names + field_names + ["time"]
+    filter_clause, params = generate_filter_clause(filters, valid_columns)
 
     query: str = f"""
             SELECT
                 {fields_clause}
             FROM
-                '{measurement}'
+                '{escaped_measurement}'
             WHERE
                 time >= '{start_time}'
-            AND 
+            AND
                 time < '{end_time}'
             {filter_clause}
             ORDER BY time
         """
-    return query
+    return query, params
 
 
 def transform_to_influx_line(
@@ -1019,11 +1067,22 @@ def transform_to_influx_line(
         builder.time_ns(timestamp)
 
         for tag in tags_list:
-            builder.tag(tag, row.get(tag))
+            if tag not in row:
+                continue
+            tag_value = row[tag]
+            if tag_value is None:
+                continue
+            builder.tag(tag, tag_value)
 
         for field_name in fields_list:
+            if field_name not in row:
+                continue
             value = row[field_name]
-            if isinstance(value, int):
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                builder.bool_field(field_name, value)
+            elif isinstance(value, int):
                 builder.int64_field(field_name, value)
             elif isinstance(value, float):
                 builder.float64_field(field_name, value)
@@ -1088,7 +1147,7 @@ def write_data(
                     "max_retries": max_retries,
                     "records": record_count,
                     "database": db_name,
-                    "error": str(e),
+                    "error": _exc(e),
                 }
                 influxdb3_local.warn(
                     f"[{task_id}] Error write attempt {tries + 1}", retry_log
@@ -1103,10 +1162,10 @@ def write_data(
             "database": db_name,
             "measurement": target_measurement,
             "retries": retry_count,
-            "error": str(e),
+            "error": _exc(e),
         }
         influxdb3_local.error(f"[{task_id}] Write failed with exception, {failure_log}")
-        return False, str(e), retry_count
+        return False, _exc(e), retry_count
 
 
 def _normalize_temp_unit_alias(part: str) -> str | None:
@@ -1197,7 +1256,9 @@ def apply_unit_conversion_numeric(
 
     # 2) Parse transform_name
     m = re.fullmatch(
-        r"convert_([^_]+(?:_per_[^_]+)?)_to_([^_]+(?:_per_[^_]+)?)", transform_name
+        r"convert_([A-Za-z][A-Za-z0-9]*(?:_per_[A-Za-z][A-Za-z0-9]*)?)"
+        r"_to_([A-Za-z][A-Za-z0-9]*(?:_per_[A-Za-z][A-Za-z0-9]*)?)",
+        transform_name,
     )
     if not m:
         influxdb3_local.warn(
@@ -1227,7 +1288,7 @@ def apply_unit_conversion_numeric(
             )
         except Exception as e:
             influxdb3_local.warn(
-                f"[{task_id}] Temperature conversion from '{from_part}' to '{to_part}' failed for value {value}: {e}"
+                f"[{task_id}] Temperature conversion from '{from_part}' to '{to_part}' failed for value {value}: {_exc(e)}"
             )
             return value
     # If one is temperature but the other is not, skip
@@ -1242,7 +1303,7 @@ def apply_unit_conversion_numeric(
         quantity = value * ureg(from_unit_str)
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Failed to interpret {value} as '{from_unit_str}': {e}. Skipping conversion."
+            f"[{task_id}] Failed to interpret {value} as '{from_unit_str}': {_exc(e)}. Skipping conversion."
         )
         return value
 
@@ -1251,7 +1312,7 @@ def apply_unit_conversion_numeric(
         return q2.magnitude
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Conversion from '{from_unit_str}' to '{to_unit_str}' failed for value {value}: {e}."
+            f"[{task_id}] Conversion from '{from_unit_str}' to '{to_unit_str}' failed for value {value}: {_exc(e)}."
         )
         return value
 
@@ -1297,7 +1358,7 @@ def apply_value_transformation(
             )
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Error in transformation '{transform_name}' for field '{field_name}': {str(e)}"
+            f"[{task_id}] Error in transformation '{transform_name}' for field '{field_name}': {_exc(e)}"
         )
 
     return value
@@ -1336,7 +1397,7 @@ def apply_name_transformation(
             )
     except Exception as e:
         influxdb3_local.warn(
-            f"[{task_id}] Error in transformation '{transform_name}' for '{name}': {str(e)}"
+            f"[{task_id}] Error in transformation '{transform_name}' for '{name}': {_exc(e)}"
         )
 
     return name
@@ -1370,30 +1431,60 @@ def process_scheduled_call(
                 - "filters": string defining field filters.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
+    influxdb3_local.info(f"[{task_id}] Starting scheduled call at {call_time}")
 
     # Override args with config file
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if not plugin_dir_var:
-                    influxdb3_local.error(
-                        f"[{task_id}] Failed to get PLUGIN_DIR env var"
-                    )
-                    return
-                plugin_dir: Path = Path(plugin_dir_var)
-                file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                if plugin_dir_var:
+                    file_path = Path(plugin_dir_var) / path
+                else:
+                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+                    candidates: list[str] = []
+                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                        candidates.append(influxdb3_plugin_dir)
+                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                        candidates.append(str(Path(virtual_env).parent))
+
+                    resolved = None
+                    for base in candidates:
+                        candidate = Path(base) / path
+                        if candidate.exists():
+                            resolved = candidate
+                            break
+
+                    if resolved is None:
+                        candidates_str = ", ".join(candidates) if candidates else "none available"
+                        influxdb3_local.error(
+                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
+                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
+                        )
+                        return
+                    file_path = resolved
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
         else:
             args["use_config_file"] = False
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str((args or {}).get("enable_full_logging", False)).lower() == "true"
+    )
 
     required_keys: list = ["measurement", "window", "target_measurement"]
 
@@ -1409,6 +1500,13 @@ def process_scheduled_call(
         target_measurement: str = args["target_measurement"]
         window: timedelta = parse_time_interval(args["window"], task_id)
         target_database: str | None = args.get("target_database", None)
+        if target_measurement == measurement and not target_database:
+            influxdb3_local.warn(
+                f"[{task_id}] target_measurement '{target_measurement}' equals source measurement "
+                f"and 'target_database' is not set — each run will overwrite rows in the source "
+                f"table at the same tag+time. Set a different target_measurement or target_database "
+                f"if this is unintended."
+            )
         included_fields: list = parse_fields(args, "included_fields")
         excluded_fields: list = parse_fields(args, "excluded_fields")
         if included_fields and excluded_fields:
@@ -1427,8 +1525,8 @@ def process_scheduled_call(
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
-        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
-        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
+        influxdb3_local.info(f"[{task_id}] Name transformations configured for {len(names_transformations)} fields")
+        influxdb3_local.info(f"[{task_id}] Value transformations configured for {len(values_transformations)} fields")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1470,11 +1568,11 @@ def process_scheduled_call(
         influxdb3_local.info(f"[{task_id}] Tags to query: {tags_to_query}")
 
         # generate query
-        query: str = generate_query(
+        query, params = generate_query(
             measurement, filters, fields_to_query, tags_to_query, start_time, end_time
         )
         influxdb3_local.info(f"[{task_id}] Executing query for {measurement} with {len(filters)} filters")
-        results: list = influxdb3_local.query(query)
+        results: list = influxdb3_local.query(query, params)
         influxdb3_local.info(f"[{task_id}] Query executed, {len(results)} records returned")
 
         if not results:
@@ -1629,7 +1727,7 @@ def process_scheduled_call(
 
         if dry_run:
             influxdb3_local.info(
-                f"[{task_id}] Dry run is set, transformed results: {transformed_results}"
+                f"[{task_id}] Dry run complete, {len(transformed_results)} rows transformed"
             )
             return
 
@@ -1657,7 +1755,7 @@ def process_scheduled_call(
             )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
+        influxdb3_local.error(f"[{task_id}] Unexpected error: {_exc(e)}")
 
 
 def apply_filters(filters: list, fields: list, tags: list, rows: list):
@@ -1711,28 +1809,55 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
     # Override args with config file
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                influxdb3_local.info(
-                    f"[{task_id}] PLUGIN_DIR env var: {plugin_dir_var}"
-                )
-                if not plugin_dir_var:
-                    influxdb3_local.error(
-                        f"[{task_id}] Failed to get PLUGIN_DIR env var"
-                    )
-                    return
-                plugin_dir: Path = Path(plugin_dir_var)
-                file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                if plugin_dir_var:
+                    file_path = Path(plugin_dir_var) / path
+                else:
+                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+                    candidates: list[str] = []
+                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                        candidates.append(influxdb3_plugin_dir)
+                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                        candidates.append(str(Path(virtual_env).parent))
+
+                    resolved = None
+                    for base in candidates:
+                        candidate = Path(base) / path
+                        if candidate.exists():
+                            resolved = candidate
+                            break
+
+                    if resolved is None:
+                        candidates_str = ", ".join(candidates) if candidates else "none available"
+                        influxdb3_local.error(
+                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
+                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
+                        )
+                        return
+                    file_path = resolved
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] new args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
         else:
             args["use_config_file"] = False
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str((args or {}).get("enable_full_logging", False)).lower() == "true"
+    )
 
     required_keys: list = ["measurement", "target_measurement"]
 
@@ -1747,6 +1872,13 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         measurement: str = args["measurement"]
         target_measurement: str = args["target_measurement"]
         target_database: str | None = args.get("target_database", None)
+        if target_measurement == measurement and not target_database:
+            influxdb3_local.error(
+                f"[{task_id}] target_measurement '{target_measurement}' equals source measurement "
+                f"and 'target_database' is not set — this would create an infinite write loop on an "
+                f"on-write trigger. Set a different target_measurement or target_database."
+            )
+            return
         included_fields: list = parse_fields(args, "included_fields")
         excluded_fields: list = parse_fields(args, "excluded_fields")
         if included_fields and excluded_fields:
@@ -1765,8 +1897,8 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         if not names_transformations and not values_transformations:
             influxdb3_local.error(f"[{task_id}] No transformation rules provided")
             return
-        influxdb3_local.info(f"[{task_id}] Name transformations: {names_transformations}")
-        influxdb3_local.info(f"[{task_id}] Value transformations: {values_transformations}")
+        influxdb3_local.info(f"[{task_id}] Name transformations configured for {len(names_transformations)} fields")
+        influxdb3_local.info(f"[{task_id}] Value transformations configured for {len(values_transformations)} fields")
 
         custom_replacements: dict = parse_custom_replacements(
             influxdb3_local, args, task_id
@@ -1962,7 +2094,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
             if dry_run:
                 influxdb3_local.info(
-                    f"[{task_id}] Dry run is set, transformed results: {transformed_results}"
+                    f"[{task_id}] Dry run complete, {len(transformed_results)} rows transformed"
                 )
                 return
 
@@ -1992,4 +2124,4 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                 )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
+        influxdb3_local.error(f"[{task_id}] Unexpected error: {_exc(e)}")

@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2025-12-04T20:49:08+03:00",
+        "last_updated": "2026-06-15T00:00:00+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -220,6 +220,17 @@
                 "trigger_types_supported": ["scheduler"]
             },
             {
+                "name": "Bird Data Simulator",
+                "path": "influxdata/bird_data_simulator/bird_data_simulator.py",
+                "description": "Generates synthetic bird tracking telemetry with persistent birds, ranges, simulated movement, speed, heading, and body temperature. Exposes only simple volume controls.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/bird_data_simulator/README.md",
+                "required_plugins": [],
+                "required_libraries": ["Faker"],
+                "last_update": "2026-04-29",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
                 "name": "OPC UA",
                 "path": "influxdata/opcua/opcua.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Enables periodic ingestion of OPC UA node values into InfluxDB 3. Connect to OPC UA servers (PLCs, SCADA, CNC machines) and read current values with support for auto-discovery browse mode, automatic data type detection, namespace URI resolution, and quality filtering.",
@@ -228,6 +239,105 @@
                 "required_plugins": [],
                 "required_libraries": ["asyncua"],
                 "last_update": "2026-03-30",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Signal Generator",
+                "path": "influxdata/signal_generator/signal_generator.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Generates configurable waveform-based time-series data on a schedule for demos, testing, dashboards, alerts, and downstream plugin validation without requiring an external data source.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/signal_generator/README.md",
+                "required_plugins": [],
+                "required_libraries": [],
+                "last_update": "2026-05-15",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "River Auto Profiler",
+                "path": "influxdata/river_auto_profiler/river_auto_profiler.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Incrementally profiles incoming time-series data with River ML streaming statistics and writes per-series recommendations for anomaly detection tuning, including thresholds, fading factors, and profile maturity.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_auto_profiler/README.md",
+                "required_plugins": [],
+                "required_libraries": ["river"],
+                "last_update": "2026-05-15",
+                "trigger_types_supported": ["data_writes"]
+            },
+            {
+                "name": "River Anomaly Detection",
+                "path": "influxdata/river_anomaly_detector/river_anomaly_detector.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Detects time-series anomalies on incoming writes using River ML online models, combining rolling statistics with HalfSpaceTrees for per-series anomaly scoring and optional auto-tuning from River Auto Profiler output.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_anomaly_detector/README.md",
+                "required_plugins": [],
+                "required_libraries": ["river"],
+                "last_update": "2026-05-15",
+                "trigger_types_supported": ["data_writes"]
+            },
+            {
+                "name": "River Forecaster",
+                "path": "influxdata/river_forecaster/river_forecaster.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Provides online time-series forecasting with River ML SNARIMAX models, learning from incoming writes and producing scheduled multi-step forecasts with per-series model state and optional auto-horizon support.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/river_forecaster/README.md",
+                "required_plugins": [],
+                "required_libraries": ["river"],
+                "last_update": "2026-05-15",
+                "trigger_types_supported": ["scheduler", "data_writes"]
+            },
+            {
+                "name": "Chronos Forecasting",
+                "path": "influxdata/chronos_forecasting/chronos_forecasting.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables zero-shot time-series forecasting with Amazon Chronos models from HuggingFace, supporting scheduled batch forecasts and on-demand HTTP forecasts with optional Chronos-2 multivariate covariates.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/chronos_forecasting/README.md",
+                "required_plugins": [],
+                "required_libraries": ["chronos-forecasting", "torch"],
+                "last_update": "2026-06-15",
+                "trigger_types_supported": ["scheduler", "http"]
+            },
+            {
+                "name": "Synthefy Forecasting",
+                "path": "influxdata/synthefy_forecasting/synthefy_forecasting.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Integrates Synthefy Forecasting API with InfluxDB 3 to enable on-demand time series forecasting via HTTP requests. Reads time series data from InfluxDB, generates forecasts using Synthefy's advanced forecasting models (sfm-tabular, Migas-latest, Chronos2, Moirai2, TimesFM, etc.) and writes the results back to InfluxDB for visualization and alerting. Supports multivariate forecasting with metadata fields as covariates.",
+                "author": "Synthefy",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/synthefy_forecasting/README.md",
+                "required_plugins": [],
+                "required_libraries": ["pandas", "requests"],
+                "last_update": "2026-01-08",
+                "trigger_types_supported": ["http"]
+            },
+            {
+                "name": "SageMaker Inference",
+                "path": "influxdata/sagemaker/sagemaker.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Runs scheduled inference against Amazon SageMaker endpoints using recent InfluxDB 3 rows, supports multiple request and response shapes, and writes prediction results back to InfluxDB.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/sagemaker/README.md",
+                "required_plugins": [],
+                "required_libraries": ["boto3", "jmespath", "pandas"],
+                "last_update": "2026-06-10",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Value Counter",
+                "path": "influxdata/valuecounter/valuecounter.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Counts how often unique field values appear in incoming writes or scheduled query windows, then writes per-series rollup measurements with one count field per observed value.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/valuecounter/README.md",
+                "required_plugins": [],
+                "required_libraries": [],
+                "last_update": "2026-06-10",
+                "trigger_types_supported": ["scheduler", "data_writes"]
+            },
+            {
+                "name": "Stock Portfolio Tracker",
+                "path": "influxdata/stock_plugin/stock_plugin.py",
+                "description": "[BETA] Tracks stock, ETF, and mutual fund portfolio values from Yahoo Finance with market-hours gating and rollups.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/stock_plugin/README.md",
+                "required_plugins": [],
+                "required_libraries": ["yfinance", "pandas_market_calendars"],
+                "last_update": "2026-06-10",
                 "trigger_types_supported": ["scheduler"]
             }
         ]

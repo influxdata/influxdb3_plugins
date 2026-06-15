@@ -27,15 +27,21 @@
             "required": false
         },
         {
+            "name": "auth_mechanism",
+            "example": "plain",
+            "description": "AMQP authentication mechanism: 'plain' (username/password) or 'external' (client TLS certificate). Default: 'plain'.",
+            "required": false
+        },
+        {
             "name": "username",
-            "example": "guest",
-            "description": "AMQP broker username. Default: 'guest'.",
+            "example": "amqp_user",
+            "description": "AMQP broker username. Required when auth_mechanism is 'plain'.",
             "required": false
         },
         {
             "name": "password",
-            "example": "guest",
-            "description": "AMQP broker password. Default: 'guest'.",
+            "example": "amqp_password",
+            "description": "AMQP broker password. Required when auth_mechanism is 'plain'.",
             "required": false
         },
         {
@@ -115,12 +121,19 @@
             "example": "certs/client.key",
             "description": "Path to client private key for mutual TLS.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
 """
 
 import json
+import math
 import os
 import re
 import ssl
@@ -128,6 +141,7 @@ import time
 import tomllib
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import pika
@@ -137,6 +151,20 @@ from jsonpath_ng.ext import parse as jsonpath_parse
 _CONNECTION_TIMEOUT = 10
 _MAX_MESSAGES = 500
 _PREFETCH_COUNT = 100
+
+# InfluxDB integer field ranges
+_INT64_MIN: int = -9223372036854775808
+_INT64_MAX: int = 9223372036854775807
+_UINT64_MAX: int = 18446744073709551615
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
 """
@@ -163,17 +191,62 @@ class _BatchLines:
         return self._built
 
 
+def _resolve_path(path: str, description: str) -> str:
+    """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR, falling back to server-derivable locations."""
+    if os.path.isabs(path):
+        return path
+
+    plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
+    if plugin_dir:
+        return os.path.join(plugin_dir, path)
+
+    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+    candidates: list[str] = []
+    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+        candidates.append(influxdb3_plugin_dir)
+    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+        candidates.append(str(Path(virtual_env).parent))
+
+    for base in candidates:
+        candidate = os.path.join(base, path)
+        if os.path.exists(candidate):
+            return candidate
+
+    raise ValueError(
+        f"PLUGIN_DIR environment variable not set and {description} path "
+        f"'{path}' was not found via fallbacks "
+        f"(tried: {', '.join(candidates) or 'none available'})."
+    )
+
+
 def add_field_with_type(line, field_key: str, value: Any, field_type: str):
     """Add field to LineBuilder with explicit type conversion.
 
     Supported types: int, uint, float, string, bool
     """
     if field_type == "int":
-        line.int64_field(field_key, int(value))
+        ival: int = int(value)
+        if not (_INT64_MIN <= ival <= _INT64_MAX):
+            raise ValueError(
+                f"int field '{field_key}' out of int64 range "
+                f"[{_INT64_MIN}, {_INT64_MAX}]: {ival}"
+            )
+        line.int64_field(field_key, ival)
     elif field_type == "uint":
-        line.uint64_field(field_key, int(value))
+        uval: int = int(value)
+        if not (0 <= uval <= _UINT64_MAX):
+            raise ValueError(
+                f"uint field '{field_key}' out of uint64 range "
+                f"[0, {_UINT64_MAX}]: {uval}"
+            )
+        line.uint64_field(field_key, uval)
     elif field_type == "float":
-        line.float64_field(field_key, float(value))
+        fval: float = float(value)
+        if not math.isfinite(fval):
+            raise ValueError(f"float field '{field_key}' is not finite: {fval}")
+        line.float64_field(field_key, fval)
     elif field_type == "string":
         line.string_field(field_key, str(value))
     elif field_type == "bool":
@@ -227,6 +300,7 @@ class AMQPConfig:
     VALID_TIMESTAMP_FORMATS = {"ns", "ms", "s", "datetime"}
     VALID_FIELD_TYPES = {"int", "uint", "float", "string", "bool"}
     VALID_ACK_POLICIES = {"on_success", "always"}
+    VALID_AUTH_MECHANISMS = {"plain", "external"}
 
     def __init__(self, influxdb3_local, args: dict[str, str] | None, task_id: str):
         self.influxdb3_local = influxdb3_local
@@ -244,29 +318,20 @@ class AMQPConfig:
         else:
             self.config = self._build_config_from_args()
 
-    @staticmethod
-    def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
-        if os.path.isabs(path):
-            return path
-
-        plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
-            )
-        return os.path.join(plugin_dir, path)
-
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
-        config_path: str = self._resolve_path(config_file, "configuration file")
+        if not config_file.endswith(".toml"):
+            raise ValueError(
+                "Invalid config file format: expected a .toml file"
+            )
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        config_path: str = _resolve_path(config_file, "configuration file")
 
-        with open(config_path, "rb") as f:
-            config: dict[str, Any] = tomllib.load(f)
+        try:
+            with open(config_path, "rb") as f:
+                config: dict[str, Any] = tomllib.load(f)
+        except Exception:
+            raise ValueError("Failed to read config file") from None
 
         self._validate_toml_config(config)
         return config
@@ -290,12 +355,52 @@ class AMQPConfig:
         else:
             return {"field": timestamp_field.strip(), "format": "ns"}
 
+    def _validate_auth(
+        self,
+        auth_mechanism: str,
+        username: str | None,
+        password: str | None,
+        ssl_config: dict,
+    ):
+        """Validate authentication mechanism and its required parameters."""
+        if auth_mechanism not in self.VALID_AUTH_MECHANISMS:
+            raise ValueError(
+                f"Invalid auth_mechanism: {auth_mechanism}. "
+                f"Supported: {', '.join(sorted(self.VALID_AUTH_MECHANISMS))}"
+            )
+
+        if auth_mechanism == "plain":
+            if not username or not password:
+                raise ValueError(
+                    "auth_mechanism 'plain' requires both username and password"
+                )
+        else:  # external
+            if not ssl_config.get("ca_cert"):
+                raise ValueError(
+                    "auth_mechanism 'external' requires TLS: provide ssl_ca_cert"
+                )
+            if not ssl_config.get("client_cert") or not ssl_config.get("client_key"):
+                raise ValueError(
+                    "auth_mechanism 'external' requires mutual TLS: provide "
+                    "ssl_client_cert and ssl_client_key"
+                )
+
     def _validate_toml_config(self, config: dict[str, Any]):
         """Validate that all required configuration parameters are present"""
         if "amqp" not in config:
             raise ValueError("Missing required 'amqp' section in configuration")
 
         amqp_config: dict[str, Any] = config["amqp"]
+
+        enable_full_logging = amqp_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'amqp.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
 
         if "host" not in amqp_config:
             raise ValueError("Missing required parameter 'amqp.host' in configuration")
@@ -309,6 +414,26 @@ class AMQPConfig:
         queues: list[str] = amqp_config["queues"]
         if not isinstance(queues, list) or len(queues) == 0:
             raise ValueError("Parameter 'amqp.queues' must be a non-empty list")
+
+        # Validate port range if present (accept int or numeric string)
+        if "port" in amqp_config:
+            port = amqp_config["port"]
+            if isinstance(port, bool) or not isinstance(port, (int, str)):
+                raise ValueError(
+                    "Parameter 'amqp.port' must be an integer between 1 and 65535"
+                )
+            try:
+                port = int(port)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid 'amqp.port': {amqp_config['port']!r}. "
+                    f"Must be an integer between 1 and 65535"
+                )
+            if not (1 <= port <= 65535):
+                raise ValueError(
+                    "Parameter 'amqp.port' must be an integer between 1 and 65535"
+                )
+            amqp_config["port"] = port
 
         # Validate ack_policy if present
         ack_policy = amqp_config.get("ack_policy", "on_success")
@@ -327,6 +452,14 @@ class AMQPConfig:
         max_messages = amqp_config.get("max_messages", _MAX_MESSAGES)
         if not isinstance(max_messages, int) or max_messages < 1:
             raise ValueError("max_messages must be a positive integer")
+
+        # Validate authentication mechanism and its required parameters
+        self._validate_auth(
+            amqp_config.get("auth_mechanism", "plain"),
+            amqp_config.get("username"),
+            amqp_config.get("password"),
+            amqp_config.get("ssl") or {},
+        )
 
         # Get message format (default to json if not specified)
         message_format: str = amqp_config.get("format", "json")
@@ -416,6 +549,12 @@ class AMQPConfig:
 
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["host", "queues"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -464,22 +603,39 @@ class AMQPConfig:
                 "Both ssl_client_cert and ssl_client_key must be provided for mutual TLS"
             )
 
+        # Parse and validate authentication mechanism
+        auth_mechanism = self.args.get("auth_mechanism", "plain").strip().lower()
+        username = self.args.get("username")
+        password = self.args.get("password")
+        self._validate_auth(auth_mechanism, username, password, ssl_config)
+
         # Determine default port based on SSL
         default_port = 5671 if ssl_config else 5672
+
+        # Parse and validate port range
+        port_arg = self.args.get("port")
+        try:
+            port = int(port_arg) if port_arg is not None else default_port
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid port: '{port_arg}'. Must be an integer.")
+        if not (1 <= port <= 65535):
+            raise ValueError(f"Invalid port: {port}. Must be between 1 and 65535.")
 
         return {
             "amqp": {
                 "host": self.args.get("host"),
-                "port": int(self.args.get("port", default_port)),
+                "port": port,
                 "virtual_host": self.args.get("virtual_host", "/"),
-                "username": self.args.get("username", "guest"),
-                "password": self.args.get("password", "guest"),
+                "auth_mechanism": auth_mechanism,
+                "username": username,
+                "password": password,
                 "queues": queues_list,
                 "format": self.args.get("format", "json"),
                 "ack_policy": ack_policy,
                 "requeue_on_failure": requeue_on_failure,
                 "max_messages": max_messages,
                 "ssl": ssl_config,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -712,20 +868,6 @@ class AMQPConsumerManager:
         self.channel: pika.adapters.blocking_connection.BlockingChannel | None = None
         self.connected: bool = False
 
-    @staticmethod
-    def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
-        if os.path.isabs(path):
-            return path
-
-        plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
-            )
-        return os.path.join(plugin_dir, path)
-
     def _build_ssl_context(self) -> ssl.SSLContext | None:
         """Build SSL context if SSL configuration is provided"""
         ssl_config = self.config.get("ssl", {})
@@ -737,24 +879,24 @@ class AMQPConsumerManager:
             return None
 
         # Resolve paths
-        ca_cert = self._resolve_path(ca_cert, "CA certificate")
-        if not os.path.exists(ca_cert):
-            raise FileNotFoundError(f"CA certificate not found: {ca_cert}")
+        ca_cert = _resolve_path(ca_cert, "CA certificate")
 
         # Create SSL context
-        ssl_context = ssl.create_default_context(cafile=ca_cert)
+        try:
+            ssl_context = ssl.create_default_context(cafile=ca_cert)
+        except Exception:
+            raise OSError("TLS configuration failed. Check CA certificate file.") from None
 
         # Client certificate for mutual TLS
         client_cert = ssl_config.get("client_cert")
         client_key = ssl_config.get("client_key")
         if client_cert and client_key:
-            client_cert = self._resolve_path(client_cert, "client certificate")
-            client_key = self._resolve_path(client_key, "client key")
-            if not os.path.exists(client_cert):
-                raise FileNotFoundError(f"Client certificate not found: {client_cert}")
-            if not os.path.exists(client_key):
-                raise FileNotFoundError(f"Client key not found: {client_key}")
-            ssl_context.load_cert_chain(client_cert, client_key)
+            client_cert = _resolve_path(client_cert, "client certificate")
+            client_key = _resolve_path(client_key, "client key")
+            try:
+                ssl_context.load_cert_chain(client_cert, client_key)
+            except Exception:
+                raise OSError("TLS configuration failed. Check client certificate and key files.") from None
 
         return ssl_context
 
@@ -765,10 +907,14 @@ class AMQPConsumerManager:
         default_port = 5671 if ssl_config else 5672
         port = self.config.get("port", default_port)
         virtual_host = self.config.get("virtual_host", "/")
-        username = self.config.get("username", "guest")
-        password = self.config.get("password", "guest")
 
-        credentials = pika.PlainCredentials(username, password)
+        auth_mechanism = self.config.get("auth_mechanism", "plain")
+        if auth_mechanism == "external":
+            credentials = pika.credentials.ExternalCredentials()
+        else:
+            username = self.config.get("username")
+            password = self.config.get("password")
+            credentials = pika.PlainCredentials(username, password)
 
         # Build SSL options
         ssl_context = self._build_ssl_context()
@@ -809,15 +955,17 @@ class AMQPConsumerManager:
             )
             return True
 
-        except pika.exceptions.AMQPConnectionError as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] AMQP connection error: {str(e)}"
-            )
-            return False
-        except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to AMQP broker: {str(e)}"
-            )
+        except (pika.exceptions.AMQPConnectionError, Exception) as e:
+            if self.config.get("ssl", {}):
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to AMQP broker: "
+                    f"connection failed (SSL/TLS configured). "
+                    f"Check broker address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to AMQP broker: {_exc(e)}"
+                )
             return False
 
     def get_messages(self) -> list[dict[str, Any]]:
@@ -884,7 +1032,7 @@ class AMQPConsumerManager:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error retrieving AMQP messages: {str(e)}"
+                f"[{self.task_id}] Error retrieving AMQP messages: {_exc(e)}"
             )
 
         return messages
@@ -910,7 +1058,7 @@ class AMQPConsumerManager:
             self.influxdb3_local.info(f"[{self.task_id}] Disconnected from AMQP broker")
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error disconnecting from AMQP broker: {str(e)}"
+                f"[{self.task_id}] Error disconnecting from AMQP broker: {_exc(e)}"
             )
 
 
@@ -975,7 +1123,7 @@ class JSONParser:
                     except Exception as e:
                         self.influxdb3_local.warn(
                             f"[{self.task_id}] Error parsing array element {i}: "
-                            f"{str(e)}"
+                            f"{_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -994,10 +1142,10 @@ class JSONParser:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]):
@@ -1084,16 +1232,17 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(
         self, data: dict[str, Any], path: str, cache_key: str | None = None
@@ -1164,7 +1313,7 @@ class LineProtocolParser:
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1387,7 +1536,7 @@ class TextParser:
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
                             f"[{self.task_id}] Failed to convert field '{field_key}' "
-                            f"value '{value}' to type '{field_type}': {str(e)}"
+                            f"value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1401,39 +1550,34 @@ class TextParser:
             return line
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
 
     def _extract_value(
         self, text: str, pattern_str: str, field_name: str, cache_key: str | None = None
     ) -> str | None:
-        """Extract value from text using regex pattern"""
-        try:
-            if cache_key and cache_key in self._compiled_patterns:
-                pattern = self._compiled_patterns[cache_key]
-            else:
-                pattern = re.compile(pattern_str)
-
-            match = pattern.search(text)
-
-            if not match:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] Pattern for '{field_name}' did not match: "
-                    f"{pattern_str}"
-                )
-                return None
-
-            if match.groups():
-                return match.group(1)
-            else:
-                return match.group(0)
-
-        except re.error as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Invalid regex pattern for '{field_name}': "
-                f"{pattern_str} - {e}"
+        """Extract value from text using a pre-compiled regex pattern"""
+        pattern = self._compiled_patterns.get(cache_key) if cache_key else None
+        if pattern is None:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] No compiled pattern for '{field_name}' "
+                f"(pattern failed to compile at init): {pattern_str}"
             )
             return None
+
+        match = pattern.search(text)
+
+        if not match:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Pattern for '{field_name}' did not match: "
+                f"{pattern_str}"
+            )
+            return None
+
+        if match.groups():
+            return match.group(1)
+        else:
+            return match.group(0)
 
     def _get_timestamp(self, payload: str) -> int:
         """Extract and convert timestamp from text payload"""
@@ -1449,17 +1593,18 @@ class TextParser:
             payload, pattern_str, "timestamp", "timestamp"
         )
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class AMQPStats:
@@ -1584,37 +1729,36 @@ def write_stats(
             line.tag("virtual_host", virtual_host)
 
             # Period stats (current interval since last write)
-            line.int64_field("received", data["received"])
-            line.int64_field("processed", data["processed"])
-            line.int64_field("failed", data["failed"])
-            # Only write success_rate if there were messages in this period
+            line.int64_field("period_received", data["received"])
+            line.int64_field("period_processed", data["processed"])
+            line.int64_field("period_failed", data["failed"])
+            # Only write period_success_rate if there were messages in this period
             if data["received"] > 0:
-                line.float64_field("success_rate", data["success_rate"])
+                line.float64_field("period_success_rate", data["success_rate"])
 
             # Total stats (accumulated over entire plugin lifetime)
-            line.int64_field("total_received", data["total_received"])
-            line.int64_field("total_processed", data["total_processed"])
-            line.int64_field("total_failed", data["total_failed"])
-            # Only write total_success_rate if there were any messages ever
+            line.int64_field("messages_received", data["total_received"])
+            line.int64_field("messages_processed", data["total_processed"])
+            line.int64_field("messages_failed", data["total_failed"])
+            # Only write success_rate if there were any messages ever
             if data["total_received"] > 0:
-                line.float64_field("total_success_rate", data["total_success_rate"])
+                line.float64_field("success_rate", data["total_success_rate"])
 
             line.time_ns(time.time_ns())
             lines.append(line)
 
         if lines:
             influxdb3_local.write_sync(_BatchLines(lines), no_sync=True)
+            influxdb3_local.info(
+                f"[{task_id}] Wrote statistics for {len(queue_stats)} queues "
+                f"to amqp_stats table"
+            )
 
         # Reset period stats after writing
         stats.reset_period_stats()
 
-        influxdb3_local.info(
-            f"[{task_id}] Wrote statistics for {len(queue_stats)} queues "
-            f"to amqp_stats table"
-        )
-
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1641,7 +1785,7 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
 
 
@@ -1682,6 +1826,10 @@ def process_scheduled_call(
             )
 
         amqp_config: dict = cached_config["amqp"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(amqp_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = amqp_config["format"]
         ack_policy: str = amqp_config.get("ack_policy", "on_success")
         requeue_on_failure: bool = amqp_config.get("requeue_on_failure", False)
@@ -1703,23 +1851,11 @@ def process_scheduled_call(
         # Retrieve messages
         messages: list = amqp_consumer.get_messages()
 
-        # Write stats every 10 calls
-        call_count: int = influxdb3_local.cache.get("amqp_call_count")
-        if call_count is None:
-            call_count = 0
-
-        call_count += 1
-
         host: str = amqp_config.get("host", "unknown")
         virtual_host: str = amqp_config.get("virtual_host", "/")
 
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, host, virtual_host, task_id)
-            call_count = 0
-
-        influxdb3_local.cache.put("amqp_call_count", call_count)
-
         if len(messages) == 0:
+            write_stats(influxdb3_local, stats, host, virtual_host, task_id)
             return
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
@@ -1776,7 +1912,7 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
         # Phase 3: Ack/nack and update stats based on results
@@ -1834,8 +1970,10 @@ def process_scheduled_call(
             f"{error_count} errors"
         )
 
+        write_stats(influxdb3_local, stats, host, virtual_host, task_id)
+
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in AMQP plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in AMQP plugin: {_exc(e)}")
         influxdb3_local.cache.delete("amqp_config")
 
     finally:

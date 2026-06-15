@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "mqtt_subscriber"
+version = "0.2.0"
+description = "Enables real-time ingestion of MQTT messages into InfluxDB 3. Subscribe to MQTT topics and transform messages into time-series data with support for JSON, Line Protocol, and custom text formats."
+triggers = ["process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/mqtt_subscriber"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/mqtt_subscriber/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!mqtt_subscriber.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["paho-mqtt", "jsonpath-ng"]

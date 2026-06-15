@@ -73,6 +73,12 @@
             "example": "config.toml",
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
@@ -87,6 +93,19 @@ import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Default True so config-load errors log in full; set from config (default
+# False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
 
 
 def parse_time_interval(
@@ -326,6 +345,13 @@ def parse_tag_values_for_scheduler(
     # Use config file
     if args["use_config_file"]:
         if isinstance(tag_values, dict):
+            tag_names: list = get_tag_names(influxdb3_local, source_measurement, task_id)
+            for tag_name in list(tag_values.keys()):
+                if tag_name not in tag_names:
+                    influxdb3_local.warn(
+                        f"[{task_id}] Tag '{tag_name}' does not exist in '{source_measurement}'."
+                    )
+                    del tag_values[tag_name]
             return tag_values
         else:
             raise Exception(
@@ -879,15 +905,17 @@ def generate_fields_string(
         query += ",\n"
         aggregation = field[1]
         field_name = field[0]
+        quoted_field = quote_identifier(field_name)
+        alias = quote_identifier(f"{field_name}_{aggregation}")
 
         # Add ORDER BY time for first_value and last_value to ensure correct temporal ordering
         if aggregation in ('first_value', 'last_value'):
-            query += f'\t{aggregation}("{field_name}" ORDER BY time) as "{field_name}_{aggregation}"'
+            query += f'\t{aggregation}({quoted_field} ORDER BY time) as {alias}'
         else:
-            query += f'\t{aggregation}("{field_name}") as "{field_name}_{aggregation}"'
+            query += f'\t{aggregation}({quoted_field}) as {alias}'
 
     for tag in tags_list:
-        query += f',\n\t"{tag}"'
+        query += f',\n\t{quote_identifier(tag)}'
 
     return query
 
@@ -904,31 +932,45 @@ def generate_group_by_string(tags_list: list):
     """
     group_by_clause: str = "_time"
     for tag in tags_list:
-        group_by_clause += f', "{tag}"'
+        group_by_clause += f', {quote_identifier(tag)}'
     return group_by_clause
 
 
-def generate_tag_filter_clause(tag_values: dict | None):
+def generate_tag_filter_clause(tag_values: dict | None) -> tuple[str, dict]:
     """
-    Generates the WHERE clause for filtering by tag values.
+    Generates the WHERE clause for filtering by tag values using parameter binding.
 
     Args:
         tag_values (dict | None): Dictionary mapping tag names to lists of values, or None.
 
     Returns:
-        str: SQL WHERE clause string for tag filters, or empty string if tag_values is None.
+        tuple[str, dict]: SQL WHERE clause string and a dict of query parameters.
     """
     if tag_values is None:
-        return ""
+        return "", {}
 
     sql_clause: str = ""
+    params: dict = {}
+    param_idx: int = 0
+
     for key, values in tag_values.items():
+        quoted_key = quote_identifier(key)
+
         if len(values) == 1:
-            sql_clause += f"AND\n\t\"{key}\" = '{values[0]}'\n"
+            param_name = f"tag_val_{param_idx}"
+            sql_clause += f'AND\n\t{quoted_key} = ${param_name}\n'
+            params[param_name] = values[0]
+            param_idx += 1
         else:
-            quoted_values = ", ".join(f"'{v}'" for v in values)
-            sql_clause += f'AND\n\t"{key}" IN ({quoted_values})\n'
-    return sql_clause
+            placeholders: list[str] = []
+            for v in values:
+                param_name = f"tag_val_{param_idx}"
+                placeholders.append(f"${param_name}")
+                params[param_name] = v
+                param_idx += 1
+            sql_clause += f'AND\n\t{quoted_key} IN ({", ".join(placeholders)})\n'
+
+    return sql_clause, params
 
 
 def build_downsample_query(
@@ -939,7 +981,7 @@ def build_downsample_query(
     tag_values: dict[str, list[str]] | None,
     start_time: datetime,
     end_time: datetime,
-) -> str:
+) -> tuple[str, dict]:
     """
     Builds a downsampling SQL query for any mode (HTTP or scheduler), given explicit start/end.
 
@@ -953,14 +995,16 @@ def build_downsample_query(
         end_time:   UTC datetime for WHERE time < ...
 
     Returns:
-        A complete SQL query string.
+        tuple[str, dict]: A complete SQL query string and a dict of query parameters.
     """
     # SELECT clause
     fields_clause: str = generate_fields_string(fields_list, interval, tags_list)
     # GROUP BY clause
     group_by_clause: str = generate_group_by_string(tags_list)
     # tag filters
-    tag_filter_clause: str = generate_tag_filter_clause(tag_values)
+    tag_filter_clause, params = generate_tag_filter_clause(tag_values)
+
+    escaped_measurement = measurement.replace("'", "''")
 
     # ISO timestamps
     start_iso: str = start_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -970,16 +1014,16 @@ def build_downsample_query(
         SELECT
             {fields_clause}
         FROM
-            '{measurement}'
+            '{escaped_measurement}'
         WHERE
             time >= '{start_iso}'
-        AND 
+        AND
             time < '{end_iso}'
         {tag_filter_clause}
         GROUP BY
         {group_by_clause}
     """
-    return query
+    return query, params
 
 
 def write_downsampled_data(
@@ -1045,7 +1089,7 @@ def write_downsampled_data(
                     "max_retries": max_retries,
                     "records": record_count,
                     "database": db_name,
-                    "error": str(e),
+                    "error": _exc(e),
                 }
 
                 influxdb3_local.warn(
@@ -1064,11 +1108,11 @@ def write_downsampled_data(
             "database": db_name,
             "measurement": target_measurement,
             "retries": retry_count,
-            "error": str(e),
+            "error": _exc(e),
         }
 
         influxdb3_local.error(f"[{task_id}] Write failed with exception, {failure_log}")
-        return False, str(e), retry_count
+        return False, _exc(e), retry_count
 
 
 def transform_to_influx_line(
@@ -1140,7 +1184,7 @@ def process_scheduled_call(
         Exception: If no args are provided.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Downsampling task started at {call_time} with args: {args}")
+    influxdb3_local.info(f"[{task_id}] Downsampling task started at {call_time}")
 
     if args is None:
         influxdb3_local.error(f"[{task_id}] No args provided for plugin.")
@@ -1149,25 +1193,55 @@ def process_scheduled_call(
     # Override args with config file if specified
     if args:
         if path := args.get("config_file_path", None):
+            if not path.endswith(".toml"):
+                influxdb3_local.error(
+                    f"[{task_id}] Invalid config file format: expected a .toml file"
+                )
+                return
             try:
                 plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if not plugin_dir_var:
-                    influxdb3_local.error(
-                        f"[{task_id}] Failed to get PLUGIN_DIR env var"
-                    )
-                    return
-                plugin_dir: Path = Path(plugin_dir_var)
-                file_path = plugin_dir / path
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
+                if plugin_dir_var:
+                    file_path = Path(plugin_dir_var) / path
+                else:
+                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+                    candidates: list[str] = []
+                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                        candidates.append(influxdb3_plugin_dir)
+                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                        candidates.append(str(Path(virtual_env).parent))
+
+                    resolved = None
+                    for base in candidates:
+                        candidate = Path(base) / path
+                        if candidate.exists():
+                            resolved = candidate
+                            break
+
+                    if resolved is None:
+                        candidates_str = ", ".join(candidates) if candidates else "none available"
+                        influxdb3_local.error(
+                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
+                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
+                        )
+                        return
+                    file_path = resolved
+                influxdb3_local.info(f"[{task_id}] Reading config file")
                 with open(file_path, "rb") as f:
                     args = tomllib.load(f)
                     args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
+                influxdb3_local.info(f"[{task_id}] Config file loaded successfully")
             except Exception:
                 influxdb3_local.error(f"[{task_id}] Failed to read config file")
                 return
         else:
             args["use_config_file"] = False
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str(args.get("enable_full_logging", False)).lower() == "true"
+    )
 
     influxdb3_local.info(
         f"[{task_id}] Starting downsampling schedule for call_time: {call_time}."
@@ -1221,7 +1295,7 @@ def process_scheduled_call(
         real_then: datetime = real_now - window
         influxdb3_local.info(f"[{task_id}] Querying data from {real_then} to {real_now} with fields: {fields} and tags: {tags}")
 
-        query: str = build_downsample_query(
+        query, params = build_downsample_query(
             fields,
             source_measurement,
             tags,
@@ -1231,7 +1305,7 @@ def process_scheduled_call(
             real_now,
         )
 
-        data: list = influxdb3_local.query(query)
+        data: list = influxdb3_local.query(query, params)
 
         # Log source data metrics
         source_record_count: int = len(data)
@@ -1347,7 +1421,7 @@ def process_scheduled_call(
         influxdb3_local.info(f"[{task_id}] Downsampling job finished", summary_log)
 
     except Exception as e:
-        influxdb3_local.error(str(e))
+        influxdb3_local.error(f"[{task_id}] {_exc(e)}")
 
 
 def process_request(
@@ -1369,12 +1443,29 @@ def process_request(
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Downsampling task started")
 
-    if request_body:
-        data: dict = json.loads(request_body)
-        influxdb3_local.info(f"[{task_id}] Request data: {data}.")
-    else:
+    if not request_body:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"message": f"[{task_id}] Error: No request body provided."}
+
+    max_body_bytes: int = 10 * 1024 * 1024  # 10 MiB
+    body_size: int = (
+        len(request_body)
+        if isinstance(request_body, (bytes, bytearray))
+        else len(request_body.encode("utf-8"))
+    )
+    if body_size > max_body_bytes:
+        influxdb3_local.error(
+            f"[{task_id}] Request body too large: {body_size} bytes (max {max_body_bytes})."
+        )
+        return {"message": f"[{task_id}] Error: Request body exceeds size limit."}
+
+    data: dict = json.loads(request_body)
+    influxdb3_local.info(f"[{task_id}] Request received.")
+
+    global _ENABLE_FULL_LOGGING
+    _ENABLE_FULL_LOGGING = (
+        str(data.get("enable_full_logging", False)).lower() == "true"
+    )
 
     try:
         start_time: float = time.time()
@@ -1418,9 +1509,17 @@ def process_request(
         backfill_start, backfill_end = parse_backfill_window(data, task_id)
 
         if backfill_start is None:
-            q: str = f"SELECT MIN(time) as _t FROM {source_measurement}"
+            escaped_src = source_measurement.replace("'", "''")
+            q: str = f"SELECT MIN(time) as _t FROM '{escaped_src}'"
             res: list = influxdb3_local.query(q)
-            oldest: int = res[0].get("_t")
+            oldest: int | None = res[0].get("_t") if res else None
+            if oldest is None:
+                influxdb3_local.error(
+                    f"[{task_id}] Source measurement '{source_measurement}' has no data."
+                )
+                return {
+                    "message": f"[{task_id}] Error: source measurement '{source_measurement}' is empty."
+                }
 
             backfill_start: datetime = datetime.fromtimestamp(
                 oldest / 1e9, tz=timezone.utc
@@ -1445,8 +1544,19 @@ def process_request(
             "minutes": lambda x: timedelta(minutes=x),
             "hours": lambda x: timedelta(hours=x),
             "days": lambda x: timedelta(days=x),
+            "weeks": lambda x: timedelta(weeks=x),
         }
         batch_delta: timedelta = unit_mapping[unit.lower()](magnitude)
+
+        max_batches: int = 100_000
+        estimated_batches: float = (backfill_end - backfill_start) / batch_delta
+        if estimated_batches > max_batches:
+            influxdb3_local.error(
+                f"[{task_id}] Backfill range and batch_size would produce {int(estimated_batches)} "
+                f"batches, exceeding limit of {max_batches}. Increase batch_size or narrow the "
+                f"backfill window."
+            )
+            return {"message": f"[{task_id}] Error: Backfill range too large for batch_size."}
 
         influxdb3_local.info(
             f"[{task_id}] Starting downsampling for measurement {source_measurement} with fields: {fields} and tags: {tags} to query")
@@ -1455,7 +1565,7 @@ def process_request(
             batch_count += 1
             batch_end = min(cursor + batch_delta, backfill_end)
 
-            query: str = build_downsample_query(
+            query, params = build_downsample_query(
                 fields,
                 source_measurement,
                 tags,
@@ -1465,7 +1575,7 @@ def process_request(
                 batch_end,
             )
 
-            batch_data: list = influxdb3_local.query(query)
+            batch_data: list = influxdb3_local.query(query, params)
             batch_source_count: int = len(batch_data)
             total_source_records += batch_source_count
 
@@ -1569,5 +1679,5 @@ def process_request(
         }
 
     except Exception as e:
-        influxdb3_local.error(str(e))
-        return {"message": str(e)}
+        influxdb3_local.error(f"[{task_id}] {_exc(e)}")
+        return {"message": _exc(e)}

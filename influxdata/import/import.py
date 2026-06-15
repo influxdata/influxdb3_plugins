@@ -232,26 +232,52 @@ def load_config(
         config_file_path = (
             args.get("config_file_path") if args else body_args.get("config_file_path")
         )
-        try:
-            plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-            if not plugin_dir_var:
-                influxdb3_local.error(f"[{task_id}] Failed to get PLUGIN_DIR env var")
-                raise Exception(f"[{task_id}] PLUGIN_DIR environment variable not set")
+        if not config_file_path.endswith(".toml"):
+            influxdb3_local.error(
+                f"[{task_id}] Invalid config file format: expected a .toml file"
+            )
+            raise Exception("Invalid config file format: expected a .toml file")
 
-            plugin_dir: Path = Path(plugin_dir_var)
-            config_file = plugin_dir / config_file_path
+        plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
+        if plugin_dir_var:
+            config_file = Path(plugin_dir_var) / config_file_path
+        else:
+            # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+            #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+            #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+            candidates: list[str] = []
+            if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+                candidates.append(influxdb3_plugin_dir)
+            if virtual_env := os.environ.get("VIRTUAL_ENV"):
+                candidates.append(str(Path(virtual_env).parent))
 
-            if config_file.exists():
-                with open(config_file, "rb") as f:
-                    file_config = tomllib.load(f)
-                # Override config_data with values from file
-                config_data.update(file_config)
-                influxdb3_local.info(
-                    f"[{task_id}] Loaded configuration from {config_file}"
+            resolved = None
+            for base in candidates:
+                candidate = Path(base) / config_file_path
+                if candidate.exists():
+                    resolved = candidate
+                    break
+
+            if resolved is None:
+                candidates_str = ", ".join(candidates) if candidates else "none available"
+                influxdb3_local.error(
+                    f"[{task_id}] PLUGIN_DIR env var not set and config file path "
+                    f"'{config_file_path}' was not found via fallbacks (tried: {candidates_str})"
                 )
-        except Exception as e:
-            influxdb3_local.error(f"[{task_id}] Failed to load config file: {e}")
-            raise
+                raise Exception("PLUGIN_DIR environment variable not set")
+            config_file = resolved
+
+        try:
+            with open(config_file, "rb") as f:
+                file_config = tomllib.load(f)
+            # Override config_data with values from file
+            config_data.update(file_config)
+            influxdb3_local.info(
+                f"[{task_id}] Loaded configuration from {config_file}"
+            )
+        except Exception:
+            influxdb3_local.error(f"[{task_id}] Failed to read config file")
+            raise Exception("Failed to read config file") from None
 
     # 4. Override with body_args (highest priority)
     if body_args:

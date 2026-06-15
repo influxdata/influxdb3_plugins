@@ -127,27 +127,94 @@
             "example": "500",
             "description": "Maximum number of messages to retrieve per scheduled call. Default: 500. Set to 0 for unlimited.",
             "required": false
+        },
+        {
+            "name": "dlq_topic",
+            "example": "sensor_data_dlq",
+            "description": "Kafka topic to publish messages that fail parsing or writing (dead-letter queue). When unset, no DLQ topic is used. Original payload, key and error details (as headers) are produced to this topic.",
+            "required": false
+        },
+        {
+            "name": "dedup_id_field",
+            "example": "event_id",
+            "description": "Enables deduplication using a unique message id. Holds only the extractor: JSON a field name (extracted via $.event_id), Text a regex pattern. Only active when no timestamp_field is configured (with a message timestamp InfluxDB already deduplicates). The extracted id is written as a field and checked against existing records.",
+            "required": false
+        },
+        {
+            "name": "dedup_id_name",
+            "example": "event_id",
+            "description": "Name of the field the extracted deduplication id is written under and tracked by. Optional; defaults to 'dedup_id'. Only used with dedup_id_field.",
+            "required": false
+        },
+        {
+            "name": "dedup_window",
+            "example": "24h",
+            "description": "Lookback window for the duplicate check (e.g. '30m', '24h', '7d'). Only used with dedup_id_field. Default: 24h.",
+            "required": false
+        },
+        {
+            "name": "max_poll_interval",
+            "example": "300",
+            "description": "Maximum seconds between scheduled poll cycles before the broker considers the consumer dead (mapped to 'max.poll.interval.ms'). The consumer is reused across invocations to avoid a rebalance every cycle; it stays in the group only while the schedule interval is below this value. Increase it for longer schedule intervals. Default: 300.",
+            "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
         }
     ]
 }
 """
 
 import json
+import math
 import os
 import re
 import time
 import tomllib
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from confluent_kafka import Consumer, KafkaError, KafkaException, TopicPartition
+from confluent_kafka import (
+    Consumer,
+    KafkaError,
+    KafkaException,
+    Producer,
+    TopicPartition,
+)
 from jsonpath_ng.ext import parse as jsonpath_parse
 
 # Internal constants
 _POLL_TIMEOUT_MS = 1000
 _POLL_TIMEOUT_MS_FAST = 100
 _MAX_POLL_RECORDS = 500
+_DEFAULT_DEDUP_WINDOW = "24h"
+_DEFAULT_MAX_POLL_INTERVAL_S = 300
+# Fixed field name the extracted deduplication id is written under.
+_DEDUP_FIELD_NAME = "dedup_id"
+
+# Cache key for the KafkaManager reused across scheduled invocations
+_CACHE_CONSUMER = "kafka_consumer"
+
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+# InfluxDB integer field ranges
+_INT64_MIN: int = -9223372036854775808
+_INT64_MAX: int = 9223372036854775807
+_UINT64_MAX: int = 18446744073709551615
+
+# Default True so config/validation errors log in full; set from config
+# (default False) once known so runtime errors don't leak values.
+_ENABLE_FULL_LOGGING: bool = True
+
+
+def _exc(e: BaseException) -> str:
+    """Return exception detail when full logging is enabled, else the type name."""
+    return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 """
 Helper for batching multiple line protocol builders into a single write.
@@ -179,11 +246,26 @@ def add_field_with_type(line, field_key: str, value: Any, field_type: str):
     Supported types: int, uint, float, string, bool
     """
     if field_type == "int":
-        line.int64_field(field_key, int(value))
+        ival: int = int(value)
+        if not (_INT64_MIN <= ival <= _INT64_MAX):
+            raise ValueError(
+                f"int field '{field_key}' out of int64 range "
+                f"[{_INT64_MIN}, {_INT64_MAX}]: {ival}"
+            )
+        line.int64_field(field_key, ival)
     elif field_type == "uint":
-        line.uint64_field(field_key, int(value))
+        uval: int = int(value)
+        if not (0 <= uval <= _UINT64_MAX):
+            raise ValueError(
+                f"uint field '{field_key}' out of uint64 range "
+                f"[0, {_UINT64_MAX}]: {uval}"
+            )
+        line.uint64_field(field_key, uval)
     elif field_type == "float":
-        line.float64_field(field_key, float(value))
+        fval: float = float(value)
+        if not math.isfinite(fval):
+            raise ValueError(f"float field '{field_key}' is not finite: {fval}")
+        line.float64_field(field_key, fval)
     elif field_type == "string":
         line.string_field(field_key, str(value))
     elif field_type == "bool":
@@ -231,6 +313,21 @@ def convert_timestamp(value: Any, time_format: str) -> int:
         )
 
 
+def parse_duration_seconds(value: str) -> int:
+    """Parse a duration string like '30m', '24h', '7d' into seconds."""
+    text = str(value).strip().lower()
+    match = re.fullmatch(r"(\d+)\s*([smhd])", text)
+    if not match:
+        raise ValueError(
+            f"Invalid duration '{value}'. Expected '<number><unit>', "
+            f"unit one of s, m, h, d (e.g. '30m', '24h')."
+        )
+    amount, unit = int(match.group(1)), match.group(2)
+    if amount <= 0:
+        raise ValueError(f"Duration '{value}' must be positive")
+    return amount * _DURATION_UNITS[unit]
+
+
 class KafkaConfig:
     """Configuration loader and validator for Kafka plugin"""
 
@@ -259,27 +356,68 @@ class KafkaConfig:
 
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
+        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR, falling back to server-derivable locations."""
         if os.path.isabs(path):
             return path
 
         plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
-            )
-        return os.path.join(plugin_dir, path)
+        if plugin_dir:
+            return os.path.join(plugin_dir, path)
+
+        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+        candidates: list[str] = []
+        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+            candidates.append(influxdb3_plugin_dir)
+        if virtual_env := os.environ.get("VIRTUAL_ENV"):
+            candidates.append(str(Path(virtual_env).parent))
+
+        for base in candidates:
+            candidate = os.path.join(base, path)
+            if os.path.exists(candidate):
+                return candidate
+
+        raise ValueError(
+            f"PLUGIN_DIR environment variable not set and {description} path "
+            f"'{path}' was not found via fallbacks "
+            f"(tried: {', '.join(candidates) or 'none available'})."
+        )
+
+    @staticmethod
+    def _validate_topics(topics: list) -> None:
+        """Reject regex topic subscriptions (leading '^')."""
+        for topic in topics:
+            if isinstance(topic, str) and topic.startswith("^"):
+                raise ValueError(
+                    f"Invalid topic '{topic}': regex topic subscriptions "
+                    f"(leading '^') are not allowed"
+                )
+
+    @staticmethod
+    def _validate_bootstrap_servers(servers: list) -> None:
+        """Validate each bootstrap server is in 'host:port' form."""
+        for server in servers:
+            if not isinstance(server, str) or not re.match(r"^[^,\s]+:\d+$", server):
+                raise ValueError(
+                    f"Invalid bootstrap server '{server}'. "
+                    f"Expected 'host:port' format."
+                )
 
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
+        if not config_file.endswith(".toml"):
+            raise ValueError(
+                "Invalid config file format: expected a .toml file"
+            )
+
         config_path: str = self._resolve_path(config_file, "configuration file")
 
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
-        with open(config_path, "rb") as f:
-            config: dict[str, Any] = tomllib.load(f)
+        try:
+            with open(config_path, "rb") as f:
+                config: dict[str, Any] = tomllib.load(f)
+        except Exception:
+            raise ValueError("Failed to read config file") from None
 
         self._validate_toml_config(config)
         return config
@@ -303,12 +441,53 @@ class KafkaConfig:
         else:
             return {"field": timestamp_field.strip(), "format": "ns"}
 
+    def _build_dedup_config(
+        self,
+        extractor: Any,
+        name: Any,
+        message_format: str,
+        label: str,
+    ) -> dict[str, str]:
+        """Build the dedup config. `extractor` is the resolved JSONPath (json)
+        or regex (text); `name` is the field the id is written under (defaults
+        to `_DEDUP_FIELD_NAME`)."""
+        if not isinstance(extractor, str) or not extractor.strip():
+            raise ValueError(f"'{label}' must be a non-empty string")
+
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise ValueError("dedup_id_name must be a non-empty string when set")
+        field_name: str = (
+            name.strip()
+            if isinstance(name, str) and name.strip()
+            else _DEDUP_FIELD_NAME
+        )
+
+        if message_format == "json":
+            return {"field_name": field_name, "path": extractor.strip()}
+
+        pattern = extractor.strip()
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise ValueError(f"Invalid regex in '{label}': {e}") from None
+        return {"field_name": field_name, "pattern": pattern}
+
     def _validate_toml_config(self, config: dict[str, Any]):
         """Validate that all required configuration parameters are present"""
         if "kafka" not in config:
             raise ValueError("Missing required 'kafka' section in configuration")
 
         kafka_config: dict[str, Any] = config["kafka"]
+
+        enable_full_logging = kafka_config.get("enable_full_logging")
+        if enable_full_logging is not None and not isinstance(
+            enable_full_logging, (bool, str)
+        ):
+            raise ValueError(
+                "Parameter 'kafka.enable_full_logging' must be a boolean or string (true/false)"
+            )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = str(enable_full_logging).lower() == "true"
 
         if "bootstrap_servers" not in kafka_config:
             raise ValueError(
@@ -331,11 +510,13 @@ class KafkaConfig:
             raise ValueError(
                 "Parameter 'kafka.bootstrap_servers' must be a non-empty list"
             )
+        self._validate_bootstrap_servers(servers)
 
         # Validate topics is a non-empty list
         topics: list[str] = kafka_config["topics"]
         if not isinstance(topics, list) or len(topics) == 0:
             raise ValueError("Parameter 'kafka.topics' must be a non-empty list")
+        self._validate_topics(topics)
 
         # Validate security_protocol if present
         security_protocol = kafka_config.get("security_protocol", "PLAINTEXT")
@@ -383,6 +564,24 @@ class KafkaConfig:
                 "max_poll_records must be a non-negative integer (0 means unlimited)"
             )
 
+        # Validate max_poll_interval (seconds) if present
+        max_poll_interval = kafka_config.get(
+            "max_poll_interval", _DEFAULT_MAX_POLL_INTERVAL_S
+        )
+        if not isinstance(max_poll_interval, int) or max_poll_interval <= 0:
+            raise ValueError("max_poll_interval must be a positive integer (seconds)")
+
+        # Validate dedup_window if present (used only with dedup_id_field)
+        dedup_window = kafka_config.get("dedup_window", _DEFAULT_DEDUP_WINDOW)
+        parse_duration_seconds(dedup_window)
+
+        # Validate dlq_topic if present
+        dlq_topic = kafka_config.get("dlq_topic")
+        if dlq_topic is not None and (
+            not isinstance(dlq_topic, str) or not dlq_topic.strip()
+        ):
+            raise ValueError("dlq_topic must be a non-empty string when set")
+
         # Get message format (default to json if not specified)
         message_format: str = kafka_config.get("format", "json")
 
@@ -424,6 +623,17 @@ class KafkaConfig:
             )
             json_mapping["timestamp_config"] = parsed_timestamp
             del json_mapping["timestamp_field"]
+
+        dedup_id_field = json_mapping.get("dedup_id_field")
+        if dedup_id_field is not None:
+            json_mapping["dedup"] = self._build_dedup_config(
+                dedup_id_field,
+                json_mapping.get("dedup_id_name"),
+                "json",
+                "mapping.json.dedup_id_field",
+            )
+            json_mapping.pop("dedup_id_field", None)
+            json_mapping.pop("dedup_id_name", None)
 
     def _validate_text_mapping(self, config: dict[str, Any]):
         """Validate text mapping configuration"""
@@ -470,8 +680,25 @@ class KafkaConfig:
             text_mapping["timestamp_config"] = parsed_timestamp
             del text_mapping["timestamp_field"]
 
+        dedup_id_field = text_mapping.get("dedup_id_field")
+        if dedup_id_field is not None:
+            text_mapping["dedup"] = self._build_dedup_config(
+                dedup_id_field,
+                text_mapping.get("dedup_id_name"),
+                "text",
+                "mapping.text.dedup_id_field",
+            )
+            text_mapping.pop("dedup_id_field", None)
+            text_mapping.pop("dedup_id_name", None)
+
     def _build_config_from_args(self) -> dict[str, Any]:
         """Build configuration from command-line arguments"""
+        enable_full_logging: bool = (
+            str(self.args.get("enable_full_logging", "false")).lower() == "true"
+        )
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = enable_full_logging
+
         required_keys: list = ["topics", "bootstrap_servers", "group_id"]
 
         if self.args.get("format", "json") in ["json", "text"]:
@@ -486,6 +713,9 @@ class KafkaConfig:
         # Parse space-separated values into lists
         topics_list: list[str] = self.args.get("topics").split()
         servers_list: list[str] = self.args.get("bootstrap_servers").split()
+
+        self._validate_topics(topics_list)
+        self._validate_bootstrap_servers(servers_list)
 
         # Validate offset_commit_policy
         commit_policy = self.args.get("offset_commit_policy", "on_success")
@@ -561,6 +791,24 @@ class KafkaConfig:
         if max_poll_records < 0:
             raise ValueError("max_poll_records must be >= 0 (0 means unlimited)")
 
+        # Parse max_poll_interval (seconds)
+        max_poll_interval_str = self.args.get("max_poll_interval")
+        max_poll_interval = (
+            int(max_poll_interval_str)
+            if max_poll_interval_str
+            else _DEFAULT_MAX_POLL_INTERVAL_S
+        )
+        if max_poll_interval <= 0:
+            raise ValueError("max_poll_interval must be a positive integer (seconds)")
+
+        # Validate dedup_window (only used with dedup_id_field)
+        dedup_window = self.args.get("dedup_window", _DEFAULT_DEDUP_WINDOW)
+        parse_duration_seconds(dedup_window)
+
+        dlq_topic = self.args.get("dlq_topic")
+        if dlq_topic is not None and not dlq_topic.strip():
+            raise ValueError("dlq_topic must be a non-empty string when set")
+
         return {
             "kafka": {
                 "bootstrap_servers": servers_list,
@@ -573,6 +821,10 @@ class KafkaConfig:
                 "sasl": sasl_config,
                 "ssl": ssl_config,
                 "max_poll_records": max_poll_records,
+                "max_poll_interval": max_poll_interval,
+                "dedup_window": dedup_window,
+                "dlq_topic": dlq_topic,
+                "enable_full_logging": enable_full_logging,
             },
             "mapping": self._build_mapping_from_args(),
         }
@@ -683,6 +935,15 @@ class KafkaConfig:
         if table_name_field:
             json_config["table_name_field"] = f"$.{table_name_field}"
 
+        dedup_id_field = self.args.get("dedup_id_field")
+        if dedup_id_field:
+            json_config["dedup"] = self._build_dedup_config(
+                f"$.{dedup_id_field.strip()}",
+                self.args.get("dedup_id_name"),
+                "json",
+                "dedup_id_field",
+            )
+
         return {"json": json_config}
 
     def _build_text_mapping_from_args(self) -> dict[str, Any]:
@@ -783,6 +1044,15 @@ class KafkaConfig:
         if table_name_field:
             text_config["table_name_field"] = table_name_field
 
+        dedup_id_field = self.args.get("dedup_id_field")
+        if dedup_id_field:
+            text_config["dedup"] = self._build_dedup_config(
+                dedup_id_field,
+                self.args.get("dedup_id_name"),
+                "text",
+                "dedup_id_field",
+            )
+
         return {"text": text_config}
 
     def get(self, key: str, default: Any = None):
@@ -801,91 +1071,258 @@ class KafkaConfig:
         return None
 
 
-class KafkaConsumerManager:
-    """Manages Kafka consumer connection and message retrieval using confluent-kafka"""
+class KafkaManager:
+    """Kafka consumer (+ optional DLQ producer). Reused across invocations so
+    the consumer stays in its group and avoids a rebalance every cycle."""
 
     def __init__(self, config: dict[str, Any], influxdb3_local, task_id: str):
         self.config: dict[str, Any] = config
         self.influxdb3_local = influxdb3_local
         self.task_id: str = task_id
         self.consumer: Consumer | None = None
+        self.producer: Producer | None = None  # Lazily created for DLQ
         self.connected: bool = False
         self._pending_messages: list = []  # Messages received during assignment wait
+        self.poll_error: bool = False  # Set when a poll fails (auth/cert/transport)
+        # DLQ delivery status per (topic, partition, offset): False until the
+        # delivery callback confirms it. Reconciliation is scoped to _dlq_produced.
+        self._dlq_status: dict[tuple[str, int, int], bool] = {}
+        self._dlq_produced: set[tuple[str, int, int]] = set()
 
     @staticmethod
     def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR."""
+        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR, falling back to server-derivable locations."""
         if os.path.isabs(path):
             return path
 
         plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if not plugin_dir:
-            raise ValueError(
-                f"PLUGIN_DIR environment variable not set. "
-                f"Required for relative {description} path: {path}"
-            )
-        return os.path.join(plugin_dir, path)
+        if plugin_dir:
+            return os.path.join(plugin_dir, path)
 
-    def _build_consumer_config(self) -> dict[str, Any]:
-        """Build confluent-kafka consumer configuration dictionary"""
-        bootstrap_servers = self.config.get("bootstrap_servers", [])
+        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+        candidates: list[str] = []
+        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+            candidates.append(influxdb3_plugin_dir)
+        if virtual_env := os.environ.get("VIRTUAL_ENV"):
+            candidates.append(str(Path(virtual_env).parent))
+
+        for base in candidates:
+            candidate = os.path.join(base, path)
+            if os.path.exists(candidate):
+                return candidate
+
+        raise ValueError(
+            f"PLUGIN_DIR environment variable not set and {description} path "
+            f"'{path}' was not found via fallbacks "
+            f"(tried: {', '.join(candidates) or 'none available'})."
+        )
+
+    @classmethod
+    def build_security_config(cls, config: dict[str, Any]) -> dict[str, Any]:
+        """Build the bootstrap.servers + security/SASL/SSL part shared by
+        the consumer and the DLQ producer."""
+        bootstrap_servers = config.get("bootstrap_servers", [])
         servers_str = (
             ",".join(bootstrap_servers)
             if isinstance(bootstrap_servers, list)
             else bootstrap_servers
         )
 
-        group_id = self.config.get("group_id")
-        consumer_config: dict[str, Any] = {
-            "bootstrap.servers": servers_str,
-            "group.id": group_id,
-            "client.id": f"{group_id}-influxdb3",
-            "auto.offset.reset": self.config.get("auto_offset_reset", "earliest"),
-            "enable.auto.commit": False,  # Manual commit for offset_commit_policy
-        }
+        client_config: dict[str, Any] = {"bootstrap.servers": servers_str}
 
-        # Security protocol
-        security_protocol = self.config.get("security_protocol", "PLAINTEXT")
-        consumer_config["security.protocol"] = security_protocol
+        security_protocol = config.get("security_protocol", "PLAINTEXT")
+        client_config["security.protocol"] = security_protocol
 
-        # SASL configuration
         if "SASL" in security_protocol:
-            sasl_config = self.config.get("sasl", {})
-            mechanism = sasl_config.get("mechanism", "PLAIN")
-            consumer_config["sasl.mechanism"] = mechanism
-            consumer_config["sasl.username"] = sasl_config.get("username")
-            consumer_config["sasl.password"] = sasl_config.get("password")
+            sasl_config = config.get("sasl", {})
+            client_config["sasl.mechanism"] = sasl_config.get("mechanism", "PLAIN")
+            client_config["sasl.username"] = sasl_config.get("username")
+            client_config["sasl.password"] = sasl_config.get("password")
 
-        # SSL configuration
         if "SSL" in security_protocol:
-            ssl_config = self.config.get("ssl", {})
+            ssl_config = config.get("ssl", {})
+
+            # Pin TLS verification explicitly
+            client_config["enable.ssl.certificate.verification"] = True
+            client_config["ssl.endpoint.identification.algorithm"] = "https"
 
             ca_cert = ssl_config.get("ca_cert")
             if ca_cert:
-                ca_cert = self._resolve_path(ca_cert, "CA certificate")
-                if not os.path.exists(ca_cert):
-                    raise FileNotFoundError(f"CA certificate not found: {ca_cert}")
-                consumer_config["ssl.ca.location"] = ca_cert
+                client_config["ssl.ca.location"] = cls._resolve_path(
+                    ca_cert, "CA certificate"
+                )
 
             client_cert = ssl_config.get("client_cert")
             client_key = ssl_config.get("client_key")
             if client_cert and client_key:
-                client_cert = self._resolve_path(client_cert, "client certificate")
-                client_key = self._resolve_path(client_key, "client key")
-                if not os.path.exists(client_cert):
-                    raise FileNotFoundError(
-                        f"Client certificate not found: {client_cert}"
-                    )
-                if not os.path.exists(client_key):
-                    raise FileNotFoundError(f"Client key not found: {client_key}")
-                consumer_config["ssl.certificate.location"] = client_cert
-                consumer_config["ssl.key.location"] = client_key
+                client_config["ssl.certificate.location"] = cls._resolve_path(
+                    client_cert, "client certificate"
+                )
+                client_config["ssl.key.location"] = cls._resolve_path(
+                    client_key, "client key"
+                )
 
                 key_password = ssl_config.get("key_password")
                 if key_password:
-                    consumer_config["ssl.key.password"] = key_password
+                    client_config["ssl.key.password"] = key_password
+
+        return client_config
+
+    def _build_consumer_config(self) -> dict[str, Any]:
+        """Build confluent-kafka consumer configuration dictionary"""
+        consumer_config: dict[str, Any] = self.build_security_config(self.config)
+
+        group_id = self.config.get("group_id")
+        consumer_config.update(
+            {
+                "group.id": group_id,
+                "client.id": f"{group_id}-influxdb3",
+                "auto.offset.reset": self.config.get("auto_offset_reset", "earliest"),
+                "enable.auto.commit": False,  # Manual commit for offset_commit_policy
+            }
+        )
+
+        # Reused consumer must stay in the group between polls; raise this for
+        # schedule intervals longer than max.poll.interval.ms.
+        max_poll_interval_s = self.config.get(
+            "max_poll_interval", _DEFAULT_MAX_POLL_INTERVAL_S
+        )
+        consumer_config["max.poll.interval.ms"] = int(max_poll_interval_s) * 1000
 
         return consumer_config
+
+    def rebind(self, influxdb3_local, task_id: str) -> None:
+        """Refresh per-invocation references when reusing a cached instance."""
+        self.influxdb3_local = influxdb3_local
+        self.task_id = task_id
+
+    def reset_cycle(self) -> None:
+        """Reset per-cycle state before polling (kept across invocations)."""
+        self.poll_error = False
+        self._dlq_status = {}
+        self._dlq_produced = set()
+
+    def _on_dlq_delivery(self, err, msg, source: tuple[str, int, int]) -> None:
+        """Per-message DLQ delivery report: records the outcome per source
+        offset so only the failed messages are replayed, and logs the reason."""
+        self._dlq_status[source] = err is None
+        if err is not None:
+            hint = ""
+            if err.code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
+                hint = (
+                    " - the DLQ topic does not exist; create it on the broker "
+                    "(auto-creation is usually disabled)"
+                )
+            self.influxdb3_local.error(
+                f"[{self.task_id}] DLQ delivery failed for topic "
+                f"'{msg.topic()}': {err.str()}{hint}"
+            )
+
+    def _ensure_producer(self) -> Producer | None:
+        """Lazily create the DLQ producer (reused across invocations)."""
+        if self.producer is not None:
+            return self.producer
+        try:
+            producer_config = self.build_security_config(self.config)
+            producer_config["client.id"] = (
+                f"{self.config.get('group_id')}-influxdb3-dlq"
+            )
+            self.producer = Producer(producer_config)
+        except Exception as e:
+            self.influxdb3_local.error(
+                f"[{self.task_id}] Failed to create DLQ producer: {_exc(e)}"
+            )
+            self.producer = None
+        return self.producer
+
+    def send_to_dlq(
+        self,
+        source_topic: str,
+        partition: int,
+        offset: int,
+        key: str | None,
+        payload: str,
+        error_type: str,
+        error_message: str,
+    ) -> bool:
+        """Enqueue a failed message to the DLQ topic. Returns True if enqueued;
+        delivery is confirmed per-message and reconciled in flush_dlq()."""
+        dlq_topic: str | None = self.config.get("dlq_topic")
+        if not dlq_topic:
+            return False
+
+        producer = self._ensure_producer()
+        if producer is None:
+            return False
+
+        headers = [
+            ("source_topic", source_topic.encode("utf-8")),
+            ("error_type", error_type.encode("utf-8")),
+            ("error_message", error_message.encode("utf-8")[:1024]),
+        ]
+
+        # Bind source coords so the delivery report maps back to this offset.
+        source = (source_topic, partition, offset)
+        on_delivery = lambda err, msg, s=source: self._on_dlq_delivery(err, msg, s)
+
+        try:
+            value_bytes = payload.encode("utf-8") if payload is not None else None
+            key_bytes = key.encode("utf-8") if key else None
+            try:
+                producer.produce(
+                    dlq_topic,
+                    value=value_bytes,
+                    key=key_bytes,
+                    headers=headers,
+                    on_delivery=on_delivery,
+                )
+            except BufferError:
+                # Local queue full - flush and retry once.
+                producer.flush(10)
+                producer.produce(
+                    dlq_topic,
+                    value=value_bytes,
+                    key=key_bytes,
+                    headers=headers,
+                    on_delivery=on_delivery,
+                )
+            # Produced but unconfirmed; the callback flips it on report.
+            self._dlq_status[source] = False
+            self._dlq_produced.add(source)
+            producer.poll(0)
+            return True
+        except Exception as e:
+            self.influxdb3_local.error(
+                f"[{self.task_id}] Failed to publish to DLQ topic "
+                f"'{dlq_topic}': {_exc(e)}"
+            )
+            return False
+
+    def flush_dlq(self) -> set[tuple[str, int, int]]:
+        """Flush the DLQ producer and return the (topic, partition, offset) keys
+        not confirmed delivered (timed out or failed). Empty set = all delivered."""
+        if self.producer is None:
+            return set()
+        try:
+            remaining = self.producer.flush(15)
+            if remaining > 0:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] {remaining} DLQ messages were not "
+                    f"delivered within the flush timeout"
+                )
+        except Exception as e:
+            self.influxdb3_local.error(
+                f"[{self.task_id}] Error flushing DLQ producer: {_exc(e)}"
+            )
+        # Scope to this cycle's keys so a late callback from a prior cycle
+        # cannot trigger a spurious replay.
+        return {
+            key
+            for key in self._dlq_produced
+            if not self._dlq_status.get(key, False)
+        }
 
     def connect(self) -> bool:
         """Establish connection to Kafka cluster"""
@@ -905,21 +1342,34 @@ class KafkaConsumerManager:
             # First polls trigger the rebalance process
             assignment_timeout = 10  # seconds
             start_time = time.time()
+            assignment = None
             while time.time() - start_time < assignment_timeout:
                 # Poll to trigger rebalance - save any messages received
                 msg = self.consumer.poll(timeout=0.5)
-                if msg is not None and not msg.error():
-                    self._pending_messages.append(msg)
+                if msg is not None:
+                    if msg.error():
+                        if msg.error().code() != KafkaError._PARTITION_EOF:
+                            self.influxdb3_local.error(
+                                f"[{self.task_id}] Error connecting to Kafka"
+                            )
+                            return False
+                    else:
+                        self._pending_messages.append(msg)
                 assignment = self.consumer.assignment()
                 if assignment:
                     self.influxdb3_local.info(
                         f"[{self.task_id}] Partitions assigned: {assignment}"
                     )
                     break
-            else:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] No partitions assigned within {assignment_timeout}s"
+
+            if not assignment:
+                # No assignment within the timeout is treated as a failure
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] No partitions assigned within "
+                    f"{assignment_timeout}s. Check broker availability, "
+                    f"credentials, certificates, and topic names."
                 )
+                return False
 
             self.connected = True
             self.influxdb3_local.info(
@@ -928,15 +1378,17 @@ class KafkaConsumerManager:
             )
             return True
 
-        except KafkaException as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Kafka connection error: {str(e)}"
-            )
-            return False
-        except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Error connecting to Kafka: {str(e)}"
-            )
+        except (KafkaException, Exception) as e:
+            if "SSL" in self.config.get("security_protocol", ""):
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to Kafka: "
+                    f"connection failed (SSL/TLS configured). "
+                    f"Check broker address, certificates, and key files."
+                )
+            else:
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Error connecting to Kafka: {_exc(e)}"
+                )
             return False
 
     def _process_message(self, msg) -> dict[str, Any] | None:
@@ -1012,6 +1464,18 @@ class KafkaConsumerManager:
                     # No more messages
                     break
 
+                if msg.error():
+                    # _PARTITION_EOF is a normal end-of-partition marker; any
+                    # other error means the poll itself failed (authentication,
+                    # certificate, transport). Flag it and stop polling.
+                    if msg.error().code() != KafkaError._PARTITION_EOF:
+                        self.poll_error = True
+                        self.influxdb3_local.error(
+                            f"[{self.task_id}] Error polling Kafka messages"
+                        )
+                        break
+                    continue
+
                 message_data = self._process_message(msg)
                 if message_data:
                     messages.append(message_data)
@@ -1020,56 +1484,111 @@ class KafkaConsumerManager:
                 poll_timeout = _POLL_TIMEOUT_MS_FAST / 1000.0
 
         except Exception as e:
+            self.poll_error = True
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error polling Kafka messages: {str(e)}"
+                f"[{self.task_id}] Error polling Kafka messages: {_exc(e)}"
             )
 
         return messages
 
-    def commit_offsets(self):
-        """Commit current offsets"""
+    def commit_offsets(self, override: dict[tuple[str, int], int] | None = None):
+        """Commit current offsets. `override` maps (topic, partition) to an
+        explicit offset to commit instead of position() - used after a rewind,
+        since position() is not reliably updated by an un-consumed seek()."""
         if not self.consumer:
             return
 
+        override = override or {}
         try:
             assignment = self.consumer.assignment()
             if not assignment:
                 return
 
+            # When there is no position yet (new/empty topic), bootstrap the
+            # offset from the watermark matching auto_offset_reset.
+            offset_reset = self.config.get("auto_offset_reset", "earliest")
             offsets_to_commit = []
             for tp in assignment:
+                # Commit the explicit replay offset for rewound partitions.
+                if (tp.topic, tp.partition) in override:
+                    offsets_to_commit.append(
+                        TopicPartition(
+                            tp.topic,
+                            tp.partition,
+                            override[(tp.topic, tp.partition)],
+                        )
+                    )
+                    continue
                 # First try to get current position
                 position = self.consumer.position([tp])
                 if position and position[0] and position[0].offset >= 0:
                     offsets_to_commit.append(position[0])
-                else:
-                    # No position yet - get high watermark (end of partition)
+                elif not self.poll_error:
+                    # No fetch position yet and the poll was healthy. Bootstrap
+                    # an offset only for a group that has never committed one -
+                    # if a committed offset already exists, leave it untouched
+                    committed = self.consumer.committed([tp], timeout=10)
+                    if committed and committed[0] and committed[0].offset >= 0:
+                        # An offset already exists for this partition.
+                        continue
                     low, high = self.consumer.get_watermark_offsets(tp)
-                    if high >= 0:
-                        tp_to_commit = TopicPartition(tp.topic, tp.partition, high)
+                    bootstrap = low if offset_reset == "earliest" else high
+                    if bootstrap >= 0:
+                        tp_to_commit = TopicPartition(
+                            tp.topic, tp.partition, bootstrap
+                        )
                         offsets_to_commit.append(tp_to_commit)
+                # else: poll failed and no valid position - skip this partition
+                #       so the previously committed offset stays intact.
 
             if offsets_to_commit:
-                self.consumer.commit(offsets=offsets_to_commit)
+                # Synchronous: durable before we return and surfaces errors.
+                self.consumer.commit(offsets=offsets_to_commit, asynchronous=False)
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error committing offsets: {str(e)}"
+                f"[{self.task_id}] Error committing offsets: {_exc(e)}"
             )
 
-    def disconnect(self):
-        """Disconnect from Kafka cluster"""
+    def seek_offsets(self, offsets: dict[tuple[str, int], int]) -> bool:
+        """Rewind the (reused) consumer so the given messages are re-read on the
+        next poll - skipping the commit alone is not enough, the fetch position
+        has already advanced. `offsets` maps (topic, partition) to the lowest
+        offset to reprocess. Returns False if any seek failed (e.g. rebalance)."""
+        if not self.consumer or not offsets:
+            return True
+        all_ok: bool = True
+        for (topic, partition), offset in offsets.items():
+            try:
+                self.consumer.seek(TopicPartition(topic, partition, offset))
+            except Exception as e:
+                all_ok = False
+                self.influxdb3_local.error(
+                    f"[{self.task_id}] Failed to rewind {topic}:{partition} to "
+                    f"offset {offset} for reprocessing: {_exc(e)}"
+                )
+        return all_ok
+
+    def close(self):
+        """Close consumer and producer. Only called on fatal errors or
+        teardown - the instance is otherwise reused across invocations."""
+        if self.producer is not None:
+            self.flush_dlq()
+            self.producer = None
+
         if self.consumer:
             try:
                 self.consumer.close()
-                self.connected = False
                 self.influxdb3_local.info(
                     f"[{self.task_id}] Disconnected from Kafka cluster"
                 )
             except Exception as e:
                 self.influxdb3_local.error(
-                    f"[{self.task_id}] Error disconnecting from Kafka: {str(e)}"
+                    f"[{self.task_id}] Error disconnecting from Kafka: {_exc(e)}"
                 )
+            finally:
+                self.consumer = None
+        self.connected = False
 
 
 class JSONParser:
@@ -1079,6 +1598,11 @@ class JSONParser:
         self.mapping_config: dict = mapping_config
         self.task_id: str = task_id
         self.influxdb3_local = influxdb3_local
+        # Dedup only without a message timestamp (else InfluxDB dedups by tags+time).
+        self.dedup: dict | None = mapping_config.get("dedup")
+        self.dedup_active: bool = bool(self.dedup) and not mapping_config.get(
+            "timestamp_config"
+        )
         self._compiled_paths: dict[str, Any] = self._compile_jsonpath_expressions()
 
     def _compile_jsonpath_expressions(self) -> dict[str, Any]:
@@ -1088,6 +1612,9 @@ class JSONParser:
         table_name_field = self.mapping_config.get("table_name_field")
         if table_name_field:
             compiled["table_name"] = jsonpath_parse(table_name_field)
+
+        if self.dedup_active:
+            compiled["dedup"] = jsonpath_parse(self.dedup["path"])
 
         tags_config = self.mapping_config.get("tags", {})
         for tag_key, json_path in tags_config.items():
@@ -1107,7 +1634,7 @@ class JSONParser:
         return compiled
 
     def parse(self, payload: str) -> list:
-        """Parse JSON payload and return list of LineBuilder objects."""
+        """Parse JSON payload and return a list of (line, table, dedup_id) tuples."""
         try:
             data: dict = json.loads(payload)
 
@@ -1127,13 +1654,13 @@ class JSONParser:
                         )
                         continue
                     try:
-                        line = self._parse_object(item)
-                        if line:
-                            results.append(line)
+                        record = self._parse_object(item)
+                        if record:
+                            results.append(record)
                     except Exception as e:
                         self.influxdb3_local.warn(
                             f"[{self.task_id}] Error parsing array element {i}: "
-                            f"{str(e)}"
+                            f"{_exc(e)}"
                         )
 
                 if len(results) == 0:
@@ -1145,21 +1672,21 @@ class JSONParser:
                 return results
 
             elif isinstance(data, dict):
-                line = self._parse_object(data)
-                return [line] if line else []
+                record = self._parse_object(data)
+                return [record] if record else []
 
             else:
                 raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
 
         except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
             raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
             raise
 
     def _parse_object(self, data: dict[str, Any]):
-        """Parse a single JSON object and return LineBuilder"""
+        """Parse a single JSON object and return (line, table, dedup_id)."""
         table_name: str | None = self._get_table_name(data)
         if not table_name:
             raise ValueError("Could not determine table name")
@@ -1173,11 +1700,28 @@ class JSONParser:
         if field_count == 0:
             raise ValueError("No fields were mapped from JSON data")
 
+        dedup_id: str | None = self._add_dedup_id(line, data)
+
         timestamp_ns: int | None = self._get_timestamp(data)
         if timestamp_ns is not None:
             line.time_ns(timestamp_ns)
 
-        return line
+        return line, table_name, dedup_id
+
+    def _add_dedup_id(self, line, data: dict[str, Any]) -> str | None:
+        """Extract the dedup id, write it as a field, and return it."""
+        if not self.dedup_active:
+            return None
+
+        raw: Any = self._get_json_value(data, self.dedup["path"], "dedup")
+        if raw is None or str(raw).strip() == "":
+            raise ValueError(
+                f"Deduplication id field '{self.dedup['field_name']}' "
+                f"is missing or empty in message"
+            )
+        dedup_id: str = str(raw)
+        line.string_field(self.dedup["field_name"], dedup_id)
+        return dedup_id
 
     def _get_table_name(self, data: dict[str, Any]) -> str | None:
         """Get table name from config or data"""
@@ -1242,16 +1786,17 @@ class JSONParser:
 
         timestamp_value: Any = self._get_json_value(data, field_path, "timestamp")
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp field '{field_path}' is missing or null in message"
+            )
 
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
     def _get_json_value(
         self, data: dict[str, Any], path: str, cache_key: str | None = None
@@ -1281,7 +1826,7 @@ class LineProtocolParser:
         self.task_id: str = task_id
 
     def parse(self, payload: str):
-        """Parse line protocol string and return LineBuilder object"""
+        """Parse line protocol and return [(line, measurement, None)]."""
         try:
             payload = payload.strip()
 
@@ -1294,7 +1839,14 @@ class LineProtocolParser:
 
             measurement_and_tags: str = parts[0]
             fields_str: str = parts[1]
-            timestamp_ns: int | None = int(parts[2]) if len(parts) == 3 else None
+            timestamp_ns: int | None = None
+            if len(parts) == 3:
+                timestamp_ns = int(parts[2])
+                if not (_INT64_MIN <= timestamp_ns <= _INT64_MAX):
+                    raise ValueError(
+                        f"line protocol timestamp out of int64 range "
+                        f"[{_INT64_MIN}, {_INT64_MAX}]: {timestamp_ns}"
+                    )
 
             measurement, tags = self._parse_measurement_and_tags(measurement_and_tags)
 
@@ -1313,11 +1865,11 @@ class LineProtocolParser:
             if timestamp_ns:
                 line.time_ns(timestamp_ns)
 
-            return line
+            return [(line, measurement, None)]
 
         except Exception as e:
             self.influxdb3_local.error(
-                f"[{self.task_id}] Error parsing line protocol: {str(e)}"
+                f"[{self.task_id}] Error parsing line protocol: {_exc(e)}"
             )
             raise
 
@@ -1439,6 +1991,11 @@ class TextParser:
         self.mapping_config: dict = mapping_config
         self.task_id: str = task_id
         self.influxdb3_local = influxdb3_local
+        # Dedup only without a message timestamp.
+        self.dedup: dict | None = mapping_config.get("dedup")
+        self.dedup_active: bool = bool(self.dedup) and not mapping_config.get(
+            "timestamp_config"
+        )
         self._compiled_patterns: dict[str, re.Pattern] = self._compile_regex_patterns()
 
     def _compile_regex_patterns(self) -> dict[str, re.Pattern]:
@@ -1452,6 +2009,14 @@ class TextParser:
             except re.error as e:
                 self.influxdb3_local.warn(
                     f"[{self.task_id}] Invalid regex for table_name_field: {e}"
+                )
+
+        if self.dedup_active:
+            try:
+                compiled["dedup"] = re.compile(self.dedup["pattern"])
+            except re.error as e:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] Invalid regex for dedup_id_field: {e}"
                 )
 
         tags_config = self.mapping_config.get("tags", {})
@@ -1540,7 +2105,7 @@ class TextParser:
                     except (ValueError, TypeError) as e:
                         self.influxdb3_local.error(
                             f"[{self.task_id}] Failed to convert field '{field_key}' "
-                            f"value '{value}' to type '{field_type}': {str(e)}"
+                            f"value '{value}' to type '{field_type}': {_exc(e)}"
                         )
                         raise
                     field_count += 1
@@ -1548,45 +2113,57 @@ class TextParser:
             if field_count == 0:
                 raise ValueError("No fields were extracted from text message")
 
+            dedup_id: str | None = self._add_dedup_id(line, payload)
+
             timestamp_ns: int = self._get_timestamp(payload)
             line.time_ns(timestamp_ns)
 
-            return line
+            return [(line, table_name, dedup_id)]
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {str(e)}")
+            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
             raise
+
+    def _add_dedup_id(self, line, payload: str) -> str | None:
+        """Extract the dedup id, write it as a field, and return it."""
+        if not self.dedup_active:
+            return None
+
+        value: str | None = self._extract_value(
+            payload, self.dedup["pattern"], self.dedup["field_name"], "dedup"
+        )
+        if value is None or value.strip() == "":
+            raise ValueError(
+                f"Deduplication id pattern for '{self.dedup['field_name']}' "
+                f"did not match message"
+            )
+        line.string_field(self.dedup["field_name"], value)
+        return value
 
     def _extract_value(
         self, text: str, pattern_str: str, field_name: str, cache_key: str | None = None
     ) -> str | None:
-        """Extract value from text using regex pattern"""
-        try:
-            if cache_key and cache_key in self._compiled_patterns:
-                pattern = self._compiled_patterns[cache_key]
-            else:
-                pattern = re.compile(pattern_str)
-
-            match = pattern.search(text)
-
-            if not match:
-                self.influxdb3_local.warn(
-                    f"[{self.task_id}] Pattern for '{field_name}' did not match: "
-                    f"{pattern_str}"
-                )
-                return None
-
-            if match.groups():
-                return match.group(1)
-            else:
-                return match.group(0)
-
-        except re.error as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Invalid regex pattern for '{field_name}': "
-                f"{pattern_str} - {e}"
+        """Extract value from text using a pre-compiled regex pattern"""
+        pattern = self._compiled_patterns.get(cache_key) if cache_key else None
+        if pattern is None:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] No compiled pattern for '{field_name}' "
+                f"(pattern failed to compile at init): {pattern_str}"
             )
             return None
+
+        match = pattern.search(text)
+        if not match:
+            self.influxdb3_local.warn(
+                f"[{self.task_id}] Pattern for '{field_name}' did not match: "
+                f"{pattern_str}"
+            )
+            return None
+
+        if match.groups():
+            return match.group(1)
+        else:
+            return match.group(0)
 
     def _get_timestamp(self, payload: str) -> int:
         """Extract and convert timestamp from text payload"""
@@ -1602,17 +2179,18 @@ class TextParser:
             payload, pattern_str, "timestamp", "timestamp"
         )
         if timestamp_value is None:
-            return time.time_ns()
+            raise ValueError(
+                f"Configured timestamp pattern '{pattern_str}' did not match message"
+            )
 
         time_format = timestamp_config.get("format", "ns")
         try:
             return convert_timestamp(timestamp_value, time_format)
         except Exception as e:
-            self.influxdb3_local.error(
-                f"[{self.task_id}] Failed to convert timestamp '{timestamp_value}' "
-                f"with format '{time_format}': {str(e)}"
+            raise ValueError(
+                f"Failed to convert timestamp '{timestamp_value}' "
+                f"with format '{time_format}': {e}"
             )
-            return time.time_ns()
 
 
 class KafkaStats:
@@ -1723,14 +2301,13 @@ def write_stats(
 
         if lines:
             influxdb3_local.write_sync(_BatchLines(lines), no_sync=True)
-
-        influxdb3_local.info(
-            f"[{task_id}] Wrote statistics for {len(topic_partition_stats)} "
-            f"topic-partitions to kafka_stats table"
-        )
+            influxdb3_local.info(
+                f"[{task_id}] Wrote statistics for {len(topic_partition_stats)} "
+                f"topic-partitions to kafka_stats table"
+            )
 
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Failed to write statistics: {_exc(e)}")
 
 
 def write_exception(
@@ -1759,8 +2336,61 @@ def write_exception(
 
     except Exception as e:
         influxdb3_local.error(
-            f"[{task_id}] Failed to write exception to table: {str(e)}"
+            f"[{task_id}] Failed to write exception to table: {_exc(e)}"
         )
+
+
+def quote_identifier(name: str) -> str:
+    """Quote a SQL identifier, escaping embedded double quotes."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def query_existing_ids(
+    influxdb3_local,
+    table: str,
+    id_field: str,
+    ids: list[str],
+    window_seconds: int,
+    task_id: str,
+) -> set[str]:
+    """Return the subset of `ids` already present in `table` within the window.
+    Fails open (returns empty set) on query error so messages aren't dropped."""
+    if not ids:
+        return set()
+
+    placeholders: list[str] = []
+    params: dict[str, str] = {}
+    for i, value in enumerate(ids):
+        param_name = f"dedup_id_{i}"
+        placeholders.append(f"${param_name}")
+        params[param_name] = value
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+    cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    quoted_id = quote_identifier(id_field)
+    query = (
+        f"SELECT DISTINCT {quoted_id} "
+        f"FROM {quote_identifier(table)} "
+        f"WHERE time >= '{cutoff_iso}' "
+        f"AND {quoted_id} IN ({', '.join(placeholders)})"
+    )
+
+    try:
+        rows: list = influxdb3_local.query(query, params)
+    except Exception as e:
+        influxdb3_local.warn(
+            f"[{task_id}] Deduplication query failed for table '{table}', "
+            f"writing without dedup check: {_exc(e)}"
+        )
+        return set()
+
+    existing: set[str] = set()
+    for row in rows:
+        value = row.get(id_field)
+        if value is not None:
+            existing.add(str(value))
+    return existing
 
 
 def process_scheduled_call(
@@ -1775,7 +2405,9 @@ def process_scheduled_call(
         args: Trigger arguments
     """
     task_id: str = str(uuid.uuid4())
-    kafka_consumer: KafkaConsumerManager | None = None
+    manager: KafkaManager | None = None
+    # When set, the cached manager is closed and evicted (rebuilt next cycle).
+    fatal: bool = False
 
     if not args:
         influxdb3_local.error(f"[{task_id}] No arguments provided")
@@ -1794,15 +2426,55 @@ def process_scheduled_call(
                 },
             }
             influxdb3_local.cache.put("kafka_config", cached_config, 60 * 60)
+            # Config (re)built - drop any stale manager to pick up new settings.
+            stale = influxdb3_local.cache.get(_CACHE_CONSUMER)
+            if stale is not None:
+                stale.rebind(influxdb3_local, task_id)
+                stale.close()
+                influxdb3_local.cache.delete(_CACHE_CONSUMER)
             influxdb3_local.info(
                 f"[{task_id}] Kafka Plugin initialized, "
                 f"format: {cached_config['kafka']['format']}"
             )
+            # dedup_id_field is ignored when a message timestamp is configured
+            # (InfluxDB dedups natively by tags + time); warn so it's not silent.
+            init_fmt: str = cached_config["kafka"]["format"]
+            init_map: dict = (
+                cached_config["mapping"].get(init_fmt) or {}
+                if init_fmt in ("json", "text")
+                else {}
+            )
+            if init_map.get("dedup") and init_map.get("timestamp_config"):
+                influxdb3_local.warn(
+                    f"[{task_id}] dedup_id_field is ignored because "
+                    f"timestamp_field is set; deduplication falls back to "
+                    f"InfluxDB's native tag+time dedup"
+                )
 
         kafka_config: dict = cached_config["kafka"]
+        global _ENABLE_FULL_LOGGING
+        _ENABLE_FULL_LOGGING = (
+            str(kafka_config.get("enable_full_logging", False)).lower() == "true"
+        )
         message_format: str = kafka_config["format"]
         offset_commit_policy: str = kafka_config.get(
             "offset_commit_policy", "on_success"
+        )
+
+        # Dedup is active only with an id field AND no message timestamp
+        # (a timestamp already lets InfluxDB dedup by tags + time).
+        fmt_mapping: dict = (
+            cached_config["mapping"].get(message_format) or {}
+            if message_format in ("json", "text")
+            else {}
+        )
+        dedup_cfg: dict | None = fmt_mapping.get("dedup")
+        dedup_active: bool = bool(dedup_cfg) and not fmt_mapping.get("timestamp_config")
+        dedup_field_name: str | None = (
+            dedup_cfg["field_name"] if dedup_active else None
+        )
+        dedup_window_s: int = parse_duration_seconds(
+            kafka_config.get("dedup_window", _DEFAULT_DEDUP_WINDOW)
         )
 
         # Get or create stats tracker from cache
@@ -1811,40 +2483,51 @@ def process_scheduled_call(
             stats = KafkaStats()
             influxdb3_local.cache.put("kafka_stats", stats)
 
-        # Create new Kafka consumer connection
-        influxdb3_local.info(f"[{task_id}] Creating new Kafka consumer connection")
-        kafka_consumer = KafkaConsumerManager(kafka_config, influxdb3_local, task_id)
+        # Reuse the persistent consumer if one is cached, otherwise connect once.
+        manager = influxdb3_local.cache.get(_CACHE_CONSUMER)
+        if manager is not None:
+            manager.rebind(influxdb3_local, task_id)
+            influxdb3_local.info(f"[{task_id}] Reusing cached Kafka consumer")
+        else:
+            influxdb3_local.info(f"[{task_id}] Creating new Kafka consumer connection")
+            manager = KafkaManager(kafka_config, influxdb3_local, task_id)
+            if not manager.connect():
+                influxdb3_local.error(f"[{task_id}] Failed to connect to Kafka cluster")
+                manager.close()
+                manager = None
+                return
+            # Cache without TTL so the consumer stays in its group across cycles.
+            influxdb3_local.cache.put(_CACHE_CONSUMER, manager)
 
-        if not kafka_consumer.connect():
-            influxdb3_local.error(f"[{task_id}] Failed to connect to Kafka cluster")
-            return
+        manager.reset_cycle()
 
         # Retrieve messages
-        messages: list = kafka_consumer.get_messages()
+        messages: list = manager.get_messages()
+        poll_error: bool = manager.poll_error
+        if poll_error:
+            # Rebuild the consumer next cycle - the error is likely persistent
+            # (authentication, certificate, transport).
+            fatal = True
 
-        # Commit offsets immediately if policy is "always"
-        if offset_commit_policy == "always" and messages:
-            kafka_consumer.commit_offsets()
-
-        # Write stats every 10 calls
-        call_count: int = influxdb3_local.cache.get("kafka_call_count")
-        if call_count is None:
-            call_count = 0
-
-        call_count += 1
+        # "always": commit immediately, but not after a failed poll (don't
+        # advance past a transport error mid-drain).
+        if offset_commit_policy == "always" and messages and not poll_error:
+            manager.commit_offsets()
 
         servers_str: str = ",".join(kafka_config.get("bootstrap_servers", []))
         group_id: str = kafka_config.get("group_id", "unknown")
 
-        if call_count >= 10:
-            write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
-            call_count = 0
-
-        influxdb3_local.cache.put("kafka_call_count", call_count)
-
         if len(messages) == 0:
-            # Still commit to save current position (important for auto_offset_reset=latest)
-            kafka_consumer.commit_offsets()
+            if poll_error:
+                # Do not commit after a failed poll
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping offset commit: poll finished with "
+                    f"an error and no messages were retrieved"
+                )
+            else:
+                # Commit to save current position (e.g. bootstrap a new topic)
+                manager.commit_offsets()
+            write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
             return
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
@@ -1864,9 +2547,8 @@ def process_scheduled_call(
             )
             return
 
-        # Phase 1: Parse all messages, collect line builders
-        all_line_builders: list = []
-        # Per-message parse results: (msg, "ok", line_count) or (msg, "fail", exception)
+        # Phase 1: Parse all messages into (line, table, dedup_id) records
+        # Per-message: (msg, "ok", records) or (msg, "fail", exception)
         parse_results: list[tuple] = []
 
         for msg in messages:
@@ -1879,23 +2561,59 @@ def process_scheduled_call(
             stats.record_message_received(topic, partition, offset)
 
             try:
-                # Parse message based on format
-                if message_format == "json":
-                    line_builders: list = parser.parse(payload)
-                    all_line_builders.extend(line_builders)
-                    parse_results.append((msg, "ok", len(line_builders)))
-                else:
-                    line_builder = parser.parse(payload)
-                    if line_builder:
-                        all_line_builders.append(line_builder)
-                        parse_results.append((msg, "ok", 1))
-                    else:
-                        parse_results.append((msg, "ok", 0))
-
+                records: list = parser.parse(payload)
+                parse_results.append((msg, "ok", records))
             except Exception as e:
                 parse_results.append((msg, "fail", e))
 
-        # Phase 2: Batch write all parsed lines
+        # Phase 1.5: look up which ids already exist (per table), constrained by
+        # the time window AND the batch ids, so each query returns few rows.
+        existing_by_table: dict[str, set] = {}
+        if dedup_active:
+            ids_by_table: dict[str, set] = {}
+            for msg, status, data in parse_results:
+                if status != "ok":
+                    continue
+                for _line, table, dedup_id in data:
+                    if dedup_id is not None:
+                        ids_by_table.setdefault(table, set()).add(dedup_id)
+            for table, idset in ids_by_table.items():
+                existing_by_table[table] = query_existing_ids(
+                    influxdb3_local,
+                    table,
+                    dedup_field_name,
+                    list(idset),
+                    dedup_window_s,
+                    task_id,
+                )
+
+        # Phase 2: select lines to write, dropping duplicates (already in the
+        # window or seen earlier in this batch). Track kept/duplicate per message.
+        all_line_builders: list = []
+        seen_by_table: dict[str, set] = {}
+        # Per-message: (msg, status, kept, dup, exception_or_None)
+        per_msg: list[tuple] = []
+
+        for msg, status, data in parse_results:
+            if status != "ok":
+                per_msg.append((msg, status, 0, 0, data))
+                continue
+
+            kept: int = 0
+            dup: int = 0
+            for line, table, dedup_id in data:
+                if dedup_id is not None:
+                    seen = seen_by_table.setdefault(table, set())
+                    existing = existing_by_table.get(table, set())
+                    if dedup_id in existing or dedup_id in seen:
+                        dup += 1
+                        continue
+                    seen.add(dedup_id)
+                all_line_builders.append(line)
+                kept += 1
+            per_msg.append((msg, status, kept, dup, None))
+
+        # Phase 3: Batch write all selected lines
         write_failed: bool = False
         if all_line_builders:
             try:
@@ -1905,67 +2623,128 @@ def process_scheduled_call(
             except Exception as e:
                 write_failed = True
                 influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {str(e)}"
+                    f"[{task_id}] Batch write failed: {_exc(e)}"
                 )
 
-        # Phase 3: Update stats based on results
+        # Phase 4: Update stats, route failures to DLQ, decide offset commit
         success_count: int = 0
+        dedup_count: int = 0
         error_count: int = 0
-        has_errors: bool = False
+        dlq_sent: bool = False
+        dlq_count: int = 0
+        # Lowest offset per (topic, partition) to reprocess (write failures and
+        # poison messages not offloaded to the DLQ); the consumer is rewound here.
+        replay_offsets: dict[tuple[str, int], int] = {}
 
-        for msg, status, result in parse_results:
+        def mark_replay(t: str, p: int, o: int) -> None:
+            key = (t, p)
+            if key not in replay_offsets or o < replay_offsets[key]:
+                replay_offsets[key] = o
+
+        for msg, status, kept, dup, exc in per_msg:
             topic = msg.get("topic", "unknown")
             partition = msg.get("partition", 0)
             offset = msg.get("offset", 0)
 
             if status == "ok" and not write_failed:
-                success_count += result
+                success_count += kept
+                dedup_count += dup
                 stats.record_message_processed(1)
+                continue
+
+            error_count += 1
+            stats.record_message_failed()
+
+            if status == "fail":
+                error_type: str = type(exc).__name__
+                error_msg: str = str(exc)
             else:
-                error_count += 1
-                has_errors = True
-                stats.record_message_failed()
+                error_type = "BatchWriteError"
+                error_msg = "Batch write to InfluxDB failed"
 
-                if status == "fail":
-                    error_type: str = type(result).__name__
-                    error_msg: str = str(result)
-                else:
-                    error_type = "BatchWriteError"
-                    error_msg = "Batch write to InfluxDB failed"
+            influxdb3_local.error(
+                f"[{task_id}] Error processing message from "
+                f"{topic}:{partition}@{offset}: {error_msg}"
+            )
 
-                influxdb3_local.error(
-                    f"[{task_id}] Error processing message from "
-                    f"{topic}:{partition}@{offset}: {error_msg}"
-                )
+            write_exception(
+                influxdb3_local,
+                topic,
+                partition,
+                offset,
+                error_type,
+                error_msg,
+                task_id,
+            )
 
-                write_exception(
-                    influxdb3_local,
+            if status == "fail":
+                # Poison message: offload to the DLQ; if it can't be offloaded,
+                # replay it so it is not lost. DLQ delivery is reconciled below.
+                if manager.send_to_dlq(
                     topic,
                     partition,
                     offset,
+                    msg.get("key"),
+                    msg.get("payload", ""),
                     error_type,
                     error_msg,
-                    task_id,
+                ):
+                    dlq_sent = True
+                    dlq_count += 1
+                else:
+                    mark_replay(topic, partition, offset)
+            else:
+                # Transient write failure: reprocess on the next cycle.
+                mark_replay(topic, partition, offset)
+
+        # Replay only the DLQ offsets whose delivery was NOT confirmed, so
+        # messages that did land in the DLQ are not re-sent next cycle.
+        if dlq_sent:
+            dlq_failed = manager.flush_dlq()
+            for t, p, o in dlq_failed:
+                mark_replay(t, p, o)
+            dlq_count -= len(dlq_failed)  # count only delivered ones
+
+        # on_success: commit, or rewind failed partitions. "always" already
+        # committed upfront and does not reprocess.
+        if offset_commit_policy == "on_success":
+            if not replay_offsets:
+                manager.commit_offsets()
+            elif manager.seek_offsets(replay_offsets):
+                # Rewind failed partitions for live re-read AND commit them at
+                # the replay offset (override needed: position() doesn't reflect
+                # an un-consumed seek). Successful partitions commit as usual.
+                manager.commit_offsets(override=replay_offsets)
+                influxdb3_local.warn(
+                    f"[{task_id}] Rewound {len(replay_offsets)} partition(s) to "
+                    f"reprocess failed messages (offset_commit_policy=on_success)"
+                )
+            else:
+                # Rewind failed (likely a rebalance): skip commit and rebuild so
+                # a fresh consumer re-reads from the last committed offset.
+                fatal = True
+                influxdb3_local.warn(
+                    f"[{task_id}] Could not rewind after failure; rebuilding the "
+                    f"consumer so uncommitted messages are re-read next cycle"
                 )
 
-        # Commit offsets if policy is "on_success" and no errors
-        if offset_commit_policy == "on_success" and not has_errors:
-            kafka_consumer.commit_offsets()
-        elif offset_commit_policy == "on_success" and has_errors:
-            influxdb3_local.warn(
-                f"[{task_id}] Skipping offset commit due to processing errors "
-                f"(offset_commit_policy=on_success)"
-            )
-
         influxdb3_local.info(
-            f"[{task_id}] Data write complete: {success_count} records inserted into DB, "
-            f"{error_count} errors"
+            f"[{task_id}] Data write complete: {success_count} records inserted "
+            f"into DB, {dedup_count} duplicates skipped, {error_count} errors, "
+            f"{dlq_count} sent to DLQ"
         )
 
+        write_stats(influxdb3_local, stats, servers_str, group_id, task_id)
+
     except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {str(e)}")
+        influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {_exc(e)}")
         influxdb3_local.cache.delete("kafka_config")
+        fatal = True
 
     finally:
-        if kafka_consumer is not None:
-            kafka_consumer.disconnect()
+        # Keep the consumer alive for reuse; only tear it down on fatal errors.
+        if fatal and manager is not None:
+            manager.close()
+            influxdb3_local.cache.delete(_CACHE_CONSUMER)
+
+

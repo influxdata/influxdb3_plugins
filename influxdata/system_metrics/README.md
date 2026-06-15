@@ -10,7 +10,7 @@ The System Metrics Plugin provides comprehensive system monitoring capabilities 
 
 Plugin parameters may be specified as key-value pairs in the `--trigger-arguments` flag (CLI) or in the `trigger_arguments` field (API) when creating a trigger. Some plugins support TOML configuration files, which can be specified using the plugin's `config_file_path` parameter.
 
-If a plugin supports multiple trigger specifications, some parameters may depend on the trigger specification that you use.r
+If a plugin supports multiple trigger specifications, some parameters may depend on the trigger specification that you use.
 
 ### Plugin metadata
 

@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "chronos_forecasting"
+version = "0.1.0"
+description = "Enables zero-shot time-series forecasting with Amazon Chronos models from HuggingFace, supporting scheduled batch forecasts and on-demand HTTP forecasts."
+triggers = ["process_scheduled_call", "process_request"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/chronos_forecasting"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/chronos_forecasting/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!chronos_forecasting.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["chronos-forecasting>=2.0.0", "torch>=2.0.0"]

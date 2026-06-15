@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2026-05-15T18:47:29+00:00",
+        "last_updated": "2026-06-15T00:00:00+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -284,6 +284,17 @@
                 "required_libraries": ["river"],
                 "last_update": "2026-05-15",
                 "trigger_types_supported": ["scheduler", "data_writes"]
+            },
+            {
+                "name": "Chronos Forecasting",
+                "path": "influxdata/chronos_forecasting/chronos_forecasting.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Enables zero-shot time-series forecasting with Amazon Chronos models from HuggingFace, supporting scheduled batch forecasts and on-demand HTTP forecasts with optional Chronos-2 multivariate covariates.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/chronos_forecasting/README.md",
+                "required_plugins": [],
+                "required_libraries": ["chronos-forecasting", "torch"],
+                "last_update": "2026-06-15",
+                "trigger_types_supported": ["scheduler", "http"]
             },
             {
                 "name": "Synthefy Forecasting",

@@ -35,7 +35,9 @@ market_timezone = "America/New_York"
 "401k" = "Retirement"
 brokerage = "Investment"
 
-# Holdings, grouped by portfolio name.
+# Holdings, grouped by portfolio name. Optional: if no [holdings.<portfolio>]
+# section is present, the plugin falls back to the default portfolio
+# AAPL:1|MSFT:1|GOOG:1.
 # Each [holdings.<portfolio_name>] table is a {symbol = quantity} mapping.
 # Fractional quantities are supported. Quote ticker symbols that contain
 # dots; unquoted dots are TOML nested-key syntax, not literal symbol text.

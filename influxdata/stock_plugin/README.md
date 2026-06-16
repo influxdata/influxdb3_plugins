@@ -20,28 +20,28 @@ This plugin includes a JSON metadata schema in its docstring that defines the su
 
 ### Optional parameters
 
-| Parameter     | Type   | Default                | Description                                                                                                                                              |
-|---------------|--------|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `database`    | string | `stocks`               | Target database for writes. Overrides the TOML `database` key if both are set.                                                                           |
-| `portfolio`   | string | none                   | Inline holdings: pipe-separated `SYMBOL:QUANTITY[:PORTFOLIO_NAME]` entries (e.g. `AAPL:10:401k\|MSFT:5:401k\|GOOG:2.5:brokerage`). Portfolio defaults to `main`. |
-| `categories`  | string | none                   | Inline category map: pipe-separated `PORTFOLIO:CATEGORY` entries (e.g. `401k:Retirement\|brokerage:Investment`).                                          |
-| `config_path` | string | `stock_plugin.toml`    | Path to the TOML config file, relative to the InfluxDB plugin directory (or absolute).                                                                   |
+| Parameter     | Type   | Default                  | Description                                                                                                                                                                                                                                 |
+|---------------|--------|--------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `database`    | string | `stocks`                 | Target database for writes. Overrides the TOML `database` key if both are set.                                                                                                                                                              |
+| `portfolio`   | string | `AAPL:1\|MSFT:1\|GOOG:1` | Inline holdings: pipe-separated `SYMBOL:QUANTITY[:PORTFOLIO_NAME]` entries (e.g. `AAPL:10:401k\|MSFT:5:401k\|GOOG:2.5:brokerage`). Portfolio defaults to `main`. When omitted and no TOML config is found, falls back to the default shown. |
+| `categories`  | string | none                     | Inline category map: pipe-separated `PORTFOLIO:CATEGORY` entries (e.g. `401k:Retirement\|brokerage:Investment`).                                                                                                                            |
+| `config_path` | string | `stock_plugin.toml`      | Path to the TOML config file, relative to the InfluxDB plugin directory (or absolute).                                                                                                                                                      |
 
-*One of `portfolio` or a TOML file containing at least one `[holdings.<name>]` table is required.*
+*If neither `portfolio` nor a TOML file with `[holdings.<name>]` is provided, the plugin runs with the default holdings `AAPL:1|MSFT:1|GOOG:1` in the `main` portfolio.*
 
 ### TOML configuration
 
 The TOML file is the recommended way to configure anything more than a handful of holdings. The plugin reads it from `config_path` (default: `<plugin-dir>/stock_plugin.toml`).
 
-| Key                         | Type    | Default     | Description                                                                                                                                                          |
-|-----------------------------|---------|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `database`                  | string  | `stocks`            | Target database for writes.                                                                                                                                          |
-| `write_during_closed_hours` | boolean | `true`              | When `false`, stocks/ETFs are skipped outside the configured exchange's regular session (the calendar handles holidays and early closes). Mutual funds always follow their own daily check schedule. |
-| `mutual_fund_check_time`    | string  | `"18:00"`           | Time of day in `market_timezone` after which the plugin fetches mutual fund NAV. Mutual funds are fetched at most once per local calendar day, at the first tick at or after this time. Bootstrap exception: a mutual fund with no cached asset type is fetched on its first tick regardless of time. |
-| `market_calendar`           | string  | `"NYSE"`            | Exchange calendar used for the market-hours check. Any name accepted by [pandas_market_calendars](https://pandas-market-calendars.readthedocs.io/) (e.g. `NYSE`, `LSE`, `TSX`, `JPX`, `XETR`, `ASX`, `HKEX`). |
-| `market_timezone`           | string  | `"America/New_York"`| IANA timezone for the exchange's local time. Used for `mutual_fund_check_time` comparisons and for resolving the "today" date the calendar consults.                |
-| `[portfolio_categories]`    | table   | empty               | Maps portfolio name to category name. Portfolios not listed are uncategorized (omitted from `category_totals`).                                                      |
-| `[holdings.<portfolio>]`    | table   | required            | Holdings for each portfolio. Each entry is `SYMBOL = quantity`. Fractional quantities supported. Quote symbols containing dots, for example `"VOD.L" = 10`. Duplicate same-symbol entries in one portfolio are aggregated. The portfolio name `_total` is reserved. |
+| Key                         | Type    | Default              | Description                                                                                                                                                                                                                                                                                                                                                       |
+|-----------------------------|---------|----------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `database`                  | string  | `stocks`             | Target database for writes.                                                                                                                                                                                                                                                                                                                                       |
+| `write_during_closed_hours` | boolean | `true`               | When `false`, stocks/ETFs are skipped outside the configured exchange's regular session (the calendar handles holidays and early closes). Mutual funds always follow their own daily check schedule.                                                                                                                                                              |
+| `mutual_fund_check_time`    | string  | `"18:00"`            | Time of day in `market_timezone` after which the plugin fetches mutual fund NAV. Mutual funds are fetched at most once per local calendar day, at the first tick at or after this time. Bootstrap exception: a mutual fund with no cached asset type is fetched on its first tick regardless of time.                                                             |
+| `market_calendar`           | string  | `"NYSE"`             | Exchange calendar used for the market-hours check. Any name accepted by [pandas_market_calendars](https://pandas-market-calendars.readthedocs.io/) (e.g. `NYSE`, `LSE`, `TSX`, `JPX`, `XETR`, `ASX`, `HKEX`).                                                                                                                                                     |
+| `market_timezone`           | string  | `"America/New_York"` | IANA timezone for the exchange's local time. Used for `mutual_fund_check_time` comparisons and for resolving the "today" date the calendar consults.                                                                                                                                                                                                              |
+| `[portfolio_categories]`    | table   | empty                | Maps portfolio name to category name. Portfolios not listed are uncategorized (omitted from `category_totals`).                                                                                                                                                                                                                                                   |
+| `[holdings.<portfolio>]`    | table   | default holdings     | Holdings for each portfolio. Each entry is `SYMBOL = quantity`. Fractional quantities supported. Quote symbols containing dots, for example `"VOD.L" = 10`. Duplicate same-symbol entries in one portfolio are aggregated. The portfolio name `_total` is reserved. When no `[holdings.*]` section is present, the plugin falls back to `AAPL:1\|MSFT:1\|GOOG:1`. |
 
 The trigger spec is the source of truth for cadence. For example, `--trigger-spec "every:15m"` runs the plugin every 15 minutes.
 
@@ -229,9 +229,7 @@ Cache is cleared on server restart. The plugin self-bootstraps: any symbol with 
 
 #### Issue: No holdings are configured
 
-**Solution:** Provide either `portfolio` trigger arguments or a TOML file with at least one `[holdings.<portfolio>]` table.
-
-The plugin requires at least one holding before it can write portfolio rows. If you use a TOML file, confirm that `config_path` points to the file in the InfluxDB 3 plugin directory.
+**Solution:** With no `portfolio` argument and no TOML file, the plugin uses the default holdings `AAPL:1|MSFT:1|GOOG:1`. To track your own holdings, provide `portfolio` trigger arguments or a TOML file with at least one `[holdings.<portfolio>]` table. If you use a TOML file, confirm that `config_path` points to the file in the InfluxDB 3 plugin directory.
 
 #### Issue: Market-hours checks skip expected writes
 

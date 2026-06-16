@@ -11,7 +11,7 @@
         {
             "name": "portfolio",
             "example": "AAPL:10:401k|MSFT:5:401k|GOOG:2.5:brokerage",
-            "description": "Inline holdings as pipe-separated SYMBOL:QUANTITY[:PORTFOLIO_NAME] entries. Required unless config_path points to a TOML file with holdings.",
+            "description": "Inline holdings as pipe-separated SYMBOL:QUANTITY[:PORTFOLIO_NAME] entries. Optional: when omitted and no TOML config is found, defaults to AAPL:1|MSFT:1|GOOG:1.",
             "required": false
         },
         {
@@ -182,6 +182,10 @@ class ResolvedConfig:
     market_timezone: str = "America/New_York"
 
 
+# Default holdings
+DEFAULT_PORTFOLIO = "AAPL:1|MSFT:1|GOOG:1"
+
+
 def parse_inline_portfolio(value: str) -> dict[str, list[Holding]]:
     """Parse the inline `portfolio=` trigger argument.
 
@@ -328,19 +332,23 @@ def load_toml_config(path: Path) -> tuple[dict, dict[str, list[Holding]]]:
         [holdings.brokerage]
         GOOG = 2.5
 
+    Holdings may be empty (no [holdings.*] sections); the caller decides
+    how to handle that (e.g. fall back to a default portfolio).
+
     Raises:
         FileNotFoundError: path does not exist
         tomllib.TOMLDecodeError: file is not valid TOML
-        ValueError: no usable [holdings.<portfolio>] sections
+        ValueError: holdings is not a table, or a holding has an invalid quantity
     """
     if not path.exists():
         raise FileNotFoundError(f"TOML config not found: {path}")
     with open(path, "rb") as f:
         data = tomllib.load(f)
     holdings_section = data.get("holdings", {})
-    if not isinstance(holdings_section, dict) or not holdings_section:
+    if not isinstance(holdings_section, dict):
         raise ValueError(
-            f"TOML config at {path} has no [holdings.<portfolio>] sections"
+            f"[holdings] must be a table of portfolios; "
+            f"got {type(holdings_section).__name__}"
         )
     result: dict[str, list[Holding]] = {}
     for portfolio_name, mapping in holdings_section.items():
@@ -371,10 +379,6 @@ def load_toml_config(path: Path) -> tuple[dict, dict[str, list[Holding]]]:
                     portfolio=portfolio_name,
                 )
             )
-    if not result:
-        raise ValueError(
-            f"TOML config at {path} has empty [holdings.<portfolio>] sections"
-        )
     return data, result
 
 
@@ -411,7 +415,7 @@ def resolve_config(
     """Resolve final config from trigger args + TOML.
 
     Precedence:
-      Holdings: inline `portfolio=` arg > TOML [holdings.*] (one or the other)
+      Holdings: inline `portfolio=` arg > TOML [holdings.*] > DEFAULT_PORTFOLIO
       Database: `database=` arg > TOML `database` > default "stocks"
       Config path: `config_path=` arg > default_toml_path. Relative paths
       resolve from INFLUXDB3_PLUGIN_DIR, PLUGIN_DIR, VIRTUAL_ENV's parent,
@@ -421,26 +425,30 @@ def resolve_config(
     market_calendar, market_timezone) come only from TOML — there is no
     inline-arg override for them. Defaults apply when the key is absent.
 
-    Raises ValueError if neither inline holdings nor a usable TOML file is
-    found, or if any TOML scalar has an invalid value.
+    When no inline holdings and no TOML file are found, falls back to
+    DEFAULT_PORTFOLIO so the plugin runs without configuration.
+
+    Raises ValueError if config_path is set but the file is missing, or if
+    any TOML scalar has an invalid value.
     """
     inline_portfolio = args.get("portfolio")
+    explicit_config_path = bool(args.get("config_path"))
     config_path = resolve_config_path(
         args.get("config_path") or str(default_toml_path),
         default_toml_path,
     )
 
     toml_data: dict = {}
+    holdings: dict[str, list[Holding]] = {}
     if inline_portfolio:
         holdings = parse_inline_portfolio(inline_portfolio)
-    else:
-        if not config_path.exists():
-            raise ValueError(
-                f"No 'portfolio' trigger arg provided and no TOML config "
-                f"at {config_path}. Either pass --trigger-arguments "
-                f"'portfolio=...' or create the TOML file."
-            )
+    elif config_path.exists():
         toml_data, holdings = load_toml_config(config_path)
+    elif explicit_config_path:
+        raise ValueError("config_path was set but no TOML config found.")
+
+    if not holdings:
+        holdings = parse_inline_portfolio(DEFAULT_PORTFOLIO)
 
     if "_total" in holdings:
         raise ValueError(

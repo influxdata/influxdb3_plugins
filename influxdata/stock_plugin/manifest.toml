@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "stock_plugin"
-version = "0.1.0"
+version = "0.2.0"
 description = "Tracks stock, ETF, and mutual fund portfolio values from Yahoo Finance with market-hours gating and rollups."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

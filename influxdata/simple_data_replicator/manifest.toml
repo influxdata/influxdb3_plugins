@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "simple_data_replicator"
+version = "0.1.0"
+description = "Replicates data from a local InfluxDB 3 Core/Enterprise instance to a remote InfluxDB 3 instance over HTTP, with table/field filtering and renaming. Supports scheduler and data write trigger modes, buffering data in a compressed queue with automatic retries."
+triggers = ["process_writes", "process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/simple_data_replicator"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/simple_data_replicator/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!simple_data_replicator.py",
+]
+
+[dependencies]
+database_version = ">=3.0.0"
+python = ["influxdb3-python"]

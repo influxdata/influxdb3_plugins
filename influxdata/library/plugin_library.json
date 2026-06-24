@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2026-06-15T00:00:00+00:00",
+        "last_updated": "2026-06-24T00:00:00+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -339,6 +339,17 @@
                 "required_libraries": ["yfinance", "pandas_market_calendars"],
                 "last_update": "2026-06-10",
                 "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Simple Data Replicator",
+                "path": "influxdata/simple_data_replicator/simple_data_replicator.py",
+                "description": "Replicates data from a local InfluxDB 3 Core/Enterprise instance to a remote InfluxDB 3 instance over HTTP, with table/field filtering and renaming. Buffers data in a compressed queue with automatic retries.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/simple_data_replicator/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdb3-python"],
+                "last_update": "2026-06-24",
+                "trigger_types_supported": ["scheduler", "data_writes"]
             }
         ]
     }

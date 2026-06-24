@@ -1,0 +1,72 @@
+### Data Replicator Plugin Configuration Templates
+# Copy this file to your PLUGIN_DIR (e.g., /plugins) and reference it with
+#   --trigger-arguments config_file_path=<relative_path>
+# Example: If the file is at /plugins/configs/simple_data_replicator_config_scheduler.toml, use
+#   config_file_path=configs/simple_data_replicator_config_scheduler.toml
+
+
+########## Required Parameters ##########
+# Remote InfluxDB host URL
+# Specify the host URL (string) with optional scheme (default http) and port (default 8181)
+host = "your_host_url"  # e.g., "http://127.0.0.1:8183", "https://remote:8086"
+
+# Remote InfluxDB API token (string)
+# Optional: if omitted, the REMOTE_INFLUXDB_TOKEN environment variable is used
+remote_token = "your_api_token"  # e.g., "apiv3_AuHk_8LYFHTa1QMccTQECqwO..."
+
+# Remote database name
+# Specify the target database name (string)
+database = "your_database"  # e.g., "remote_db"
+
+# Source measurement/table name to replicate
+# Specify the source measurement name (string)
+source_measurement = "your_source_measurement"  # e.g., "home"
+
+# Time window for each replication job
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
+window = "your_window"  # e.g., "1h", "1d"
+
+# Unique suffix to distinguish queue files per trigger
+# Specify a unique string
+unique_file_suffix = "your_unique_suffix"  # e.g., "abcd1234"
+
+########## Optional Parameters ##########
+# Maximum size of the queue file in MB
+# Specify an integer ≥ 1; default is 512
+#max_size = 512  # e.g., 1024
+
+# Whether to verify SSL certificates
+# Specify a boolean (true/false); default is true
+#verify_ssl = true  # e.g., false
+
+# Maximum number of retries on failure
+# Specify an integer ≥ 1; default is 3
+#max_retries = 3  # e.g., 3
+
+# Number of line-protocol entries sent per remote flush request
+# Specify an integer ≥ 1; default is 500
+#queue_flush_chunk_size = 500  # e.g., 1000
+
+# List of fields and tags to exclude from replication
+# Specify a list of field and tag names (strings)
+#excluded_fields = ["your_field", "your_tag"]  # e.g., ["co", "location"]
+
+# Rename remote target table
+# Specify the target table name (string); defaults to source_measurement
+#target_table = "your_target_table"  # e.g., "new_table_name"
+
+# Field renames
+# Format: {source_field = target_field, ...}
+#field_renames = {your_source_field = "your_target_field"}  # e.g., {temp = "new_temp"}
+
+# Time offset for window shifts
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks); default is not set
+#offset = "your_offset"  # e.g., "10min", "1h"
+
+###### Example: Create Trigger Using This Config ######
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --plugin-filename simple_data_replicator.py \
+#   --trigger-spec "every:your_interval" \
+#   --trigger-arguments config_file_path=simple_data_replicator_config_scheduler.toml \
+#   your_trigger_name

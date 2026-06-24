@@ -1,0 +1,60 @@
+### Data Replicator Plugin Configuration Templates
+# Copy this file to your PLUGIN_DIR (e.g., /plugins) and reference it with
+#   --trigger-arguments config_file_path=<relative_path>
+# Example: If the file is at /plugins/configs/simple_data_replicator_config_data_writes.toml, use
+#   config_file_path=configs/simple_data_replicator_config_data_writes.toml
+
+
+########## Required Parameters ##########
+# Remote InfluxDB host URL
+# Specify the host URL (string) with optional scheme (default http) and port (default 8181)
+host = "your_host_url"  # e.g., "http://127.0.0.1:8183", "https://remote.influxdb.com"
+
+# Remote InfluxDB API token (string)
+# Optional: if omitted, the REMOTE_INFLUXDB_TOKEN environment variable is used
+remote_token = "your_api_token"  # e.g., "apiv3_AuHk_8LYFHTa1QMccTQ..."
+
+# Remote database name
+# Specify the target database name (string)
+database = "your_database"  # e.g., "remote_db"
+
+# Unique suffix to distinguish queue files per trigger
+# Specify a unique string
+unique_file_suffix = "your_unique_suffix"  # e.g., "wxyz5678"
+
+########## Optional Parameters ##########
+# List of tables to replicate
+# Specify a list of table names (strings); omit for all tables
+#tables = ["your_table1", "your_table2"]  # e.g., ["home", "home2"]
+
+# Exclude fields and tags per table
+# Format: {table_name = [field1, field2, tag1, tag2, ...]}
+#excluded_fields = {your_table = ["your_field", "your_tag"]}  # e.g., {home = ["co", "location"]}
+
+# Table rename rules
+# Format: {source_table = target_table, ...}
+#tables_rename = {your_source_table = "your_target_table"}  # e.g., {home = "home2"}
+
+# Whether to verify SSL certificates
+# Specify a boolean (true/false); default is true
+#verify_ssl = true  # e.g., false
+
+# Maximum size of the queue file in MB
+# Specify an integer ≥ 1; default is 512
+#max_size = 512  # e.g., 1024
+
+# Number of line-protocol entries sent per remote flush request
+# Specify an integer ≥ 1; default is 500
+#queue_flush_chunk_size = 500  # e.g., 1000
+
+# Field rename rules per table
+#[field_renames]
+#your_table = {field1 = "your_new_field"}  # e.g., home = {temp = "temp2", hum = "humidity"}
+
+###### Example: Create Trigger Using This Config ######
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --plugin-filename simple_data_replicator.py \
+#   --trigger-spec "all_tables" \
+#   --trigger-arguments config_file_path=simple_data_replicator_config_data_writes.toml \
+#   your_trigger_name

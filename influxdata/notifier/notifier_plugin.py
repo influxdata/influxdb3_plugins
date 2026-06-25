@@ -1,6 +1,6 @@
 """
 {
-    "plugin_type": ["http"]
+    "plugin_type": ["http", "onwrite"]
 }
 """
 
@@ -11,11 +11,177 @@ import os
 import random
 import time
 import uuid
+from dataclasses import dataclass
 from json import JSONDecodeError
 
 import httpx
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
+
+
+@dataclass
+class NotificationRequest:
+    sender_type: str
+    notification_text: str
+    sender_config: dict[str, str]
+
+
+def resolve_sender_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
+    config = {}
+    for key, value in args.items():
+        if not key.endswith("_env"):
+            continue
+        env_value = os.getenv(value)
+        if env_value is None:
+            influxdb3_local.error(
+                f"[{task_id}] Environment variable '{value}' (from arg '{key}') is not set"
+            )
+            return None
+        clean_key = key[: -len("_env")]
+        config[clean_key] = env_value
+    return config
+
+
+ASYNC_SENDER_TYPES = {"slack", "discord", "http"}
+SYNC_SENDER_TYPES = {"sms", "whatsapp"}
+
+
+def build_sender_args(request: NotificationRequest) -> dict:
+    args = {}
+    if request.sender_type in ASYNC_SENDER_TYPES:
+        for key, value in request.sender_config.items():
+            args[f"{request.sender_type}_{key}"] = value
+    else:
+        args.update(request.sender_config)
+    args["notification_text"] = request.notification_text
+    return args
+
+
+def extract_requests_from_rows(
+    influxdb3_local,
+    table_batches: list,
+    sender_type: str,
+    sender_config: dict[str, str],
+    task_id: str,
+) -> list[NotificationRequest]:
+    requests = []
+    for batch in table_batches:
+        for row in batch["rows"]:
+            # Skip rows with missing or empty notification_text
+            notification_text = row.get("notification_text")
+            if not notification_text:
+                row_id = row.get("id", "unknown")
+                alert_name = row.get("alert_name", "unknown")
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping row missing 'notification_text' "
+                    f"(table={batch['table_name']}, id={row_id}, alert_name={alert_name})"
+                )
+                continue
+            requests.append(
+                NotificationRequest(
+                    sender_type=sender_type,
+                    notification_text=notification_text,
+                    sender_config=sender_config,
+                )
+            )
+    return requests
+
+
+async def _dispatch_async_batch(
+    influxdb3_local,
+    requests: list[NotificationRequest],
+    task_id: str,
+) -> list:
+    tasks = [
+        alert_async(influxdb3_local, req.sender_type, build_sender_args(req), task_id)
+        for req in requests
+    ]
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def dispatch_notifications(
+    influxdb3_local,
+    requests: list[NotificationRequest],
+    task_id: str,
+) -> list[dict]:
+    if not requests:
+        return []
+
+    async_requests = [r for r in requests if r.sender_type in ASYNC_SENDER_TYPES]
+    sync_requests = [r for r in requests if r.sender_type in SYNC_SENDER_TYPES]
+    unknown_requests = [
+        r for r in requests
+        if r.sender_type not in ASYNC_SENDER_TYPES and r.sender_type not in SYNC_SENDER_TYPES
+    ]
+
+    results = []
+
+    # Dispatch async senders concurrently in a single event loop
+    if async_requests:
+        async_results = asyncio.run(
+            _dispatch_async_batch(influxdb3_local, async_requests, task_id)
+        )
+        for req, res in zip(async_requests, async_results):
+            success = not isinstance(res, Exception) and res
+            results.append({
+                "sender_type": req.sender_type,
+                "success": success,
+                "notification_text": req.notification_text,
+            })
+
+    # Dispatch sync senders sequentially
+    for req in sync_requests:
+        sender_fn = send_sms_via_twilio if req.sender_type == "sms" else send_whatsapp_via_twilio
+        success = sender_fn(influxdb3_local, build_sender_args(req), task_id)
+        results.append({
+            "sender_type": req.sender_type,
+            "success": success,
+            "notification_text": req.notification_text,
+        })
+
+    # Handle unknown sender types
+    for req in unknown_requests:
+        influxdb3_local.warn(f"[{task_id}] Invalid sender type: {req.sender_type}")
+        results.append({
+            "sender_type": req.sender_type,
+            "success": "Invalid sender",
+            "notification_text": req.notification_text,
+        })
+
+    return results
+
+
+def process_writes(influxdb3_local, table_batches, args=None):
+    task_id = str(uuid.uuid4())
+    influxdb3_local.info(f"[{task_id}] Starting process_writes")
+
+    if not args or "sender_type" not in args:
+        influxdb3_local.error(
+            f"[{task_id}] Missing 'sender_type' in trigger args"
+        )
+        return None
+
+    sender_type = args["sender_type"]
+
+    sender_config = resolve_sender_config(influxdb3_local, args, task_id)
+    if sender_config is None:
+        return None
+
+    requests = extract_requests_from_rows(
+        influxdb3_local, table_batches, sender_type, sender_config, task_id
+    )
+
+    if not requests:
+        influxdb3_local.info(f"[{task_id}] No valid notification requests to dispatch")
+        return None
+
+    results = dispatch_notifications(influxdb3_local, requests, task_id)
+
+    influxdb3_local.info(
+        f"[{task_id}] Dispatched {len(results)} notifications: "
+        + ", ".join(f"{r['sender_type']}={'ok' if r['success'] is True else 'fail'}" for r in results)
+    )
+    return None
 
 
 def send_sms_via_twilio(influxdb3_local, params: dict, task_id: str) -> bool:
@@ -254,6 +420,32 @@ def process_request(
     """
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Starting request process")
+
+    # New mode: sender_type in args — credentials from env vars, body has notification_text only
+    if args and "sender_type" in args:
+        if not request_body:
+            influxdb3_local.error(f"[{task_id}] No request body provided.")
+            return {"status": "failed", "message": "No request body provided."}
+        try:
+            data = json.loads(request_body)
+        except JSONDecodeError:
+            influxdb3_local.error(f"[{task_id}] Invalid JSON in request body.")
+            return {"status": "failed", "message": "Invalid JSON in request body."}
+        if "notification_text" not in data:
+            influxdb3_local.error(f"[{task_id}] Missing 'notification_text' in request body.")
+            return {"status": "failed", "message": "Missing required field: 'notification_text'."}
+
+        sender_config = resolve_sender_config(influxdb3_local, args, task_id)
+        if sender_config is None:
+            return {"status": "failed", "message": "Failed to resolve sender credentials from environment variables."}
+
+        request = NotificationRequest(
+            sender_type=args["sender_type"],
+            notification_text=data["notification_text"],
+            sender_config=sender_config,
+        )
+        results = dispatch_notifications(influxdb3_local, [request], task_id)
+        return {"status": "success", "message": "Request processed", "results": results}
 
     # Process the request body
     if request_body:

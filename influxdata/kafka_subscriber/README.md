@@ -8,7 +8,7 @@
 
 The Kafka Subscriber Plugin enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and automatically transform messages into time-series data with support for JSON, Line Protocol, and custom text formats. The plugin uses consumer groups for reliable message delivery and provides flexible offset commit policies for different use cases. The consumer is reused across scheduled invocations to avoid a consumer-group rebalance every cycle, and it optionally supports a dead-letter queue topic for failed messages and id-based deduplication for messages without their own timestamp.
 
-**Important:** Protobuf and Avro formats are NOT supported as they require Schema Registry integration. For these formats, consider using an external deserialization layer before writing to Kafka in a supported format.
+**Binary formats:** `avro`, `jsonschema`, and `protobuf` (Confluent wire format) are decoded via Confluent Schema Registry. `avro` can also be decoded as raw schemaless Avro with a local `.avsc` schema, and `protobuf` with a local `.proto` schema. See [Binary formats](#binary-formats).
 
 ## Configuration
 
@@ -22,13 +22,13 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 In TOML configuration, `bootstrap_servers`, `topics`, and `group_id` are placed under the `[kafka]` section; `table_name` and `table_name_field` are placed under `[mapping.json]` or `[mapping.text]` section.
 
-| Parameter           | Type   | Default                   | Description                                                                                                               |
-|---------------------|--------|---------------------------|---------------------------------------------------------------------------------------------------------------------------|
-| `bootstrap_servers` | string | required                  | Space-separated list of Kafka broker addresses (e.g., "kafka1:9092 kafka2:9092")                                          |
-| `topics`            | string | required                  | Space-separated list of topics (e.g., "sensor_data metrics")                                                              |
-| `group_id`          | string | required                  | Kafka consumer group ID (must be unique per consumer group)                                                               |
-| `table_name`        | string | required (json/text only) | InfluxDB measurement name for storing data. Not required for `lineprotocol` format or when `table_name_field` is set.     |
-| `table_name_field`  | string | none                      | JSON field name or regex pattern to extract table name dynamically from each message. Alternative to static `table_name`. |
+| Parameter           | Type   | Default                   | Description                                                                                                                   |
+|---------------------|--------|---------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| `bootstrap_servers` | string | required                  | Space-separated list of Kafka broker addresses (e.g., "kafka1:9092 kafka2:9092")                                              |
+| `topics`            | string | required                  | Space-separated list of topics (e.g., "sensor_data metrics")                                                                  |
+| `group_id`          | string | required                  | Kafka consumer group ID (must be unique per consumer group)                                                                   |
+| `table_name`        | string | conditional               | InfluxDB measurement name for storing data. Required for all formats except `lineprotocol`, unless `table_name_field` is set. |
+| `table_name_field`  | string | none                      | JSON field name or regex pattern to extract table name dynamically from each message. Alternative to static `table_name`.     |
 
 ### Connection parameters
 
@@ -147,18 +147,21 @@ In TOML configuration, `dedup_window` is placed under the `[kafka]` section; `de
 
 In TOML configuration, `format` is placed under the `[kafka]` section; `timestamp_field` is placed under `[mapping.json]` or `[mapping.text]` section.
 
-| Parameter         | Type   | Default | Description                                                    |
-|-------------------|--------|---------|----------------------------------------------------------------|
-| `format`          | string | "json"  | Message format: json, lineprotocol, or text                    |
-| `timestamp_field` | string | none    | Field containing timestamp (format depends on message format)  |
+| Parameter         | Type   | Default | Description                                                          |
+|-------------------|--------|---------|----------------------------------------------------------------------|
+| `format`          | string | "json"  | Message format: json, lineprotocol, text, avro, jsonschema, protobuf |
+| `timestamp_field` | string | none    | Field containing timestamp (format depends on message format)        |
 
 **Supported formats:**
 
-| Format         | Description                                      |
-|----------------|--------------------------------------------------|
-| `json`         | JSON with JSONPath field mapping                 |
-| `lineprotocol` | InfluxDB Line Protocol passthrough               |
-| `text`         | Plain text with regex-based parsing              |
+| Format         | Description                                                            |
+|----------------|------------------------------------------------------------------------|
+| `json`         | JSON with JSONPath field mapping                                       |
+| `lineprotocol` | InfluxDB Line Protocol passthrough                                     |
+| `text`         | Plain text with regex-based parsing                                    |
+| `avro`         | Avro via Confluent Schema Registry (JSONPath mapping)                  |
+| `jsonschema`   | JSON Schema via Confluent Schema Registry (JSONPath)                   |
+| `protobuf`     | Protobuf (Confluent wire format) via Schema Registry or a local .proto |
 
 **Format-specific timestamp_field syntax:**
 
@@ -172,6 +175,10 @@ In TOML configuration, `format` is placed under the `[kafka]` section; `timestam
 - `ms` - milliseconds (Unix timestamp)
 - `s` - seconds (Unix timestamp)
 - `datetime` - ISO 8601 string (e.g., "2021-12-01T12:00:00Z")
+
+For `avro` and `jsonschema`, a field decoded as a native `datetime`/`date`
+(Avro/JSON Schema logical type) is converted to a timestamp automatically,
+regardless of the configured format specifier.
 
 ### JSON format parameters
 
@@ -195,6 +202,99 @@ In TOML configuration, `tags` are placed under `[mapping.text.tags]` section and
 | `tags`    | string | none      | Space-separated tag patterns. Format: "name=regex_pattern"        |
 | `fields`  | string | required  | Space-separated field patterns. Format: "name:type=regex_pattern" |
 
+### Binary formats
+
+The decoded record is a dict (or a top-level list, expanded into one record per
+element) for all binary formats, so field/tag/timestamp mapping uses the same
+JSONPath syntax as the JSON format, under `[mapping.avro]`,
+`[mapping.jsonschema]`, or `[mapping.protobuf]`.
+
+Per-message decode failures (schema id not found, malformed payload) are handled
+like parse failures: the message is logged to `kafka_exceptions`, sent to
+`dlq_topic` if configured, or replayed otherwise. Binary payloads are forwarded
+to the DLQ as the original raw bytes.
+
+An unreachable or misconfigured Schema Registry is caught when the decoder is
+first built: the cycle is aborted before any message is polled or committed, so
+nothing is lost, and the run retries on the next schedule.
+
+#### Avro / JSON Schema (Schema Registry)
+
+Set `format` to `avro` or `jsonschema` to consume binary messages in the
+Confluent wire format (magic byte + 4-byte schema id + payload). The schema is
+fetched from the Schema Registry by the id embedded in each message — no local
+schema files are needed.
+
+The parameter names are identical in CLI/API arguments and TOML. In TOML they
+are placed under the `[kafka.schema_registry]` section.
+
+| Parameter                              | Type   | Default  | Description                                                                                                 |
+|----------------------------------------|--------|----------|-------------------------------------------------------------------------------------------------------------|
+| `schema_registry_url`                  | string | required | Schema Registry URL. Required for `avro` / `jsonschema`, and for `protobuf` without `protobuf_schema_file`. |
+| `schema_registry_username`             | string | none     | Basic-auth username (or API key for Confluent Cloud).                                                       |
+| `schema_registry_password`             | string | none     | Basic-auth password (or API secret). Used with username.                                                    |
+| `schema_registry_ca_cert`              | string | none     | CA certificate for TLS to the registry.                                                                     |
+| `schema_registry_client_cert`          | string | none     | Client certificate for mutual TLS to the registry.                                                          |
+| `schema_registry_client_key`           | string | none     | Client private key for mutual TLS. Requires client cert.                                                    |
+| `schema_registry_client_key_password`  | string | none     | Password for an encrypted client private key.                                                               |
+
+> **Note:** `avro` and `jsonschema` require the extra packages `httpx`,
+> `fastavro`, and `jsonschema`.
+
+#### Avro (local .avsc schema, schemaless)
+
+Set `format` to `avro` and `avro_schema_file` to a local `.avsc` schema to
+consume Avro messages produced **without** a Schema Registry — raw schemaless
+encoding with no Confluent wire header. The whole message value is the Avro body
+and is decoded with the local schema; the Schema Registry is **not** contacted.
+
+The parameter name is identical in CLI/API arguments and TOML. In TOML it is
+placed under the `[kafka.avro]` section.
+
+| Parameter          | Type   | Default  | Description                                                                  |
+|--------------------|--------|----------|------------------------------------------------------------------------------|
+| `avro_schema_file` | string | required | Path to a local `.avsc`/`.json` schema (absolute or relative to PLUGIN_DIR). |
+
+> **Note:** requires the `fastavro` package. The schema is parsed once and
+> cached. Writer and reader schema are assumed identical (no schema evolution).
+
+#### Protobuf (local .proto or Schema Registry)
+
+Set `format` to `protobuf` to consume Protobuf messages in the Confluent wire
+format. The schema source is chosen implicitly, like `avro`:
+
+- **Local `.proto`** — set `protobuf_schema_file`. The wire framing is parsed
+  locally and the schema is read from the file; the Schema Registry is not
+  contacted.
+- **Schema Registry** — omit `protobuf_schema_file` and set `schema_registry_url`.
+  The `.proto` (and any referenced schemas) is fetched by the wire-frame schema
+  id, compiled with `protoc`, and cached per schema id. The `[kafka.schema_registry]`
+  section (url, auth, TLS) is shared with `avro`/`jsonschema`.
+
+The message index selects which message type to decode, or set
+`protobuf_message_type` to choose it explicitly. In registry mode the schema
+matches the producer's, so the message index is always correct and
+`protobuf_message_type` is usually unnecessary.
+
+The parameter names are identical in CLI/API arguments and TOML. In TOML they
+are placed under the `[kafka.protobuf]` section.
+
+| Parameter                | Type   | Default            | Description                                                                            |
+|--------------------------|--------|--------------------|----------------------------------------------------------------------------------------|
+| `protobuf_schema_file`   | string | conditional        | Path to a local `.proto` (absolute or relative to PLUGIN_DIR). Omit to use the registry. |
+| `protobuf_include_dir`   | string | schema file's dir  | Include directory for resolving `import` statements (local mode only).                 |
+| `protobuf_message_type`  | string | wire message index | Fully-qualified message name to decode (e.g. `sensors.SensorReading`).                 |
+
+> **Note:** `protobuf` requires `grpcio-tools` (bundles `protoc` to compile the
+> `.proto`); it is included in the plugin's dependencies and installed
+> automatically. The `.proto` is
+> compiled once and cached. `MessageToDict` semantics apply: proto3 scalar fields
+> equal to their default (`0`/`""`/`false`) are omitted from the record;
+> `int64`/`uint64` become strings; enums become their names; `bytes` become
+> base64 strings.
+
+See examples 11–14 in [kafka_config_example.toml](kafka_config_example.toml).
+
 ### TOML configuration
 
 | Parameter          | Type   | Default | Description                                     |
@@ -206,9 +306,9 @@ In TOML configuration, `tags` are placed under `[mapping.text.tags]` section and
 All file paths in the plugin (configuration file, TLS certificates) follow the same resolution logic:
 
 - **Absolute paths** (e.g., `/etc/kafka/config.toml`) are used as-is
-- **Relative paths** (e.g., `config.toml`, `certs/ca.crt`) are resolved from `PLUGIN_DIR` environment variable
+- **Relative paths** (e.g., `config.toml`, `certs/ca.crt`) are resolved against the plugin directory, taken from `PLUGIN_DIR`, then `INFLUXDB3_PLUGIN_DIR`, then the parent of `VIRTUAL_ENV`
 
-If a relative path is specified and `PLUGIN_DIR` is not set, the plugin will return an error.
+If a relative path is specified and none of these can be resolved, the plugin will return an error.
 
 #### Example TOML configuration
 
@@ -220,15 +320,20 @@ The plugin automatically creates the target measurement table on first write. Fi
 
 ### Message encoding requirements
 
-- **UTF-8 text only**: The plugin only processes UTF-8 encoded text messages. Binary messages (Protobuf, Avro) are not supported.
+- **Text formats** (`json`, `text`, `lineprotocol`): payloads must be UTF-8 encoded.
+- **Binary formats** (`avro`, `jsonschema`, `protobuf`): payloads are decoded from binary (see [Binary formats](#binary-formats)).
 - **Non-empty payloads**: Empty or whitespace-only messages are automatically skipped.
 
 ## Software Requirements
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled
-- **Python packages**:
-  - `confluent-kafka` (High-performance Kafka client library based on librdkafka)
-  - `jsonpath-ng` (JSON path parsing for JSON format)
+- **Python packages** (all bundled in `manifest.toml` and installed automatically with the plugin):
+  - `confluent-kafka>=2.15.0` (Kafka client based on librdkafka) — all formats
+  - `jsonpath-ng` (JSONPath field mapping) — all formats
+  - `fastavro` — `avro` format (both Schema Registry and local `.avsc`)
+  - `httpx`, `authlib`, `cachetools` — any Schema Registry format (`avro` / `jsonschema` / registry-mode `protobuf`)
+  - `jsonschema` (library) — `jsonschema` message format only
+  - `protobuf`, `grpcio-tools` — `protobuf` format only
 
 ### Installation steps
 
@@ -361,7 +466,7 @@ Process batch messages containing arrays of JSON objects:
 **Array processing behavior:**
 - Each array element is processed independently as a separate data point
 - If one element fails to parse, the others continue processing (partial success)
-- Parse errors for individual elements are logged to `kafka_exceptions` table
+- Parse errors for individual elements are logged as warnings and the element is skipped (not written to `kafka_exceptions`)
 - Statistics count 1 Kafka message = 1 unit (regardless of array size)
 
 ### Line Protocol Format
@@ -413,6 +518,146 @@ humidity = ["hum:(\\d+)", "int"]
 
 ```
 location=warehouse_a,temp:22.5,hum:65,ts:1638360000000
+```
+
+### Avro Format (Schema Registry)
+
+Decode Avro messages in the Confluent wire format. The schema is resolved from
+the Schema Registry by the id embedded in each message; mapping uses JSONPath
+on the decoded record.
+
+#### TOML Configuration
+
+```toml
+[kafka]
+bootstrap_servers = ["kafka:9092"]
+topics = ["sensors.avro"]
+group_id = "influxdb3_avro"
+format = "avro"
+
+[kafka.schema_registry]
+schema_registry_url = "http://schema-registry:8081"
+# schema_registry_username = "sr_api_key"     # optional basic auth
+# schema_registry_password = "sr_api_secret"
+
+[mapping.avro]
+table_name = "sensor_data"
+timestamp_field = "$.timestamp:ms"
+
+[mapping.avro.tags]
+device_id = "$.device_id"
+
+[mapping.avro.fields]
+temperature = ["$.temperature", "float"]
+humidity = ["$.humidity", "float"]
+```
+
+### Avro Format (local .avsc schema, schemaless)
+
+Decode raw schemaless Avro (no Schema Registry, no wire header) with a local
+`.avsc` schema. Set `avro_schema_file` to switch `format = "avro"` to this mode.
+
+```toml
+[kafka]
+bootstrap_servers = ["kafka:9092"]
+topics = ["sensors.avro"]
+group_id = "influxdb3_avro_file"
+format = "avro"
+
+[kafka.avro]
+avro_schema_file = "schemas/sensor.avsc"
+
+[mapping.avro]
+table_name = "sensor_data"
+timestamp_field = "$.timestamp:ms"
+
+[mapping.avro.tags]
+device_id = "$.device_id"
+
+[mapping.avro.fields]
+temperature = ["$.temperature", "float"]
+humidity = ["$.humidity", "float"]
+```
+
+### JSON Schema Format (Schema Registry)
+
+Decode JSON-Schema messages in the Confluent wire format. Configuration mirrors
+the Avro example, using `format = "jsonschema"` and `[mapping.jsonschema]`.
+
+```toml
+[kafka]
+bootstrap_servers = ["kafka:9092"]
+topics = ["events.jsonschema"]
+group_id = "influxdb3_jsonschema"
+format = "jsonschema"
+
+[kafka.schema_registry]
+schema_registry_url = "http://schema-registry:8081"
+
+[mapping.jsonschema]
+table_name = "events"
+timestamp_field = "$.ts:ms"
+
+[mapping.jsonschema.fields]
+value = ["$.value", "float"]
+```
+
+### Protobuf Format (local .proto schema)
+
+Decode Protobuf messages in the Confluent wire format using a local `.proto`
+file. The Schema Registry is not contacted; the message type is selected by the
+wire message index, or set `protobuf_message_type` to choose it explicitly.
+
+```toml
+[kafka]
+bootstrap_servers = ["kafka:9092"]
+topics = ["sensors.protobuf"]
+group_id = "influxdb3_protobuf"
+format = "protobuf"
+
+[kafka.protobuf]
+protobuf_schema_file = "schemas/sensor.proto"
+# protobuf_include_dir = "schemas"               # optional, for .proto imports
+# protobuf_message_type = "sensors.SensorReading" # optional, defaults to wire message index
+
+[mapping.protobuf]
+table_name = "sensor_data"
+timestamp_field = "$.timestamp:ms"
+
+[mapping.protobuf.tags]
+device_id = "$.device_id"
+
+[mapping.protobuf.fields]
+temperature = ["$.temperature", "float"]
+humidity = ["$.humidity", "float"]
+```
+
+### Protobuf Format (Schema Registry)
+
+Omit `protobuf_schema_file` and set `schema_registry_url` to fetch and compile
+the `.proto` (and any referenced schemas) by the wire-frame schema id. The
+`[kafka.protobuf]` section can be omitted entirely.
+
+```toml
+[kafka]
+bootstrap_servers = ["kafka:9092"]
+topics = ["sensors.protobuf"]
+group_id = "influxdb3_protobuf_sr"
+format = "protobuf"
+
+[kafka.schema_registry]
+schema_registry_url = "http://schema-registry:8081"
+
+[mapping.protobuf]
+table_name = "sensor_data"
+timestamp_field = "$.timestamp:ms"
+
+[mapping.protobuf.tags]
+device_id = "$.device_id"
+
+[mapping.protobuf.fields]
+temperature = ["$.temperature", "float"]
+humidity = ["$.humidity", "float"]
 ```
 
 ## Statistics and Monitoring
@@ -468,7 +713,6 @@ Parse errors and message processing failures are logged to the `kafka_exceptions
 | `error_type` (tag)  | tag    | Type of error (e.g., JSONDecodeError)    |
 | `offset`            | int    | Message offset                           |
 | `error_message`     | string | Detailed error message                   |
-| `raw_message`       | string | Original message (truncated to 1KB)      |
 
 ### Checking for Errors
 

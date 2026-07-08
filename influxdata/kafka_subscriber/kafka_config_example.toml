@@ -13,8 +13,10 @@
 # - Absolute paths (e.g., /etc/kafka/ca.crt) are used as-is
 # - Relative paths (e.g., certs/ca.crt) are resolved from PLUGIN_DIR
 #
-# IMPORTANT: Protobuf and Avro formats are NOT supported as they require
-# Schema Registry integration. Use JSON, Line Protocol, or Text formats.
+# Binary formats: 'avro', 'jsonschema', and 'protobuf' (Confluent wire format)
+# are supported via Confluent Schema Registry (examples 11-13). 'protobuf' can
+# also be decoded with a local .proto schema, and 'avro' as raw schemaless Avro
+# with a local .avsc schema, without a registry (examples 13-14).
 # =============================================================================
 
 
@@ -389,3 +391,163 @@ online = ["$.online", "bool"]
 # # [mapping.text]
 # # dedup_id_field = "id=([\\w-]+)"
 # # dedup_id_name = "event_id"
+
+
+# #############################################################################
+# EXAMPLE 11: Avro Format via Confluent Schema Registry
+# #############################################################################
+# Use this configuration for Avro-encoded messages in the Confluent wire format
+# (magic byte + 4-byte schema id + payload). The schema is fetched from the
+# Schema Registry by id; no local schema files are needed.
+#
+# The decoded record is a dict, so the mapping uses the same JSONPath syntax as
+# the JSON format - just under [mapping.avro].
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["sensors.avro"]
+# group_id = "influxdb3_avro_consumer"
+# format = "avro"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# [kafka.schema_registry]
+# schema_registry_url = "http://schema-registry:8081"
+# # Basic auth (e.g. Confluent Cloud API key/secret):
+# # schema_registry_username = "sr_api_key"
+# # schema_registry_password = "sr_api_secret"
+# # TLS to the registry (paths absolute or relative to PLUGIN_DIR):
+# # schema_registry_ca_cert = "certs/sr_ca.crt"
+# # schema_registry_client_cert = "certs/sr_client.crt"   # mutual TLS
+# # schema_registry_client_key = "certs/sr_client.key"
+# # schema_registry_client_key_password = "sr_key_password"  # only if the client key is encrypted
+
+# [mapping.avro]
+# table_name = "sensor_data"
+# timestamp_field = "$.timestamp:ms"
+
+# [mapping.avro.tags]
+# device_id = "$.device_id"
+# location = "$.location"
+
+# [mapping.avro.fields]
+# temperature = ["$.temperature", "float"]
+# humidity = ["$.humidity", "float"]
+
+
+# #############################################################################
+# EXAMPLE 12: JSON Schema Format via Confluent Schema Registry
+# #############################################################################
+# Use this configuration for JSON-Schema-encoded messages in the Confluent wire
+# format. The payload is validated against the schema fetched from the registry
+# and decoded to a dict. Mapping uses JSONPath under [mapping.jsonschema].
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["events.jsonschema"]
+# group_id = "influxdb3_jsonschema_consumer"
+# format = "jsonschema"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# [kafka.schema_registry]
+# schema_registry_url = "http://schema-registry:8081"
+
+# [mapping.jsonschema]
+# table_name = "events"
+# timestamp_field = "$.ts:ms"
+
+# [mapping.jsonschema.tags]
+# host = "$.host"
+
+# [mapping.jsonschema.fields]
+# value = ["$.value", "float"]
+
+
+# #############################################################################
+# EXAMPLE 13: Protobuf Format (Confluent wire format)
+# #############################################################################
+# Use this configuration for Protobuf messages in the Confluent wire format
+# (magic byte + schema id + message index). The schema source is chosen
+# implicitly: set protobuf_schema_file for a LOCAL .proto (registry not
+# contacted), or omit it and set schema_registry_url to fetch and compile the
+# .proto (and any references) from the Schema Registry by the wire-frame schema
+# id. The message index selects the message type.
+#
+# The 'grpcio-tools' package (bundles protoc to compile the .proto) is included
+# in the plugin's dependencies and installed automatically.
+#
+# Note on MessageToDict semantics: proto3 scalar fields equal to their default
+# (0, "", false) are omitted from the decoded record; int64/uint64 fields become
+# strings; enums become their names; bytes become base64 strings.
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["sensors.protobuf"]
+# group_id = "influxdb3_protobuf_consumer"
+# format = "protobuf"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# Local .proto mode:
+# [kafka.protobuf]
+# protobuf_schema_file = "schemas/sensor.proto"   # path (absolute or relative to PLUGIN_DIR)
+# # protobuf_include_dir = "schemas"               # optional: include dir for .proto imports
+# # protobuf_message_type = "sensors.SensorReading" # optional: defaults to the wire message index
+
+# Schema Registry mode (alternative): omit protobuf_schema_file and set the URL.
+# The [kafka.protobuf] section can be omitted entirely.
+# [kafka.schema_registry]
+# schema_registry_url = "http://schema-registry:8081"
+
+# [mapping.protobuf]
+# table_name = "sensor_data"
+# timestamp_field = "$.timestamp:ms"
+
+# [mapping.protobuf.tags]
+# device_id = "$.device_id"
+
+# [mapping.protobuf.fields]
+# temperature = ["$.temperature", "float"]
+# humidity = ["$.humidity", "float"]
+
+
+# #############################################################################
+# EXAMPLE 14: Avro Format via Local Schema File (raw schemaless, no registry)
+# #############################################################################
+# Use this for Avro messages produced WITHOUT a Schema Registry (raw schemaless
+# encoding, no Confluent wire header). The whole message value is the Avro body
+# and is decoded with the local .avsc schema. Set avro_schema_file to switch the
+# 'avro' format to this mode; the Schema Registry is not contacted.
+#
+# The decoded record is a dict, so mapping uses JSONPath under [mapping.avro].
+# #############################################################################
+
+# [kafka]
+# bootstrap_servers = ["kafka:9092"]
+# topics = ["sensors.avro"]
+# group_id = "influxdb3_avro_file_consumer"
+# format = "avro"
+# offset_commit_policy = "on_success"
+# auto_offset_reset = "earliest"
+# security_protocol = "PLAINTEXT"
+
+# [kafka.avro]
+# avro_schema_file = "schemas/sensor.avsc"   # path (absolute or relative to PLUGIN_DIR)
+
+# [mapping.avro]
+# table_name = "sensor_data"
+# timestamp_field = "$.timestamp:ms"
+
+# [mapping.avro.tags]
+# device_id = "$.device_id"
+
+# [mapping.avro.fields]
+# temperature = ["$.temperature", "float"]
+# humidity = ["$.humidity", "float"]

@@ -29,13 +29,79 @@
         {
             "name": "format",
             "example": "json",
-            "description": "Message format: 'json', 'lineprotocol', or 'text'. Default: 'json'. Note: Protobuf and Avro are not supported.",
+            "description": "Message format: 'json', 'lineprotocol', 'text', 'avro', 'jsonschema', or 'protobuf'. Default: 'json'. 'avro' decodes via Confluent Schema Registry (set schema_registry_url) or, if avro_schema_file is set, raw schemaless Avro with a local .avsc schema. 'jsonschema' decodes via Confluent Schema Registry. 'protobuf' decodes Confluent wire-format messages using a local .proto schema (set protobuf_schema_file) or via the Schema Registry (set schema_registry_url without protobuf_schema_file).",
+            "required": false
+        },
+        {
+            "name": "schema_registry_url",
+            "example": "https://schema-registry:8081",
+            "description": "Confluent Schema Registry URL. Required for 'avro', 'jsonschema' and 'protobuf'.",
+            "required": false
+        },
+        {
+            "name": "schema_registry_username",
+            "example": "sr_user",
+            "description": "Schema Registry basic-auth username (or API key for Confluent Cloud).",
+            "required": false
+        },
+        {
+            "name": "schema_registry_password",
+            "example": "sr_password",
+            "description": "Schema Registry basic-auth password (or API secret). Used with schema_registry_username.",
+            "required": false
+        },
+        {
+            "name": "schema_registry_ca_cert",
+            "example": "certs/sr_ca.crt",
+            "description": "Path to CA certificate for TLS to Schema Registry (absolute or relative to PLUGIN_DIR).",
+            "required": false
+        },
+        {
+            "name": "schema_registry_client_cert",
+            "example": "certs/sr_client.crt",
+            "description": "Path to client certificate for mutual TLS to Schema Registry.",
+            "required": false
+        },
+        {
+            "name": "schema_registry_client_key",
+            "example": "certs/sr_client.key",
+            "description": "Path to client private key for mutual TLS to Schema Registry. Requires schema_registry_client_cert.",
+            "required": false
+        },
+        {
+            "name": "schema_registry_client_key_password",
+            "example": "sr_key_password",
+            "description": "Password for an encrypted Schema Registry client private key.",
+            "required": false
+        },
+        {
+            "name": "avro_schema_file",
+            "example": "schemas/sensor.avsc",
+            "description": "Path to a local Avro schema file (.avsc/.json, absolute or relative to PLUGIN_DIR). When set with format 'avro', messages are decoded as raw schemaless Avro (no Confluent wire header) and the Schema Registry is not used.",
+            "required": false
+        },
+        {
+            "name": "protobuf_schema_file",
+            "example": "schemas/sensor.proto",
+            "description": "Path to a local .proto schema file (absolute or relative to PLUGIN_DIR). Used by the 'protobuf' format for local decoding; omit it to fetch the schema from the Schema Registry (set schema_registry_url instead).",
+            "required": false
+        },
+        {
+            "name": "protobuf_include_dir",
+            "example": "schemas",
+            "description": "Include directory for resolving 'import' statements in the .proto file. Defaults to the schema file's directory.",
+            "required": false
+        },
+        {
+            "name": "protobuf_message_type",
+            "example": "sensors.SensorReading",
+            "description": "Fully-qualified protobuf message name to decode. Optional; by default the message is selected via the Confluent wire-format message index.",
             "required": false
         },
         {
             "name": "table_name",
             "example": "sensor_data",
-            "description": "InfluxDB table name (measurement) for storing data. Required for 'json' and 'text' formats unless table_name_field is set.",
+            "description": "InfluxDB table name (measurement) for storing data. Required for all formats except 'lineprotocol', unless table_name_field is set.",
             "required": false
         },
         {
@@ -168,6 +234,7 @@
 }
 """
 
+import io
 import json
 import math
 import os
@@ -175,17 +242,12 @@ import re
 import time
 import tomllib
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from confluent_kafka import (
-    Consumer,
-    KafkaError,
-    KafkaException,
-    Producer,
-    TopicPartition,
-)
+from confluent_kafka import (Consumer, KafkaError, KafkaException, Producer,
+                             TopicPartition)
 from jsonpath_ng.ext import parse as jsonpath_parse
 
 # Internal constants
@@ -199,6 +261,14 @@ _DEDUP_FIELD_NAME = "dedup_id"
 
 # Cache key for the KafkaManager reused across scheduled invocations
 _CACHE_CONSUMER = "kafka_consumer"
+# Cache key for the BinaryDecoder reused across scheduled invocations
+_CACHE_DECODER = "kafka_decoder"
+
+# Formats decoded from binary (value is raw bytes, not text). avro/jsonschema use
+# Schema Registry; protobuf uses a local .proto schema (Confluent wire framing).
+_BINARY_FORMATS = {"avro", "jsonschema", "protobuf"}
+# Binary formats whose schema is fetched from Schema Registry
+_REGISTRY_FORMATS = {"avro", "jsonschema"}
 
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -215,6 +285,7 @@ _ENABLE_FULL_LOGGING: bool = True
 def _exc(e: BaseException) -> str:
     """Return exception detail when full logging is enabled, else the type name."""
     return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
 
 """
 Helper for batching multiple line protocol builders into a single write.
@@ -293,6 +364,18 @@ def convert_timestamp(value: Any, time_format: str) -> int:
     Raises:
         ValueError: If format is unknown or value cannot be converted
     """
+    # Avro/JSON Schema logical types may decode straight to a datetime.
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp() * 1_000_000_000)
+
+    # Avro 'date' logical type decodes to a datetime.date (checked after
+    # datetime, since datetime is a subclass of date).
+    if isinstance(value, date):
+        dt = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1_000_000_000)
+
     if time_format == "ns":
         return int(value)
     elif time_format == "ms":
@@ -328,6 +411,36 @@ def parse_duration_seconds(value: str) -> int:
     return amount * _DURATION_UNITS[unit]
 
 
+def resolve_path(path: str, description: str) -> str:
+    """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR, falling back to server-derivable locations."""
+    if os.path.isabs(path):
+        return path
+
+    plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
+    if plugin_dir:
+        return os.path.join(plugin_dir, path)
+
+    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
+    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
+    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
+    candidates: list[str] = []
+    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
+        candidates.append(influxdb3_plugin_dir)
+    if virtual_env := os.environ.get("VIRTUAL_ENV"):
+        candidates.append(str(Path(virtual_env).parent))
+
+    for base in candidates:
+        candidate = os.path.join(base, path)
+        if os.path.exists(candidate):
+            return candidate
+
+    raise ValueError(
+        f"PLUGIN_DIR environment variable not set and {description} path "
+        f"'{path}' was not found via fallbacks "
+        f"(tried: {', '.join(candidates) or 'none available'})."
+    )
+
+
 class KafkaConfig:
     """Configuration loader and validator for Kafka plugin"""
 
@@ -355,36 +468,6 @@ class KafkaConfig:
             self.config = self._build_config_from_args()
 
     @staticmethod
-    def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR, falling back to server-derivable locations."""
-        if os.path.isabs(path):
-            return path
-
-        plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if plugin_dir:
-            return os.path.join(plugin_dir, path)
-
-        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-        candidates: list[str] = []
-        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-            candidates.append(influxdb3_plugin_dir)
-        if virtual_env := os.environ.get("VIRTUAL_ENV"):
-            candidates.append(str(Path(virtual_env).parent))
-
-        for base in candidates:
-            candidate = os.path.join(base, path)
-            if os.path.exists(candidate):
-                return candidate
-
-        raise ValueError(
-            f"PLUGIN_DIR environment variable not set and {description} path "
-            f"'{path}' was not found via fallbacks "
-            f"(tried: {', '.join(candidates) or 'none available'})."
-        )
-
-    @staticmethod
     def _validate_topics(topics: list) -> None:
         """Reject regex topic subscriptions (leading '^')."""
         for topic in topics:
@@ -400,18 +483,15 @@ class KafkaConfig:
         for server in servers:
             if not isinstance(server, str) or not re.match(r"^[^,\s]+:\d+$", server):
                 raise ValueError(
-                    f"Invalid bootstrap server '{server}'. "
-                    f"Expected 'host:port' format."
+                    f"Invalid bootstrap server '{server}'. Expected 'host:port' format."
                 )
 
     def _load_toml_config(self, config_file: str) -> dict[str, Any]:
         """Load configuration from TOML file"""
         if not config_file.endswith(".toml"):
-            raise ValueError(
-                "Invalid config file format: expected a .toml file"
-            )
+            raise ValueError("Invalid config file format: expected a .toml file")
 
-        config_path: str = self._resolve_path(config_file, "configuration file")
+        config_path: str = resolve_path(config_file, "configuration file")
 
         try:
             with open(config_path, "rb") as f:
@@ -592,34 +672,53 @@ class KafkaConfig:
             self._validate_text_mapping(config)
         elif message_format == "lineprotocol":
             pass
+        elif message_format in _REGISTRY_FORMATS:
+            avro_config = kafka_config.get("avro")
+            if (
+                message_format == "avro"
+                and isinstance(avro_config, dict)
+                and avro_config.get("avro_schema_file")
+            ):
+                self._validate_avro_file(avro_config)
+            else:
+                self._validate_schema_registry(kafka_config.get("schema_registry"))
+            self._validate_json_mapping(config, message_format)
+        elif message_format == "protobuf":
+            pb_config = kafka_config.get("protobuf")
+            if isinstance(pb_config, dict) and pb_config.get("protobuf_schema_file"):
+                self._validate_protobuf(pb_config)
+            else:
+                self._validate_schema_registry(kafka_config.get("schema_registry"))
+            self._validate_json_mapping(config, message_format)
         else:
             raise ValueError(
-                f"Invalid message format: {message_format}. "
-                f"Supported formats: json, text, lineprotocol. "
-                f"Note: Protobuf and Avro are not supported (require Schema Registry)."
+                f"Invalid message format: {message_format}. Supported formats: "
+                f"json, text, lineprotocol, avro, jsonschema, protobuf."
             )
 
-    def _validate_json_mapping(self, config: dict[str, Any]):
-        """Validate JSON mapping configuration"""
-        if "mapping" not in config or "json" not in config["mapping"]:
-            raise ValueError("Missing required 'mapping.json' section in configuration")
+    def _validate_json_mapping(self, config: dict[str, Any], section: str = "json"):
+        """Validate a JSONPath-based mapping section (shared by json/avro/jsonschema)."""
+        if "mapping" not in config or section not in config["mapping"]:
+            raise ValueError(
+                f"Missing required 'mapping.{section}' section in configuration"
+            )
 
-        json_mapping: dict[str, Any] = config["mapping"]["json"]
+        json_mapping: dict[str, Any] = config["mapping"][section]
 
         if "table_name" not in json_mapping and "table_name_field" not in json_mapping:
             raise ValueError(
-                "Missing required parameter 'mapping.json.table_name' or "
-                "'mapping.json.table_name_field' in configuration"
+                f"Missing required parameter 'mapping.{section}.table_name' or "
+                f"'mapping.{section}.table_name_field' in configuration"
             )
 
         if "fields" not in json_mapping or not json_mapping["fields"]:
             raise ValueError(
-                "Missing required parameter 'mapping.json.fields' in configuration"
+                f"Missing required parameter 'mapping.{section}.fields' in configuration"
             )
 
         if "timestamp_field" in json_mapping:
             parsed_timestamp: dict[str, str] = self._validate_and_parse_timestamp_field(
-                json_mapping["timestamp_field"], "mapping.json.timestamp_field"
+                json_mapping["timestamp_field"], f"mapping.{section}.timestamp_field"
             )
             json_mapping["timestamp_config"] = parsed_timestamp
             del json_mapping["timestamp_field"]
@@ -630,10 +729,60 @@ class KafkaConfig:
                 dedup_id_field,
                 json_mapping.get("dedup_id_name"),
                 "json",
-                "mapping.json.dedup_id_field",
+                f"mapping.{section}.dedup_id_field",
             )
             json_mapping.pop("dedup_id_field", None)
             json_mapping.pop("dedup_id_name", None)
+
+    @staticmethod
+    def _validate_schema_registry(sr_config: dict[str, Any] | None) -> None:
+        """Validate the [kafka.schema_registry] section for binary formats."""
+        if not isinstance(sr_config, dict) or not sr_config.get("schema_registry_url"):
+            raise ValueError(
+                "Missing required 'kafka.schema_registry.schema_registry_url' for "
+                "binary formats (avro/jsonschema, or protobuf without "
+                "protobuf_schema_file)"
+            )
+
+        client_cert = sr_config.get("schema_registry_client_cert")
+        client_key = sr_config.get("schema_registry_client_key")
+        key_password = sr_config.get("schema_registry_client_key_password")
+        if (client_key or key_password) and not client_cert:
+            raise ValueError(
+                "'kafka.schema_registry.schema_registry_client_cert' is required "
+                "when 'schema_registry_client_key' or "
+                "'schema_registry_client_key_password' is set"
+            )
+
+    @staticmethod
+    def _validate_avro_file(avro_config: dict[str, Any] | None) -> None:
+        """Validate the [kafka.avro] section (local schemaless Avro schema)."""
+        if not isinstance(avro_config, dict) or not avro_config.get("avro_schema_file"):
+            raise ValueError(
+                "Missing required 'kafka.avro.avro_schema_file' for local "
+                "schemaless Avro decoding"
+            )
+        schema_file = avro_config["avro_schema_file"]
+        if not isinstance(schema_file, str) or not schema_file.endswith(
+            (".avsc", ".json")
+        ):
+            raise ValueError(
+                "'kafka.avro.avro_schema_file' must be a path to a .avsc or .json file"
+            )
+
+    @staticmethod
+    def _validate_protobuf(pb_config: dict[str, Any] | None) -> None:
+        """Validate the [kafka.protobuf] section (local .proto schema)."""
+        if not isinstance(pb_config, dict) or not pb_config.get("protobuf_schema_file"):
+            raise ValueError(
+                "Missing required 'kafka.protobuf.protobuf_schema_file' for the "
+                "protobuf format"
+            )
+        schema_file = pb_config["protobuf_schema_file"]
+        if not isinstance(schema_file, str) or not schema_file.endswith(".proto"):
+            raise ValueError(
+                "'kafka.protobuf.protobuf_schema_file' must be a path to a .proto file"
+            )
 
     def _validate_text_mapping(self, config: dict[str, Any]):
         """Validate text mapping configuration"""
@@ -701,7 +850,8 @@ class KafkaConfig:
 
         required_keys: list = ["topics", "bootstrap_servers", "group_id"]
 
-        if self.args.get("format", "json") in ["json", "text"]:
+        message_format: str = self.args.get("format", "json")
+        if message_format in ["json", "text"] or message_format in _BINARY_FORMATS:
             if not self.args.get("table_name_field"):
                 required_keys.append("table_name")
 
@@ -809,6 +959,21 @@ class KafkaConfig:
         if dlq_topic is not None and not dlq_topic.strip():
             raise ValueError("dlq_topic must be a non-empty string when set")
 
+        # Build schema source config; registry formats need a URL, protobuf a
+        # .proto file, and avro may use a local .avsc file (schemaless).
+        schema_registry_config: dict = self._build_schema_registry_from_args()
+        protobuf_config: dict = self._build_protobuf_from_args()
+        avro_config: dict = self._build_avro_from_args()
+        if message_format == "avro" and avro_config.get("avro_schema_file"):
+            self._validate_avro_file(avro_config)
+        elif message_format in _REGISTRY_FORMATS:
+            self._validate_schema_registry(schema_registry_config)
+        elif message_format == "protobuf":
+            if protobuf_config.get("protobuf_schema_file"):
+                self._validate_protobuf(protobuf_config)
+            else:
+                self._validate_schema_registry(schema_registry_config)
+
         return {
             "kafka": {
                 "bootstrap_servers": servers_list,
@@ -820,6 +985,9 @@ class KafkaConfig:
                 "security_protocol": security_protocol,
                 "sasl": sasl_config,
                 "ssl": ssl_config,
+                "schema_registry": schema_registry_config,
+                "protobuf": protobuf_config,
+                "avro": avro_config,
                 "max_poll_records": max_poll_records,
                 "max_poll_interval": max_poll_interval,
                 "dedup_window": dedup_window,
@@ -828,6 +996,47 @@ class KafkaConfig:
             },
             "mapping": self._build_mapping_from_args(),
         }
+
+    def _build_protobuf_from_args(self) -> dict[str, Any]:
+        """Build protobuf config from args. Keys match the [kafka.protobuf] TOML
+        keys, which are identical to the arg names."""
+        pb_config: dict[str, Any] = {}
+        for key in (
+            "protobuf_schema_file",
+            "protobuf_include_dir",
+            "protobuf_message_type",
+        ):
+            value = self.args.get(key)
+            if value:
+                pb_config[key] = value
+        return pb_config
+
+    def _build_avro_from_args(self) -> dict[str, Any]:
+        """Build local Avro config from args. Keys match the [kafka.avro] TOML
+        keys, which are identical to the arg names."""
+        avro_config: dict[str, Any] = {}
+        value = self.args.get("avro_schema_file")
+        if value:
+            avro_config["avro_schema_file"] = value
+        return avro_config
+
+    def _build_schema_registry_from_args(self) -> dict[str, Any]:
+        """Build Schema Registry config from args. Keys match the [kafka.schema_registry]
+        TOML keys, which are identical to the arg names."""
+        sr_config: dict[str, Any] = {}
+        for key in (
+            "schema_registry_url",
+            "schema_registry_username",
+            "schema_registry_password",
+            "schema_registry_ca_cert",
+            "schema_registry_client_cert",
+            "schema_registry_client_key",
+            "schema_registry_client_key_password",
+        ):
+            value = self.args.get(key)
+            if value:
+                sr_config[key] = value
+        return sr_config
 
     def _build_mapping_from_args(self) -> dict[str, Any]:
         """Build mapping configuration from args (supports JSON and text formats)"""
@@ -839,11 +1048,14 @@ class KafkaConfig:
             return self._build_text_mapping_from_args()
         elif message_format == "lineprotocol":
             return {}
+        elif message_format in _BINARY_FORMATS:
+            # Binary formats decode to a dict and reuse the JSONPath mapping.
+            json_mapping = self._build_json_mapping_from_args()
+            return {message_format: json_mapping["json"]}
         else:
             raise ValueError(
-                f"Unsupported format: {message_format}. "
-                f"Use 'json', 'text', or 'lineprotocol'. "
-                f"Note: Protobuf and Avro are not supported."
+                f"Unsupported format: {message_format}. Use 'json', 'text', "
+                f"'lineprotocol', 'avro', 'jsonschema', or 'protobuf'."
             )
 
     def _build_json_mapping_from_args(self) -> dict[str, Any]:
@@ -1079,6 +1291,8 @@ class KafkaManager:
         self.config: dict[str, Any] = config
         self.influxdb3_local = influxdb3_local
         self.task_id: str = task_id
+        # Binary formats keep the raw value bytes instead of a UTF-8 string.
+        self.binary: bool = config.get("format") in _BINARY_FORMATS
         self.consumer: Consumer | None = None
         self.producer: Producer | None = None  # Lazily created for DLQ
         self.connected: bool = False
@@ -1088,36 +1302,6 @@ class KafkaManager:
         # delivery callback confirms it. Reconciliation is scoped to _dlq_produced.
         self._dlq_status: dict[tuple[str, int, int], bool] = {}
         self._dlq_produced: set[tuple[str, int, int]] = set()
-
-    @staticmethod
-    def _resolve_path(path: str, description: str) -> str:
-        """Resolve path - absolute paths used as-is, relative paths resolved from PLUGIN_DIR, falling back to server-derivable locations."""
-        if os.path.isabs(path):
-            return path
-
-        plugin_dir: str | None = os.environ.get("PLUGIN_DIR")
-        if plugin_dir:
-            return os.path.join(plugin_dir, path)
-
-        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-        candidates: list[str] = []
-        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-            candidates.append(influxdb3_plugin_dir)
-        if virtual_env := os.environ.get("VIRTUAL_ENV"):
-            candidates.append(str(Path(virtual_env).parent))
-
-        for base in candidates:
-            candidate = os.path.join(base, path)
-            if os.path.exists(candidate):
-                return candidate
-
-        raise ValueError(
-            f"PLUGIN_DIR environment variable not set and {description} path "
-            f"'{path}' was not found via fallbacks "
-            f"(tried: {', '.join(candidates) or 'none available'})."
-        )
 
     @classmethod
     def build_security_config(cls, config: dict[str, Any]) -> dict[str, Any]:
@@ -1150,17 +1334,17 @@ class KafkaManager:
 
             ca_cert = ssl_config.get("ca_cert")
             if ca_cert:
-                client_config["ssl.ca.location"] = cls._resolve_path(
+                client_config["ssl.ca.location"] = resolve_path(
                     ca_cert, "CA certificate"
                 )
 
             client_cert = ssl_config.get("client_cert")
             client_key = ssl_config.get("client_key")
             if client_cert and client_key:
-                client_config["ssl.certificate.location"] = cls._resolve_path(
+                client_config["ssl.certificate.location"] = resolve_path(
                     client_cert, "client certificate"
                 )
-                client_config["ssl.key.location"] = cls._resolve_path(
+                client_config["ssl.key.location"] = resolve_path(
                     client_key, "client key"
                 )
 
@@ -1242,8 +1426,8 @@ class KafkaManager:
         source_topic: str,
         partition: int,
         offset: int,
-        key: str | None,
-        payload: str,
+        key: str | bytes | None,
+        payload: str | bytes | None,
         error_type: str,
         error_message: str,
     ) -> bool:
@@ -1268,8 +1452,14 @@ class KafkaManager:
         on_delivery = lambda err, msg, s=source: self._on_dlq_delivery(err, msg, s)
 
         try:
-            value_bytes = payload.encode("utf-8") if payload is not None else None
-            key_bytes = key.encode("utf-8") if key else None
+            if isinstance(payload, (bytes, bytearray)):
+                value_bytes = bytes(payload)
+            else:
+                value_bytes = payload.encode("utf-8") if payload is not None else None
+            if isinstance(key, (bytes, bytearray)):
+                key_bytes = bytes(key)
+            else:
+                key_bytes = key.encode("utf-8") if key else None
             try:
                 producer.produce(
                     dlq_topic,
@@ -1319,9 +1509,7 @@ class KafkaManager:
         # Scope to this cycle's keys so a late callback from a prior cycle
         # cannot trigger a spurious replay.
         return {
-            key
-            for key in self._dlq_produced
-            if not self._dlq_status.get(key, False)
+            key for key in self._dlq_produced if not self._dlq_status.get(key, False)
         }
 
     def connect(self) -> bool:
@@ -1401,27 +1589,39 @@ class KafkaManager:
                 self.influxdb3_local.error(f"[{self.task_id}] Kafka error: {error}")
                 return None
 
-        # Decode value
-        try:
-            value = (
-                msg.value().decode("utf-8", errors="replace") if msg.value() else None
-            )
-        except Exception:
+        raw_value = msg.value()
+        raw_key = msg.key()
+
+        # Binary formats are decoded later by the Schema Registry decoder, so
+        # keep the raw bytes here; text formats are decoded to a UTF-8 string.
+        if self.binary:
+            if not raw_value:
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] Skipping empty message on "
+                    f"{msg.topic()}:{msg.partition()}"
+                )
+                return None
             value = None
-
-        # Skip empty payloads
-        if not value or not value.strip():
-            self.influxdb3_local.warn(
-                f"[{self.task_id}] Skipping empty message on "
-                f"{msg.topic()}:{msg.partition()}"
-            )
-            return None
-
-        # Decode key
-        key = None
-        if msg.key():
+        else:
             try:
-                key = msg.key().decode("utf-8")
+                value = (
+                    raw_value.decode("utf-8", errors="replace") if raw_value else None
+                )
+            except Exception:
+                value = None
+
+            if not value or not value.strip():
+                self.influxdb3_local.warn(
+                    f"[{self.task_id}] Skipping empty message on "
+                    f"{msg.topic()}:{msg.partition()}"
+                )
+                return None
+
+        # Decode key to a string for logs / text DLQ; raw bytes kept for binary.
+        key = None
+        if raw_key:
+            try:
+                key = raw_key.decode("utf-8")
             except Exception:
                 pass
 
@@ -1431,6 +1631,8 @@ class KafkaManager:
             "offset": msg.offset(),
             "key": key,
             "payload": value,
+            "raw_value": raw_value,
+            "raw_key": raw_key,
             "timestamp": msg.timestamp()[1] if msg.timestamp() else None,
         }
 
@@ -1534,9 +1736,7 @@ class KafkaManager:
                     low, high = self.consumer.get_watermark_offsets(tp)
                     bootstrap = low if offset_reset == "earliest" else high
                     if bootstrap >= 0:
-                        tp_to_commit = TopicPartition(
-                            tp.topic, tp.partition, bootstrap
-                        )
+                        tp_to_commit = TopicPartition(tp.topic, tp.partition, bootstrap)
                         offsets_to_commit.append(tp_to_commit)
                 # else: poll failed and no valid position - skip this partition
                 #       so the previously committed offset stays intact.
@@ -1591,6 +1791,448 @@ class KafkaManager:
         self.connected = False
 
 
+class BinaryDecoder:
+    """Decode binary Kafka message values to a Python dict.
+
+    - avro / jsonschema: Confluent wire format, schema fetched from Schema
+      Registry by the embedded schema id.
+    - avro with avro_schema_file: raw schemaless Avro decoded with a local
+      .avsc schema (no wire header, registry is not contacted).
+    - protobuf: Confluent wire format, schema taken from a local .proto file
+      (registry is not contacted); the wire framing is parsed locally and the
+      message-index selects the message type.
+
+    Imports of the schema_registry / protobuf stacks are lazy so non-binary
+    formats don't require those extra dependencies. Reused across invocations
+    to keep the registry connection / compiled schema warm."""
+
+    def __init__(
+        self,
+        message_format: str,
+        kafka_config: dict[str, Any],
+        influxdb3_local,
+        task_id: str,
+    ):
+        self.message_format: str = message_format
+        self.influxdb3_local = influxdb3_local
+        self.task_id: str = task_id
+        self._serialization_context = None
+        self._value_field = None
+        self._deserializer = None
+        # protobuf state
+        self._pb = None
+        self._pb_pool = None
+        self._pb_file_name: str | None = None
+        self._pb_message_type: str | None = None
+        self._pb_client = None
+        self._pb_pool_cache = None
+        # local schemaless avro state
+        self._fastavro = None
+        self._avro_schema = None
+        avro_config = kafka_config.get("avro", {})
+        if message_format == "protobuf":
+            pb_config = kafka_config.get("protobuf", {})
+            if pb_config.get("protobuf_schema_file"):
+                self._build_protobuf(pb_config)
+            else:
+                self._build_protobuf_registry(
+                    kafka_config.get("schema_registry", {}), pb_config
+                )
+        elif message_format == "avro" and avro_config.get("avro_schema_file"):
+            self._build_avro_file(avro_config)
+        else:
+            self._build_registry(kafka_config.get("schema_registry", {}))
+
+    def rebind(self, influxdb3_local, task_id: str) -> None:
+        """Refresh per-invocation references when reusing a cached instance."""
+        self.influxdb3_local = influxdb3_local
+        self.task_id = task_id
+
+    def _build_registry(self, sr_config: dict[str, Any]) -> None:
+        """Construct the Schema Registry client and the per-format deserializer."""
+        client = self._build_sr_client(sr_config)
+
+        if self.message_format == "avro":
+            from confluent_kafka.schema_registry.avro import AvroDeserializer
+
+            self._deserializer = AvroDeserializer(client)
+        elif self.message_format == "jsonschema":
+            from confluent_kafka.schema_registry.json_schema import \
+                JSONDeserializer
+
+            self._deserializer = JSONDeserializer(None, schema_registry_client=client)
+        else:
+            raise ValueError(f"Unsupported registry format: {self.message_format}")
+
+    def _build_sr_client(self, sr_config: dict[str, Any]):
+        """Import the confluent SR stack and build a SchemaRegistryClient."""
+        try:
+            from confluent_kafka.schema_registry import SchemaRegistryClient
+            from confluent_kafka.serialization import (MessageField,
+                                                       SerializationContext)
+        except ImportError as e:
+            raise ValueError(
+                "Schema Registry support requires additional packages "
+                "(httpx, fastavro, jsonschema). Install them to use binary formats."
+            ) from e
+
+        self._serialization_context = SerializationContext
+        self._value_field = MessageField.VALUE
+        client = SchemaRegistryClient(self._build_client_conf(sr_config))
+
+        # Fail fast: verify the registry is reachable at construction time so a
+        # dead/misconfigured registry aborts the run before polling (and before
+        # any offset is committed) instead of failing on every message decode.
+        try:
+            client.get_subjects()
+        except Exception as e:
+            raise ValueError(
+                f"Schema Registry is not reachable at "
+                f"'{sr_config.get('schema_registry_url')}': {_exc(e)}"
+            ) from e
+        return client
+
+    @staticmethod
+    def _build_client_conf(sr_config: dict[str, Any]) -> dict[str, Any]:
+        """Map the schema_registry config to confluent SchemaRegistryClient keys."""
+        url = sr_config.get("schema_registry_url")
+        if not url:
+            raise ValueError(
+                "kafka.schema_registry.schema_registry_url is required for "
+                "binary formats"
+            )
+        if isinstance(url, list):
+            url = ",".join(url)
+
+        conf: dict[str, Any] = {"url": url}
+
+        username = sr_config.get("schema_registry_username")
+        if username:
+            password = sr_config.get("schema_registry_password") or ""
+            conf["basic.auth.user.info"] = f"{username}:{password}"
+
+        ca_cert = sr_config.get("schema_registry_ca_cert")
+        if ca_cert:
+            conf["ssl.ca.location"] = resolve_path(
+                ca_cert, "Schema Registry CA certificate"
+            )
+
+        client_cert = sr_config.get("schema_registry_client_cert")
+        if client_cert:
+            conf["ssl.certificate.location"] = resolve_path(
+                client_cert, "Schema Registry client certificate"
+            )
+
+        client_key = sr_config.get("schema_registry_client_key")
+        if client_key:
+            conf["ssl.key.location"] = resolve_path(
+                client_key, "Schema Registry client key"
+            )
+
+        key_password = sr_config.get("schema_registry_client_key_password")
+        if key_password:
+            conf["ssl.key.password"] = key_password
+
+        return conf
+
+    def _build_avro_file(self, avro_config: dict[str, Any]) -> None:
+        """Load a local .avsc schema for raw schemaless Avro decoding (cached)."""
+        try:
+            import fastavro
+        except ImportError as e:
+            raise ValueError(
+                "Local Avro support requires 'fastavro'. Install it to use the "
+                "avro format with avro_schema_file."
+            ) from e
+
+        schema_file = avro_config.get("avro_schema_file")
+        if not schema_file:
+            raise ValueError(
+                "kafka.avro.avro_schema_file is required for local schemaless "
+                "Avro decoding"
+            )
+        schema_path = resolve_path(schema_file, "avro schema file")
+        with open(schema_path) as f:
+            raw_schema = json.load(f)
+
+        self._fastavro = fastavro
+        self._avro_schema = fastavro.parse_schema(raw_schema)
+
+    def _build_protobuf(self, pb_config: dict[str, Any]) -> None:
+        """Compile the local .proto into a DescriptorPool (once, cached)."""
+        try:
+            from google.protobuf.json_format import MessageToDict
+            from google.protobuf.message_factory import GetMessageClass
+        except ImportError as e:
+            raise ValueError(
+                "Protobuf support requires 'protobuf' and 'grpcio-tools'. "
+                "Install them: influxdb3 install package grpcio-tools."
+            ) from e
+
+        self._pb = {
+            "MessageToDict": MessageToDict,
+            "GetMessageClass": GetMessageClass,
+        }
+        self._pb_message_type = pb_config.get("protobuf_message_type")
+
+        schema_file = pb_config.get("protobuf_schema_file")
+        if not schema_file:
+            raise ValueError(
+                "kafka.protobuf.protobuf_schema_file is required for the protobuf "
+                "format"
+            )
+        schema_path = resolve_path(schema_file, "protobuf schema file")
+
+        include_dir_cfg = pb_config.get("protobuf_include_dir")
+        include_dir = (
+            resolve_path(include_dir_cfg, "protobuf include dir")
+            if include_dir_cfg
+            else os.path.dirname(schema_path)
+        )
+
+        descriptor_set = self._compile_proto(schema_path, include_dir)
+        self._pb_pool = self._pool_from_descriptor_set(descriptor_set)
+        # The main file is the schema path relative to the include dir.
+        self._pb_file_name = os.path.relpath(schema_path, include_dir).replace(
+            os.sep, "/"
+        )
+
+    def _build_protobuf_registry(
+        self, sr_config: dict[str, Any], pb_config: dict[str, Any]
+    ) -> None:
+        """Set up protobuf decoding via Schema Registry: build the SR client and
+        a per-schema-id cache of compiled descriptor pools. The .proto text is
+        fetched and compiled on demand in _load_pb_schema."""
+        try:
+            from google.protobuf.json_format import MessageToDict
+            from google.protobuf.message_factory import GetMessageClass
+        except ImportError as e:
+            raise ValueError(
+                "Protobuf support requires 'protobuf' and 'grpcio-tools'. "
+                "Install them: influxdb3 install package grpcio-tools."
+            ) from e
+        from cachetools import LRUCache
+
+        self._pb = {
+            "MessageToDict": MessageToDict,
+            "GetMessageClass": GetMessageClass,
+        }
+        self._pb_message_type = pb_config.get("protobuf_message_type")
+        self._pb_client = self._build_sr_client(sr_config)
+        self._pb_pool_cache = LRUCache(maxsize=128)
+
+    def _load_pb_schema(self, schema_id: int):
+        """Fetch the .proto (and references) for schema_id from the registry,
+        compile it, and return (DescriptorPool, main_file_name). Cached by id."""
+        cached = self._pb_pool_cache.get(schema_id)
+        if cached is not None:
+            return cached
+
+        import shutil
+        import tempfile
+
+        schema = self._pb_client.get_schema(schema_id)
+
+        main_name = "__main__.proto"
+        root = tempfile.mkdtemp(prefix="pb_sr_")
+        try:
+            with open(os.path.join(root, main_name), "w") as f:
+                f.write(schema.schema_str)
+
+            written: set[str] = set()
+            for ref in schema.references or []:
+                self._materialize_reference(ref, root, written, 0)
+
+            descriptor_set = self._compile_proto(os.path.join(root, main_name), root)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+        pool = self._pool_from_descriptor_set(descriptor_set)
+        result = (pool, main_name)
+        self._pb_pool_cache[schema_id] = result
+        return result
+
+    def _materialize_reference(self, ref, root: str, written: set, depth: int) -> None:
+        """Fetch a referenced schema by subject/version and write it (and its own
+        references) under root at the path given by ref.name so 'import' resolves."""
+        if depth > 50:
+            raise ValueError(
+                "protobuf schema reference chain too deep (possible cycle)"
+            )
+        if not ref.name or ref.name in written:
+            return
+        written.add(ref.name)
+
+        registered = self._pb_client.get_version(ref.subject, ref.version)
+        ref_schema = registered.schema
+
+        # Guard against path traversal: the registry could return a reference
+        # name that is absolute or contains '..' and escape the temp root.
+        dest = os.path.join(root, ref.name)
+        root_real = os.path.realpath(root)
+        dest_real = os.path.realpath(dest)
+        if os.path.isabs(ref.name) or not (
+            dest_real == root_real or dest_real.startswith(root_real + os.sep)
+        ):
+            raise ValueError(f"Unsafe protobuf schema reference name: {ref.name!r}")
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w") as f:
+            f.write(ref_schema.schema_str)
+
+        for child in ref_schema.references or []:
+            self._materialize_reference(child, root, written, depth + 1)
+
+    @staticmethod
+    def _compile_proto(schema_path: str, include_dir: str) -> bytes:
+        """Compile a .proto into a serialized FileDescriptorSet via protoc."""
+        try:
+            import grpc_tools
+            from grpc_tools import protoc
+        except ImportError as e:
+            raise ValueError(
+                "Protobuf support requires 'grpcio-tools' to compile .proto files. "
+                "Install it: influxdb3 install package grpcio-tools."
+            ) from e
+
+        well_known = os.path.join(os.path.dirname(grpc_tools.__file__), "_proto")
+        rel_proto = os.path.relpath(schema_path, include_dir)
+
+        import tempfile
+
+        out_fd, out_path = tempfile.mkstemp(suffix=".desc")
+        os.close(out_fd)
+        try:
+            rc = protoc.main(
+                [
+                    "protoc",
+                    f"-I{include_dir}",
+                    f"-I{well_known}",
+                    "--include_imports",
+                    f"--descriptor_set_out={out_path}",
+                    rel_proto,
+                ]
+            )
+            if rc != 0:
+                raise ValueError(
+                    f"protoc failed to compile '{rel_proto}' (exit code {rc})"
+                )
+            with open(out_path, "rb") as f:
+                return f.read()
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _pool_from_descriptor_set(descriptor_set: bytes):
+        """Build a DescriptorPool from a serialized FileDescriptorSet, adding
+        each file after its dependencies."""
+        from google.protobuf import descriptor_pb2
+        from google.protobuf.descriptor_pool import DescriptorPool
+
+        file_set = descriptor_pb2.FileDescriptorSet()
+        file_set.ParseFromString(descriptor_set)
+
+        pool = DescriptorPool()
+        files_by_name = {f.name: f for f in file_set.file}
+        added: set[str] = set()
+
+        def add_file(name: str) -> None:
+            if name in added or name not in files_by_name:
+                return
+            fdp = files_by_name[name]
+            for dep in fdp.dependency:
+                add_file(dep)
+            pool.Add(fdp)
+            added.add(name)
+
+        for fname in files_by_name:
+            add_file(fname)
+        return pool
+
+    def decode(self, raw_value: bytes | None, topic: str) -> dict | list:
+        """Decode a binary message value to a dict or list. Raises on empty
+        input or payloads that are neither an object nor an array."""
+        if not raw_value:
+            raise ValueError("Empty binary message value")
+
+        if self.message_format == "protobuf":
+            decoded = self._decode_protobuf(raw_value)
+        elif self._avro_schema is not None:
+            decoded = self._fastavro.schemaless_reader(
+                io.BytesIO(raw_value), self._avro_schema
+            )
+        else:
+            ctx = self._serialization_context(topic, self._value_field)
+            decoded = self._deserializer(raw_value, ctx)
+
+        if not isinstance(decoded, (dict, list)):
+            raise ValueError(
+                f"Decoded {self.message_format} message is not an object or "
+                f"array (got {type(decoded).__name__})"
+            )
+        return decoded
+
+    def _decode_protobuf(self, raw_value: bytes) -> dict:
+        """Parse the Confluent framing and decode with the local or registry
+        schema (registry schema chosen by the wire-frame schema id)."""
+        schema_id, message_indexes, payload = self._read_confluent_frame(raw_value)
+
+        if self._pb_pool_cache is not None:
+            pool, file_name = self._load_pb_schema(schema_id)
+        else:
+            pool, file_name = self._pb_pool, self._pb_file_name
+
+        if self._pb_message_type:
+            msg_desc = pool.FindMessageTypeByName(self._pb_message_type)
+        else:
+            file_desc = pool.FindFileByName(file_name)
+            top_level = list(file_desc.message_types_by_name.values())
+            msg_desc = top_level[message_indexes[0]]
+            for idx in message_indexes[1:]:
+                msg_desc = msg_desc.nested_types[idx]
+
+        message = self._pb["GetMessageClass"](msg_desc)()
+        message.ParseFromString(payload)
+        return self._pb["MessageToDict"](message, preserving_proto_field_name=True)
+
+    @staticmethod
+    def _read_confluent_frame(raw_value: bytes) -> tuple[int, list[int], bytes]:
+        """Read the Confluent protobuf wire format: magic byte (0), 4-byte schema
+        id, then a zigzag-varint message-index array. Returns
+        (schema_id, indexes, payload)."""
+        if len(raw_value) < 5 or raw_value[0] != 0:
+            raise ValueError(
+                "Message is not in Confluent protobuf wire format (bad magic byte)"
+            )
+
+        buf = io.BytesIO(raw_value)
+        buf.read(1)  # skip magic byte
+        schema_id = int.from_bytes(buf.read(4), "big")
+
+        def read_zigzag_varint() -> int:
+            result = 0
+            shift = 0
+            while True:
+                chunk = buf.read(1)
+                if not chunk:
+                    raise ValueError("Truncated message-index varint")
+                byte = chunk[0]
+                result |= (byte & 0x7F) << shift
+                if not (byte & 0x80):
+                    break
+                shift += 7
+            return (result >> 1) ^ -(result & 1)
+
+        size = read_zigzag_varint()
+        if size < 0 or size > 100000:
+            raise ValueError("Invalid message-index array length")
+        indexes = [0] if size == 0 else [read_zigzag_varint() for _ in range(size)]
+
+        return schema_id, indexes, buf.read()
+
+
 class JSONParser:
     """Parse JSON messages and convert to Line Protocol"""
 
@@ -1636,8 +2278,16 @@ class JSONParser:
     def parse(self, payload: str) -> list:
         """Parse JSON payload and return a list of (line, table, dedup_id) tuples."""
         try:
-            data: dict = json.loads(payload)
+            data = json.loads(payload)
+        except json.JSONDecodeError as e:
+            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
+            raise
+        return self.parse_record(data)
 
+    def parse_record(self, data: Any) -> list:
+        """Map an already-decoded object (dict or list[dict]) to records. Used
+        directly for binary formats decoded via Schema Registry."""
+        try:
             if isinstance(data, list):
                 if len(data) == 0:
                     self.influxdb3_local.warn(
@@ -1676,13 +2326,12 @@ class JSONParser:
                 return [record] if record else []
 
             else:
-                raise ValueError(f"Unsupported JSON type: {type(data).__name__}")
+                raise ValueError(f"Unsupported record type: {type(data).__name__}")
 
-        except json.JSONDecodeError as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Invalid JSON: {_exc(e)}")
-            raise
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing JSON: {_exc(e)}")
+            self.influxdb3_local.error(
+                f"[{self.task_id}] Error parsing record: {_exc(e)}"
+            )
             raise
 
     def _parse_object(self, data: dict[str, Any]):
@@ -2121,7 +2770,9 @@ class TextParser:
             return [(line, table_name, dedup_id)]
 
         except Exception as e:
-            self.influxdb3_local.error(f"[{self.task_id}] Error parsing text: {_exc(e)}")
+            self.influxdb3_local.error(
+                f"[{self.task_id}] Error parsing text: {_exc(e)}"
+            )
             raise
 
     def _add_dedup_id(self, line, payload: str) -> str | None:
@@ -2423,15 +3074,19 @@ def process_scheduled_call(
                 "mapping": {
                     "json": config_loader.get_mapping_config("json"),
                     "text": config_loader.get_mapping_config("text"),
+                    "avro": config_loader.get_mapping_config("avro"),
+                    "jsonschema": config_loader.get_mapping_config("jsonschema"),
+                    "protobuf": config_loader.get_mapping_config("protobuf"),
                 },
             }
             influxdb3_local.cache.put("kafka_config", cached_config, 60 * 60)
-            # Config (re)built - drop any stale manager to pick up new settings.
+            # Config (re)built - drop any stale manager/decoder to pick up new settings.
             stale = influxdb3_local.cache.get(_CACHE_CONSUMER)
             if stale is not None:
                 stale.rebind(influxdb3_local, task_id)
                 stale.close()
                 influxdb3_local.cache.delete(_CACHE_CONSUMER)
+            influxdb3_local.cache.delete(_CACHE_DECODER)
             influxdb3_local.info(
                 f"[{task_id}] Kafka Plugin initialized, "
                 f"format: {cached_config['kafka']['format']}"
@@ -2441,7 +3096,7 @@ def process_scheduled_call(
             init_fmt: str = cached_config["kafka"]["format"]
             init_map: dict = (
                 cached_config["mapping"].get(init_fmt) or {}
-                if init_fmt in ("json", "text")
+                if init_fmt != "lineprotocol"
                 else {}
             )
             if init_map.get("dedup") and init_map.get("timestamp_config"):
@@ -2465,14 +3120,12 @@ def process_scheduled_call(
         # (a timestamp already lets InfluxDB dedup by tags + time).
         fmt_mapping: dict = (
             cached_config["mapping"].get(message_format) or {}
-            if message_format in ("json", "text")
+            if message_format != "lineprotocol"
             else {}
         )
         dedup_cfg: dict | None = fmt_mapping.get("dedup")
         dedup_active: bool = bool(dedup_cfg) and not fmt_mapping.get("timestamp_config")
-        dedup_field_name: str | None = (
-            dedup_cfg["field_name"] if dedup_active else None
-        )
+        dedup_field_name: str | None = dedup_cfg["field_name"] if dedup_active else None
         dedup_window_s: int = parse_duration_seconds(
             kafka_config.get("dedup_window", _DEFAULT_DEDUP_WINDOW)
         )
@@ -2500,6 +3153,29 @@ def process_scheduled_call(
             influxdb3_local.cache.put(_CACHE_CONSUMER, manager)
 
         manager.reset_cycle()
+
+        # Build/refresh the Schema Registry decoder for binary formats. Fail fast
+        # before polling so a misconfigured registry doesn't advance offsets.
+        binary: bool = message_format in _BINARY_FORMATS
+        decoder: BinaryDecoder | None = None
+        if binary:
+            decoder = influxdb3_local.cache.get(_CACHE_DECODER)
+            if decoder is not None:
+                decoder.rebind(influxdb3_local, task_id)
+            else:
+                try:
+                    decoder = BinaryDecoder(
+                        message_format,
+                        kafka_config,
+                        influxdb3_local,
+                        task_id,
+                    )
+                except Exception as e:
+                    influxdb3_local.error(
+                        f"[{task_id}] Failed to initialize binary decoder: {_exc(e)}"
+                    )
+                    return
+                influxdb3_local.cache.put(_CACHE_DECODER, decoder)
 
         # Retrieve messages
         messages: list = manager.get_messages()
@@ -2532,7 +3208,8 @@ def process_scheduled_call(
 
         influxdb3_local.info(f"[{task_id}] Processing {len(messages)} messages")
 
-        # Initialize parser based on format
+        # Initialize parser based on format. Binary formats decode to a dict and
+        # reuse JSONParser via its parse_record() entry point.
         if message_format == "json":
             mapping_config: dict = cached_config["mapping"].get("json", {})
             parser = JSONParser(mapping_config, task_id, influxdb3_local)
@@ -2541,6 +3218,9 @@ def process_scheduled_call(
         elif message_format == "text":
             mapping_config = cached_config["mapping"].get("text", {})
             parser = TextParser(mapping_config, task_id, influxdb3_local)
+        elif message_format in _BINARY_FORMATS:
+            mapping_config = cached_config["mapping"].get(message_format, {})
+            parser = JSONParser(mapping_config, task_id, influxdb3_local)
         else:
             influxdb3_local.error(
                 f"[{task_id}] Unknown message format: {message_format}"
@@ -2561,7 +3241,19 @@ def process_scheduled_call(
             stats.record_message_received(topic, partition, offset)
 
             try:
-                records: list = parser.parse(payload)
+                if binary:
+                    decoded = decoder.decode(msg.get("raw_value"), topic)
+                    if not decoded:
+                        records: list = []
+                        influxdb3_local.warn(
+                            f"[{task_id}] Binary message decoded to empty "
+                            f"content, no records produced: topic={topic} "
+                            f"partition={partition} offset={offset}"
+                        )
+                    else:
+                        records = parser.parse_record(decoded)
+                else:
+                    records = parser.parse(payload)
                 parse_results.append((msg, "ok", records))
             except Exception as e:
                 parse_results.append((msg, "fail", e))
@@ -2617,14 +3309,10 @@ def process_scheduled_call(
         write_failed: bool = False
         if all_line_builders:
             try:
-                influxdb3_local.write_sync(
-                    _BatchLines(all_line_builders), no_sync=True
-                )
+                influxdb3_local.write_sync(_BatchLines(all_line_builders), no_sync=True)
             except Exception as e:
                 write_failed = True
-                influxdb3_local.error(
-                    f"[{task_id}] Batch write failed: {_exc(e)}"
-                )
+                influxdb3_local.error(f"[{task_id}] Batch write failed: {_exc(e)}")
 
         # Phase 4: Update stats, route failures to DLQ, decide offset commit
         success_count: int = 0
@@ -2680,12 +3368,19 @@ def process_scheduled_call(
             if status == "fail":
                 # Poison message: offload to the DLQ; if it can't be offloaded,
                 # replay it so it is not lost. DLQ delivery is reconciled below.
+                # Binary formats forward the raw bytes byte-for-byte.
+                if binary:
+                    dlq_key = msg.get("raw_key")
+                    dlq_payload = msg.get("raw_value")
+                else:
+                    dlq_key = msg.get("key")
+                    dlq_payload = msg.get("payload", "")
                 if manager.send_to_dlq(
                     topic,
                     partition,
                     offset,
-                    msg.get("key"),
-                    msg.get("payload", ""),
+                    dlq_key,
+                    dlq_payload,
                     error_type,
                     error_msg,
                 ):
@@ -2739,6 +3434,7 @@ def process_scheduled_call(
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error in Kafka plugin: {_exc(e)}")
         influxdb3_local.cache.delete("kafka_config")
+        influxdb3_local.cache.delete(_CACHE_DECODER)
         fatal = True
 
     finally:
@@ -2746,5 +3442,3 @@ def process_scheduled_call(
         if fatal and manager is not None:
             manager.close()
             influxdb3_local.cache.delete(_CACHE_CONSUMER)
-
-

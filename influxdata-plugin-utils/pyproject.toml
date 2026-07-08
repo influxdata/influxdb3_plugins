@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "influxdata-plugin-utils"
+dynamic = ["version"]
+description = "Shared helpers for InfluxDB 3 plugins."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+authors = [{ name = "InfluxData" }]
+keywords = ["influxdb", "influxdb3", "plugins"]
+dependencies = ["dynaconf>=3.2"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/influxdata/influxdb3_plugins"
+Repository = "https://github.com/influxdata/influxdb3_plugins"
+
+[tool.hatch.version]
+path = "src/influxdata_plugin_utils/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/influxdata_plugin_utils"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "README.md", "CHANGELOG.md", "LICENSE-MIT", "LICENSE-APACHE"]

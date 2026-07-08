@@ -1,0 +1,9 @@
+# Example config for the simple_downsampler demo plugin.
+# Native TOML types — no manual string parsing needed.
+source_table = "cpu"
+target_table = "cpu_downsampled"
+window = "10min"
+aggregations = ["mean", "min", "max"]
+excluded_fields = ["usage_guest", "usage_steal"]
+group_by_tags = true
+max_groups = 1000

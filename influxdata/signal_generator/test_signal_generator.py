@@ -748,6 +748,8 @@ def test_process_scheduled_call_first_run(monkeypatch):
     # First run: no writes, only cache initialization
     assert len(mock.written_lines) == 0
     assert mock.cache.get("signal_gen:last_time") is not None
+    # Gaps are enabled by default and unseeded, so init stores an auto-seed
+    assert mock.cache.get("signal_gen:gap_seed") is not None
 
 
 def test_process_scheduled_call_second_run(monkeypatch):
@@ -755,12 +757,13 @@ def test_process_scheduled_call_second_run(monkeypatch):
     monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
     from signal_generator import process_scheduled_call
     mock = MockInfluxDB3Local()
+    args = {"gap_enabled": "false"}
     # Simulate first run
     first_time = datetime(2026, 4, 10, 12, 0, 0)
-    process_scheduled_call(mock, first_time)
+    process_scheduled_call(mock, first_time, args)
     # Second run 5 seconds later — should produce 5 points at 1 pps
     second_time = datetime(2026, 4, 10, 12, 0, 5)
-    process_scheduled_call(mock, second_time)
+    process_scheduled_call(mock, second_time, args)
     assert count_written_points(mock) == 5
 
 
@@ -769,7 +772,7 @@ def test_process_scheduled_call_custom_pps(monkeypatch):
     monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
     from signal_generator import process_scheduled_call
     mock = MockInfluxDB3Local()
-    args = {"points_per_second": "2"}
+    args = {"points_per_second": "2", "gap_enabled": "false"}
     first_time = datetime(2026, 4, 10, 12, 0, 0)
     process_scheduled_call(mock, first_time, args)
     # Second run 5 seconds later — 2 pps * 5s = 10 points
@@ -783,7 +786,7 @@ def test_process_scheduled_call_target_database(monkeypatch):
     monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
     from signal_generator import process_scheduled_call
     mock = MockInfluxDB3Local()
-    args = {"target_database": "other_db"}
+    args = {"target_database": "other_db", "gap_enabled": "false"}
     first_time = datetime(2026, 4, 10, 12, 0, 0)
     process_scheduled_call(mock, first_time, args)
     second_time = datetime(2026, 4, 10, 12, 0, 5)
@@ -831,6 +834,7 @@ def test_process_scheduled_call_jitter_zero_keeps_regular_timestamps(monkeypatch
     args = {
         "waveforms": '[{"type":"constant","value":1.0}]',
         "jitter_amplitude_seconds": "0",
+        "gap_enabled": "false",
     }
     first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
     process_scheduled_call(mock, first_time, args)
@@ -853,6 +857,7 @@ def test_process_scheduled_call_seeded_jitter_offsets_timestamps(monkeypatch):
         "waveforms": '[{"type":"constant","value":1.0}]',
         "jitter_amplitude_seconds": "0.1",
         "jitter_seed": "7",
+        "gap_enabled": "false",
     }
     first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
     process_scheduled_call(mock, first_time, args)
@@ -874,6 +879,7 @@ def test_process_scheduled_call_seeded_jitter_varies_across_one_point_calls(monk
         "waveforms": '[{"type":"constant","value":1.0}]',
         "jitter_amplitude_seconds": "0.1",
         "jitter_seed": "7",
+        "gap_enabled": "false",
     }
     first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
     process_scheduled_call(mock, first_time, args)
@@ -910,7 +916,7 @@ def test_process_scheduled_call_default_jitter_offsets_timestamps(monkeypatch):
     monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
     from signal_generator import process_scheduled_call
     mock = MockInfluxDB3Local()
-    args = {"waveforms": '[{"type":"constant","value":1.0}]'}
+    args = {"waveforms": '[{"type":"constant","value":1.0}]', "gap_enabled": "false"}
     first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
     process_scheduled_call(mock, first_time, args)
     second_time = datetime(2026, 4, 10, 12, 0, 3, tzinfo=timezone.utc)
@@ -928,3 +934,449 @@ def test_process_scheduled_call_default_jitter_offsets_timestamps(monkeypatch):
         earlier < later
         for earlier, later in zip(timestamps, timestamps[1:])
     )
+
+
+# ---------------------------------------------------------------------------
+# Gap config parsing tests
+# ---------------------------------------------------------------------------
+
+def make_gap_config(seed=123, **args):
+    """Build a parsed gap config for schedule-function tests."""
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({k: str(v) for k, v in args.items()})
+    assert error is None, error
+    config["seed"] = seed
+    return config
+
+
+def test_parse_gap_config_defaults():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config(None)
+    assert error is None
+    assert config["enabled"] is True
+    assert config["min_duration"] == 10.0
+    assert config["max_duration"] == 30.0
+    assert config["min_interval"] == 120.0
+    assert config["max_interval"] == 240.0
+    assert config["pitch"] == 180.0
+    assert config["offset"] == 30.0
+    assert config["seed"] is None
+
+
+def test_parse_gap_config_custom_values():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({
+        "gap_min_duration_seconds": "5",
+        "gap_max_duration_seconds": "15",
+        "gap_min_interval_seconds": "60",
+        "gap_max_interval_seconds": "100",
+        "gap_seed": "42",
+    })
+    assert error is None
+    assert config["min_duration"] == 5.0
+    assert config["max_duration"] == 15.0
+    assert config["min_interval"] == 60.0
+    assert config["max_interval"] == 100.0
+    assert config["pitch"] == 80.0
+    assert config["offset"] == 10.0
+    assert config["seed"] == 42
+
+
+def test_parse_gap_config_enabled_false():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_enabled": "false"})
+    assert error is None
+    assert config["enabled"] is False
+
+
+def test_parse_gap_config_enabled_case_insensitive():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_enabled": "TRUE"})
+    assert error is None
+    assert config["enabled"] is True
+    config, error = parse_gap_config({"gap_enabled": "False"})
+    assert error is None
+    assert config["enabled"] is False
+
+
+def test_parse_gap_config_enabled_garbage():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_enabled": "yes"})
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_non_numeric_duration():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_min_duration_seconds": "abc"})
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_nan_rejected():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_max_interval_seconds": "nan"})
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_inf_rejected():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_max_duration_seconds": "inf"})
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_negative_min_duration():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_min_duration_seconds": "-1"})
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_max_duration_below_min():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({
+        "gap_min_duration_seconds": "20",
+        "gap_max_duration_seconds": "10",
+    })
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_zero_min_interval():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({
+        "gap_min_interval_seconds": "0",
+        "gap_max_interval_seconds": "10",
+    })
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_max_interval_below_min():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({
+        "gap_min_interval_seconds": "200",
+        "gap_max_interval_seconds": "100",
+    })
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_min_interval_below_max_duration():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({
+        "gap_max_duration_seconds": "30",
+        "gap_min_interval_seconds": "25",
+        "gap_max_interval_seconds": "240",
+    })
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_min_interval_equal_max_duration_valid():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({
+        "gap_max_duration_seconds": "30",
+        "gap_min_interval_seconds": "30",
+        "gap_max_interval_seconds": "90",
+    })
+    assert error is None
+    assert config["min_interval"] == 30.0
+
+
+def test_parse_gap_config_non_integer_seed():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({"gap_seed": "1.5"})
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+def test_parse_gap_config_disabled_still_validates():
+    from signal_generator import parse_gap_config
+    config, error = parse_gap_config({
+        "gap_enabled": "false",
+        "gap_min_duration_seconds": "abc",
+    })
+    assert config is None
+    assert "Invalid gap config" in error
+
+
+# ---------------------------------------------------------------------------
+# Gap schedule function tests
+# ---------------------------------------------------------------------------
+
+def test_gap_window_bounded_spacing_and_no_overlap():
+    from signal_generator import gap_window
+    config = make_gap_config(seed=123)
+    starts = []
+    prev_end = None
+    for n in range(5000):
+        start, end = gap_window(config, n)
+        assert 10.0 <= end - start <= 30.0
+        if prev_end is not None:
+            assert start >= prev_end
+        starts.append(start)
+        prev_end = end
+    spacings = [b - a for a, b in zip(starts, starts[1:])]
+    assert min(spacings) >= 120.0
+    assert max(spacings) <= 240.0
+
+
+def test_gap_window_no_overlap_at_equality_boundary():
+    # min_interval == max_duration: gaps may touch but never overlap
+    from signal_generator import gap_window
+    config = make_gap_config(
+        seed=7,
+        gap_min_duration_seconds=5,
+        gap_max_duration_seconds=30,
+        gap_min_interval_seconds=30,
+        gap_max_interval_seconds=90,
+    )
+    prev_end = None
+    for n in range(5000):
+        start, end = gap_window(config, n)
+        if prev_end is not None:
+            assert start >= prev_end - 1e-9
+        prev_end = end
+
+
+def test_in_gap_matches_brute_force():
+    import random as pyrandom
+    from signal_generator import gap_window, in_gap
+    config = make_gap_config(seed=123)
+    rng = pyrandom.Random(9)
+    for _ in range(5000):
+        t = rng.uniform(0, 5000 * config["pitch"])
+        n_center = int(t // config["pitch"])
+        brute = any(
+            gap_window(config, n)[0] <= t < gap_window(config, n)[1]
+            for n in range(max(0, n_center - 3), n_center + 4)
+        )
+        assert in_gap(config, t) == brute
+
+
+def test_gap_window_reproducible_across_seeds():
+    from signal_generator import gap_window
+    config_a = make_gap_config(seed=123)
+    config_b = make_gap_config(seed=123)
+    config_c = make_gap_config(seed=124)
+    windows_a = [gap_window(config_a, n) for n in range(100)]
+    windows_b = [gap_window(config_b, n) for n in range(100)]
+    windows_c = [gap_window(config_c, n) for n in range(100)]
+    assert windows_a == windows_b
+    assert windows_a != windows_c
+
+
+def test_gap_window_pinned_values():
+    # Freezes the hash payload format and draw order (offset, then duration).
+    # If this fails, every seeded gap schedule in the wild has changed.
+    from signal_generator import gap_window
+    config = make_gap_config(seed=7)
+    start, end = gap_window(config, 1000)
+    assert abs(start - 180011.7885872335) < 1e-9
+    assert abs(end - 180037.7907425121) < 1e-9
+
+
+def test_apply_gaps_empty_points():
+    from signal_generator import apply_gaps
+    config = make_gap_config(seed=123)
+    assert apply_gaps([], config) == ([], 0, 0)
+
+
+def test_apply_gaps_half_open_boundaries():
+    from signal_generator import apply_gaps, gap_window
+    config = make_gap_config(seed=123)
+    start, end = gap_window(config, 50)
+    points = [(start, 1.0), ((start + end) / 2, 2.0), (end, 3.0)]
+    kept, removed, window_count = apply_gaps(points, config)
+    # start and midpoint are inside [start, end); the point exactly at end is kept
+    assert kept == [(end, 3.0)]
+    assert removed == 2
+    assert window_count >= 1
+
+
+def test_apply_gaps_window_count():
+    from signal_generator import apply_gaps, gap_window
+    config = make_gap_config(seed=123)
+    t0 = 1775822400.0
+    points = [(t0 + i, 1.0) for i in range(1, 601)]
+    _, _, window_count = apply_gaps(points, config)
+    expected = 0
+    n_center = int(t0 // config["pitch"])
+    for n in range(max(0, n_center - 3), n_center + 8):
+        start, end = gap_window(config, n)
+        if start <= t0 + 600 and end > t0 + 1:
+            expected += 1
+    assert window_count == expected
+    assert window_count >= 2  # a 600s span always intersects multiple windows
+
+
+# ---------------------------------------------------------------------------
+# Entry point gap tests
+# ---------------------------------------------------------------------------
+
+GAP_TEST_ARGS = {
+    "waveforms": '[{"type":"constant","value":1.0}]',
+    "jitter_amplitude_seconds": "0",
+    "gap_seed": "123",
+}
+
+
+def test_process_scheduled_call_default_gaps_remove_points(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+    process_scheduled_call(mock, first_time, GAP_TEST_ARGS)
+    second_time = datetime(2026, 4, 10, 12, 10, 0, tzinfo=timezone.utc)
+    process_scheduled_call(mock, second_time, GAP_TEST_ARGS)
+    written = count_written_points(mock)
+    # A 600s span always contains at least one full gap window (10-30s)
+    assert 0 < written < 600
+    assert any("removed by" in log for log in mock.logs["info"])
+
+
+def test_process_scheduled_call_gap_batch_invariance(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+
+    mock_one = MockInfluxDB3Local()
+    process_scheduled_call(mock_one, first_time, GAP_TEST_ARGS)
+    process_scheduled_call(
+        mock_one, datetime(2026, 4, 10, 12, 10, 0, tzinfo=timezone.utc), GAP_TEST_ARGS
+    )
+
+    mock_many = MockInfluxDB3Local()
+    process_scheduled_call(mock_many, first_time, GAP_TEST_ARGS)
+    for seconds in range(10, 601, 10):
+        call_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+        call_time = datetime.fromtimestamp(
+            call_time.timestamp() + seconds, tz=timezone.utc
+        )
+        process_scheduled_call(mock_many, call_time, GAP_TEST_ARGS)
+
+    assert written_timestamps_ns(mock_one) == written_timestamps_ns(mock_many)
+    assert 0 < count_written_points(mock_one) < 600
+
+
+def test_process_scheduled_call_gap_spans_call_boundary(monkeypatch):
+    import math
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import gap_window, process_scheduled_call
+    config = make_gap_config(seed=123)
+    t0 = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+
+    # Find a gap window comfortably inside (t0+60, t0+540)
+    n = int(t0 // config["pitch"])
+    while True:
+        start, end = gap_window(config, n)
+        if start > t0 + 60 and end < t0 + 540:
+            break
+        n += 1
+    boundary = int(start + (end - start) / 2)  # call boundary inside the gap
+
+    mock = MockInfluxDB3Local()
+    process_scheduled_call(mock, datetime.fromtimestamp(t0, tz=timezone.utc), GAP_TEST_ARGS)
+
+    process_scheduled_call(
+        mock, datetime.fromtimestamp(boundary, tz=timezone.utc), GAP_TEST_ARGS
+    )
+    written_first = count_written_points(mock)
+    generated_first = boundary - int(t0)
+    assert written_first < generated_first  # gap removed points before the boundary
+
+    process_scheduled_call(
+        mock, datetime.fromtimestamp(t0 + 600, tz=timezone.utc), GAP_TEST_ARGS
+    )
+    written_second = count_written_points(mock) - written_first
+    generated_second = int(t0 + 600) - boundary
+    assert written_second < generated_second  # and after the boundary
+
+    # No written timestamp falls inside the gap window
+    for ts_ns in written_timestamps_ns(mock):
+        ts = ts_ns / 1_000_000_000
+        assert not (start <= ts < end)
+
+
+def test_process_scheduled_call_gap_covers_entire_call(monkeypatch):
+    import math
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import gap_window, process_scheduled_call
+    config = make_gap_config(seed=123)
+    t0 = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc).timestamp()
+    n = int(t0 // config["pitch"]) + 1
+    start, end = gap_window(config, n)
+
+    init_time = math.ceil(start)
+    call_time = init_time + 4  # entire (init_time, call_time] sits inside the gap
+    assert call_time < end
+
+    mock = MockInfluxDB3Local()
+    process_scheduled_call(mock, datetime.fromtimestamp(init_time, tz=timezone.utc), GAP_TEST_ARGS)
+    process_scheduled_call(mock, datetime.fromtimestamp(call_time, tz=timezone.utc), GAP_TEST_ARGS)
+
+    assert count_written_points(mock) == 0
+    assert any("removed by" in log for log in mock.logs["info"])
+    # Generation boundary still advances: the missing span is never backfilled
+    assert mock.cache.get("signal_gen:last_time") == call_time
+
+
+def test_process_scheduled_call_gap_catch_up_matches_schedule(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import in_gap, process_scheduled_call
+    config = make_gap_config(seed=123)
+    t0 = int(datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+
+    mock = MockInfluxDB3Local()
+    process_scheduled_call(mock, datetime.fromtimestamp(t0, tz=timezone.utc), GAP_TEST_ARGS)
+    # Single catch-up call one hour later
+    process_scheduled_call(
+        mock, datetime.fromtimestamp(t0 + 3600, tz=timezone.utc), GAP_TEST_ARGS
+    )
+
+    expected = [
+        t * 1_000_000_000
+        for t in range(t0 + 1, t0 + 3601)
+        if not in_gap(config, float(t))
+    ]
+    assert written_timestamps_ns(mock) == expected
+    assert len(expected) < 3600
+
+
+def test_process_scheduled_call_unseeded_gap_seed_is_stable(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    args = {"waveforms": '[{"type":"constant","value":1.0}]'}
+    first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+    process_scheduled_call(mock, first_time, args)
+    seed_after_init = mock.cache.get("signal_gen:gap_seed")
+    assert isinstance(seed_after_init, int)
+    for seconds in (10, 20, 30):
+        call_time = datetime.fromtimestamp(
+            first_time.timestamp() + seconds, tz=timezone.utc
+        )
+        process_scheduled_call(mock, call_time, args)
+    assert mock.cache.get("signal_gen:gap_seed") == seed_after_init
+
+
+def test_process_scheduled_call_gap_config_error_writes_nothing(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    args = {"gap_min_duration_seconds": "abc"}
+    call_time = datetime(2026, 4, 10, 12, 0, 0)
+    process_scheduled_call(mock, call_time, args)
+    assert len(mock.written_lines) == 0
+    assert mock.cache.get("signal_gen:last_time") is None
+    assert any("Invalid gap config" in log for log in mock.logs["error"])

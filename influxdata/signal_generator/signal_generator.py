@@ -45,6 +45,42 @@
             "required": false
         },
         {
+            "name": "gap_enabled",
+            "example": "false",
+            "description": "Enables simulated data-source outage gaps. Enabled by default; set to 'false' for continuous output.",
+            "required": false
+        },
+        {
+            "name": "gap_min_duration_seconds",
+            "example": "10",
+            "description": "Shortest simulated outage duration in seconds. Defaults to 10.",
+            "required": false
+        },
+        {
+            "name": "gap_max_duration_seconds",
+            "example": "30",
+            "description": "Longest simulated outage duration in seconds. Defaults to 30.",
+            "required": false
+        },
+        {
+            "name": "gap_min_interval_seconds",
+            "example": "120",
+            "description": "Shortest time between consecutive outage starts in seconds. Must be at least gap_max_duration_seconds. Defaults to 120.",
+            "required": false
+        },
+        {
+            "name": "gap_max_interval_seconds",
+            "example": "240",
+            "description": "Longest time between consecutive outage starts in seconds. Defaults to 240.",
+            "required": false
+        },
+        {
+            "name": "gap_seed",
+            "example": "123",
+            "description": "Optional integer seed for reproducible gap timing.",
+            "required": false
+        },
+        {
             "name": "target_database",
             "example": "my_db",
             "description": "Optional target database. If omitted, writes to the trigger's database.",
@@ -181,6 +217,11 @@ DEFAULT_WAVEFORMS = [
 DEFAULT_JITTER_INTERVAL_FRACTION = 0.10
 MIN_JITTER_GAP_SECONDS = 1e-6
 
+DEFAULT_GAP_MIN_DURATION_SECONDS = 10.0
+DEFAULT_GAP_MAX_DURATION_SECONDS = 30.0
+DEFAULT_GAP_MIN_INTERVAL_SECONDS = 120.0
+DEFAULT_GAP_MAX_INTERVAL_SECONDS = 240.0
+
 
 # ---------------------------------------------------------------------------
 # Config parsing
@@ -306,6 +347,101 @@ def parse_jitter_config(args, points_per_second):
     return ((amplitude, seed), None)
 
 
+def _parse_bool(raw):
+    """Parse a boolean trigger argument. Returns None on error."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered == "true":
+            return True
+        if lowered == "false":
+            return False
+    return None
+
+
+def parse_gap_config(args):
+    """Parse simulated gap config from trigger args.
+    Returns (config_dict, None) on success, or (None, error_message) on error.
+    All provided arguments are validated even when gaps are disabled."""
+    if args is None:
+        args = {}
+
+    raw_enabled = args.get("gap_enabled")
+    if raw_enabled is None:
+        enabled = True
+    else:
+        enabled = _parse_bool(raw_enabled)
+        if enabled is None:
+            return (None, "Invalid gap config: gap_enabled must be 'true' or 'false'")
+
+    bounds = {}
+    for name, default in (
+        ("gap_min_duration_seconds", DEFAULT_GAP_MIN_DURATION_SECONDS),
+        ("gap_max_duration_seconds", DEFAULT_GAP_MAX_DURATION_SECONDS),
+        ("gap_min_interval_seconds", DEFAULT_GAP_MIN_INTERVAL_SECONDS),
+        ("gap_max_interval_seconds", DEFAULT_GAP_MAX_INTERVAL_SECONDS),
+    ):
+        raw = args.get(name)
+        if raw is None:
+            bounds[name] = default
+            continue
+        try:
+            value = float(raw)
+        except (ValueError, TypeError):
+            return (None, f"Invalid gap config: {name} must be a float")
+        if not math.isfinite(value):
+            return (None, f"Invalid gap config: {name} must be finite")
+        bounds[name] = value
+
+    min_duration = bounds["gap_min_duration_seconds"]
+    max_duration = bounds["gap_max_duration_seconds"]
+    min_interval = bounds["gap_min_interval_seconds"]
+    max_interval = bounds["gap_max_interval_seconds"]
+
+    if min_duration < 0:
+        return (None, "Invalid gap config: gap_min_duration_seconds must be >= 0")
+    if max_duration < min_duration:
+        return (None, "Invalid gap config: gap_max_duration_seconds must be >= gap_min_duration_seconds")
+    if min_interval <= 0:
+        return (None, "Invalid gap config: gap_min_interval_seconds must be > 0")
+    if max_interval < min_interval:
+        return (None, "Invalid gap config: gap_max_interval_seconds must be >= gap_min_interval_seconds")
+    if min_interval < max_duration:
+        return (
+            None,
+            f"Invalid gap config: gap_min_interval_seconds ({min_interval}s) must be >= "
+            f"gap_max_duration_seconds ({max_duration}s) so outages cannot overlap",
+        )
+
+    raw_seed = args.get("gap_seed")
+    if raw_seed is None:
+        seed = None
+    else:
+        try:
+            if isinstance(raw_seed, bool):
+                raise ValueError
+            if isinstance(raw_seed, float) and not raw_seed.is_integer():
+                raise ValueError
+            seed = int(raw_seed)
+        except (ValueError, TypeError):
+            return (None, "Invalid gap config: gap_seed must be an integer")
+
+    return (
+        {
+            "enabled": enabled,
+            "min_duration": min_duration,
+            "max_duration": max_duration,
+            "min_interval": min_interval,
+            "max_interval": max_interval,
+            "pitch": (min_interval + max_interval) / 2,
+            "offset": (max_interval - min_interval) / 4,
+            "seed": seed,
+        },
+        None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Time series generation
 # ---------------------------------------------------------------------------
@@ -354,6 +490,77 @@ def apply_timestamp_jitter(points, amplitude_seconds, seed=None):
         rng = _rng_for_timestamp(seed, t)
         jittered.append((t + rng.uniform(-amplitude_seconds, amplitude_seconds), value))
     return jittered
+
+
+# ---------------------------------------------------------------------------
+# Simulated gaps (see GAP_DESIGN.md)
+# ---------------------------------------------------------------------------
+
+def _rng_for_gap_index(seed, n):
+    payload = f"{seed}:gap:{n}".encode("ascii")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return random.Random(int.from_bytes(digest, "big"))
+
+
+def gap_window(gap_config, n):
+    """Gap n's half-open [start, end) window in epoch seconds.
+    The draw order (start offset, then duration) and the payload format in
+    _rng_for_gap_index are a reproducibility contract: changing either
+    reshuffles every seeded schedule."""
+    rng = _rng_for_gap_index(gap_config["seed"], n)
+    start = n * gap_config["pitch"] + rng.uniform(-gap_config["offset"], gap_config["offset"])
+    duration = rng.uniform(gap_config["min_duration"], gap_config["max_duration"])
+    return (start, start + duration)
+
+
+def in_gap(gap_config, t, window_cache=None):
+    """Return True if timestamp t falls inside a gap window.
+    Under the min_interval >= max_duration validation rule, only two gap
+    indices can contain t, so this is O(1)."""
+    n_hi = int((t + gap_config["offset"]) // gap_config["pitch"])
+    for n in (n_hi, n_hi - 1):
+        if n < 0:
+            continue
+        if window_cache is None:
+            window = gap_window(gap_config, n)
+        else:
+            window = window_cache.get(n)
+            if window is None:
+                window = gap_window(gap_config, n)
+                window_cache[n] = window
+        start, end = window
+        if start <= t < end:
+            return True
+    return False
+
+
+def apply_gaps(points, gap_config):
+    """Remove points whose final timestamp falls inside a gap window.
+    Returns (kept_points, removed_count, gap_window_count) where
+    gap_window_count is the number of gap windows intersecting the time span
+    of the given points."""
+    if not points:
+        return ([], 0, 0)
+
+    window_cache = {}
+    kept = [p for p in points if not in_gap(gap_config, p[0], window_cache)]
+    removed = len(points) - len(kept)
+
+    timestamps = [t for t, _ in points]
+    t_min, t_max = min(timestamps), max(timestamps)
+    pitch = gap_config["pitch"]
+    offset = gap_config["offset"]
+    n_lo = int((t_min - offset - gap_config["max_duration"]) // pitch)
+    n_hi = int((t_max + offset) // pitch)
+    gap_window_count = 0
+    for n in range(max(0, n_lo), n_hi + 1):
+        window = window_cache.get(n)
+        if window is None:
+            window = gap_window(gap_config, n)
+        start, end = window
+        if start <= t_max and end > t_min:
+            gap_window_count += 1
+    return (kept, removed, gap_window_count)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +633,7 @@ def write_points(influxdb3_local, points, measurement, field, tags, target_datab
 # ---------------------------------------------------------------------------
 
 CACHE_KEY = "signal_gen:last_time"
+GAP_SEED_CACHE_KEY = "signal_gen:gap_seed"
 
 
 def get_last_time(cache):
@@ -434,6 +642,20 @@ def get_last_time(cache):
 
 def set_last_time(cache, t):
     cache.put(CACHE_KEY, t)
+
+
+def resolve_gap_seed(cache, configured_seed):
+    """Return the gap seed: the configured value, else the cached auto-seed,
+    else a newly generated auto-seed persisted to the cache. Cache loss means
+    a new schedule (documented in GAP_DESIGN.md)."""
+    if configured_seed is not None:
+        return configured_seed
+    cached = cache.get(GAP_SEED_CACHE_KEY)
+    if cached is not None:
+        return int(cached)
+    seed = random.getrandbits(63)
+    cache.put(GAP_SEED_CACHE_KEY, seed)
+    return seed
 
 
 # ---------------------------------------------------------------------------
@@ -468,10 +690,17 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
         influxdb3_local.error(f"[{task_id}] {jitter_error}")
         return
 
+    gap_config, gap_error = parse_gap_config(args)
+    if gap_config is None:
+        influxdb3_local.error(f"[{task_id}] {gap_error}")
+        return
+
     # --- Check cache for last execution time ---
     last_time = get_last_time(influxdb3_local.cache)
     if last_time is None:
         influxdb3_local.info(f"[{task_id}] Signal generator initializing, first data on next execution")
+        if gap_config["enabled"]:
+            resolve_gap_seed(influxdb3_local.cache, gap_config["seed"])
         set_last_time(influxdb3_local.cache, now)
         return
 
@@ -488,9 +717,22 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
     jitter_amplitude_seconds, jitter_seed = jitter_config
     points = apply_timestamp_jitter(points, jitter_amplitude_seconds, jitter_seed)
 
+    generated = len(points)
+    removed = 0
+    gap_window_count = 0
+    if gap_config["enabled"]:
+        gap_config["seed"] = resolve_gap_seed(influxdb3_local.cache, gap_config["seed"])
+        points, removed, gap_window_count = apply_gaps(points, gap_config)
+
     try:
         written = write_points(influxdb3_local, points, measurement, field, tags, target_database)
-        influxdb3_local.info(f"[{task_id}] Wrote {written} points to {measurement}.{field}")
+        if removed:
+            influxdb3_local.info(
+                f"[{task_id}] Wrote {written} points to {measurement}.{field} "
+                f"({generated} generated, {removed} removed by {gap_window_count} gap windows)"
+            )
+        else:
+            influxdb3_local.info(f"[{task_id}] Wrote {written} points to {measurement}.{field}")
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Batch write failed: {e}")
 

@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "kafka_subscriber"
 version = "0.4.0"
-description = "Enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and transform messages into time-series data with support for JSON, Line Protocol, custom text, Schema Registry binary formats (Avro, JSON Schema), and Protobuf via local .proto schemas."
+description = "Ingests Kafka messages into InfluxDB 3 with JSON, Line Protocol, text, Avro, JSON Schema, and Protobuf decoding, plus Schema Registry and local schema support."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/kafka_subscriber"

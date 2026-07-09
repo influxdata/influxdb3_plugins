@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "signal_generator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generates configurable waveform-based time-series data on a schedule for demos, testing, dashboards, alerts, and downstream plugin validation without requiring an external data source."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

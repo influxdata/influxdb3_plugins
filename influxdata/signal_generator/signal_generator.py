@@ -33,6 +33,18 @@
             "required": false
         },
         {
+            "name": "jitter_amplitude_seconds",
+            "example": "0.2",
+            "description": "Maximum timestamp offset in seconds. Defaults to 10% of the point interval. Set to 0 to disable timestamp jitter.",
+            "required": false
+        },
+        {
+            "name": "jitter_seed",
+            "example": "42",
+            "description": "Optional integer seed for reproducible per-timestamp jitter.",
+            "required": false
+        },
+        {
             "name": "target_database",
             "example": "my_db",
             "description": "Optional target database. If omitted, writes to the trigger's database.",
@@ -42,8 +54,9 @@
 }
 """
 
-import math
+import hashlib
 import json
+import math
 import random
 import uuid
 from typing import Iterable, Optional, Protocol, runtime_checkable
@@ -165,6 +178,9 @@ DEFAULT_WAVEFORMS = [
     {"type": "spike", "probability": 0.005, "min_amplitude": 8.0, "max_amplitude": 15.0},
 ]
 
+DEFAULT_JITTER_INTERVAL_FRACTION = 0.10
+MIN_JITTER_GAP_SECONDS = 1e-6
+
 
 # ---------------------------------------------------------------------------
 # Config parsing
@@ -240,9 +256,54 @@ def parse_points_per_second(args):
         value = float(raw)
     except (ValueError, TypeError):
         return None
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         return None
     return value
+
+
+def parse_jitter_config(args, points_per_second):
+    """Parse timestamp jitter config from trigger args.
+    Returns ((amplitude_seconds, seed), None) on success,
+    or (None, error_message) on error.
+    """
+    if args is None:
+        args = {}
+
+    interval = 1.0 / points_per_second
+    raw_amplitude = args.get("jitter_amplitude_seconds")
+    if raw_amplitude is None:
+        amplitude = DEFAULT_JITTER_INTERVAL_FRACTION * interval
+    else:
+        try:
+            amplitude = float(raw_amplitude)
+        except (ValueError, TypeError):
+            return (None, "Invalid jitter config: jitter_amplitude_seconds must be a float")
+
+    if not math.isfinite(amplitude) or amplitude < 0:
+        return (None, f"Invalid jitter config: amplitude {amplitude}s must be finite and >= 0")
+
+    raw_seed = args.get("jitter_seed")
+    if raw_seed is None:
+        seed = None
+    else:
+        try:
+            if isinstance(raw_seed, bool):
+                raise ValueError
+            if isinstance(raw_seed, float) and not raw_seed.is_integer():
+                raise ValueError
+            seed = int(raw_seed)
+        except (ValueError, TypeError):
+            return (None, "Invalid jitter config: jitter_seed must be an integer")
+
+    if interval - (2 * amplitude) < MIN_JITTER_GAP_SECONDS:
+        return (
+            None,
+            f"Invalid jitter config: amplitude {amplitude}s must satisfy "
+            f"interval ({interval}s) - 2*amplitude >= 1us; reduce "
+            f"jitter_amplitude_seconds or points_per_second",
+        )
+
+    return ((amplitude, seed), None)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +328,32 @@ def generate_signal(waveform_fn, timestamps):
     Returns a list of (timestamp, value) tuples.
     """
     return [(t, waveform_fn(t)) for t in timestamps]
+
+
+def _rng_for_timestamp(seed, timestamp):
+    timestamp_ns = int(round(timestamp * 1_000_000_000))
+    payload = f"{seed}:{timestamp_ns}".encode("ascii")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    return random.Random(int.from_bytes(digest, "big"))
+
+
+def apply_timestamp_jitter(points, amplitude_seconds, seed=None):
+    """Apply independent timestamp offsets to points without changing values."""
+    if amplitude_seconds == 0:
+        return list(points)
+
+    if seed is None:
+        rng = random.Random()
+        return [
+            (t + rng.uniform(-amplitude_seconds, amplitude_seconds), value)
+            for t, value in points
+        ]
+
+    jittered = []
+    for t, value in points:
+        rng = _rng_for_timestamp(seed, t)
+        jittered.append((t + rng.uniform(-amplitude_seconds, amplitude_seconds), value))
+    return jittered
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +463,11 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
         influxdb3_local.error(f"[{task_id}] Failed to parse points_per_second")
         return
 
+    jitter_config, jitter_error = parse_jitter_config(args, pps)
+    if jitter_config is None:
+        influxdb3_local.error(f"[{task_id}] {jitter_error}")
+        return
+
     # --- Check cache for last execution time ---
     last_time = get_last_time(influxdb3_local.cache)
     if last_time is None:
@@ -393,6 +485,8 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
         return
 
     points = generate_signal(combined, timestamps)
+    jitter_amplitude_seconds, jitter_seed = jitter_config
+    points = apply_timestamp_jitter(points, jitter_amplitude_seconds, jitter_seed)
 
     try:
         written = write_points(influxdb3_local, points, measurement, field, tags, target_database)

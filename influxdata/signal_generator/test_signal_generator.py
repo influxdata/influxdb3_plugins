@@ -474,6 +474,73 @@ def test_parse_points_per_second_negative():
     assert result is None
 
 
+def test_parse_points_per_second_nan():
+    from signal_generator import parse_points_per_second
+    result = parse_points_per_second({"points_per_second": "nan"})
+    assert result is None
+
+
+def test_parse_jitter_config_default():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config(None, points_per_second=2.0)
+    assert error is None
+    amplitude, seed = config
+    assert abs(amplitude - 0.05) < 1e-12
+    assert seed is None
+
+
+def test_parse_jitter_config_custom():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config(
+        {"jitter_amplitude_seconds": "0.2", "jitter_seed": "42"},
+        points_per_second=1.0,
+    )
+    assert error is None
+    assert config == (0.2, 42)
+
+
+def test_parse_jitter_config_zero_disables_jitter():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config({"jitter_amplitude_seconds": "0"}, points_per_second=1.0)
+    assert error is None
+    assert config == (0.0, None)
+
+
+def test_parse_jitter_config_negative_amplitude():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config({"jitter_amplitude_seconds": "-0.1"}, points_per_second=1.0)
+    assert config is None
+    assert "Invalid jitter config" in error
+
+
+def test_parse_jitter_config_non_numeric_amplitude():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config({"jitter_amplitude_seconds": "abc"}, points_per_second=1.0)
+    assert config is None
+    assert "Invalid jitter config" in error
+
+
+def test_parse_jitter_config_nan_amplitude():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config({"jitter_amplitude_seconds": "nan"}, points_per_second=1.0)
+    assert config is None
+    assert "Invalid jitter config" in error
+
+
+def test_parse_jitter_config_non_integer_seed():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config({"jitter_seed": "1.5"}, points_per_second=1.0)
+    assert config is None
+    assert "Invalid jitter config" in error
+
+
+def test_parse_jitter_config_rejects_duplicate_timestamp_risk():
+    from signal_generator import parse_jitter_config
+    config, error = parse_jitter_config({"jitter_amplitude_seconds": "0.5"}, points_per_second=1.0)
+    assert config is None
+    assert "Invalid jitter config" in error
+
+
 # ---------------------------------------------------------------------------
 # Time series generation tests
 # ---------------------------------------------------------------------------
@@ -518,6 +585,59 @@ def test_generate_signal_empty():
     fn = make_constant(1.0)
     points = generate_signal(fn, [])
     assert points == []
+
+
+def test_apply_timestamp_jitter_seeded_exact_offsets():
+    from signal_generator import apply_timestamp_jitter
+    points = [(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]
+    jittered = apply_timestamp_jitter(points, 0.1, seed=7)
+    expected_timestamps = [
+        0.9814723333052915,
+        2.031738647558769,
+        3.047601008781658,
+    ]
+    assert [value for _, value in jittered] == [10.0, 20.0, 30.0]
+    for (timestamp, _), expected in zip(jittered, expected_timestamps):
+        assert abs(timestamp - expected) < 1e-12
+
+
+def test_apply_timestamp_jitter_seeded_independent_of_batching():
+    from signal_generator import apply_timestamp_jitter
+    points = [(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]
+    batched = apply_timestamp_jitter(points, 0.1, seed=7)
+    individual = [
+        apply_timestamp_jitter([point], 0.1, seed=7)[0]
+        for point in points
+    ]
+    assert batched == individual
+
+
+def test_apply_timestamp_jitter_seeded_single_point_calls_vary_by_timestamp():
+    from signal_generator import apply_timestamp_jitter
+    points = [(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]
+    offsets = [
+        apply_timestamp_jitter([point], 0.1, seed=7)[0][0] - point[0]
+        for point in points
+    ]
+    assert len(set(offsets)) == len(offsets)
+
+
+def test_apply_timestamp_jitter_zero_is_identical():
+    from signal_generator import apply_timestamp_jitter
+    points = [(1.0, 10.0), (2.0, 20.0)]
+    assert apply_timestamp_jitter(points, 0.0, seed=7) == points
+
+
+def test_apply_timestamp_jitter_preserves_strict_order_for_valid_config():
+    from signal_generator import apply_timestamp_jitter, generate_timestamps
+    timestamps = generate_timestamps(0.0, 10.0, 1.0)
+    points = [(t, t * 2) for t in timestamps]
+    jittered = apply_timestamp_jitter(points, 0.1, seed=99)
+    jittered_timestamps = [timestamp for timestamp, _ in jittered]
+    assert all(
+        earlier < later
+        for earlier, later in zip(jittered_timestamps, jittered_timestamps[1:])
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +727,17 @@ def count_written_points(mock):
     return total
 
 
+def written_timestamps_ns(mock):
+    timestamps = []
+    for batch in mock.written_lines:
+        lines = batch.build().split("\n")
+        timestamps.extend(int(line.rsplit(" ", 1)[1]) for line in lines)
+    for _, batch in mock.written_to_db:
+        lines = batch.build().split("\n")
+        timestamps.extend(int(line.rsplit(" ", 1)[1]) for line in lines)
+    return timestamps
+
+
 def test_process_scheduled_call_first_run(monkeypatch):
     import signal_generator
     monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
@@ -690,3 +821,110 @@ def test_process_scheduled_call_updates_cache(monkeypatch):
     cached_after_second = mock.cache.get("signal_gen:last_time")
     # Cache should be updated to second call time
     assert cached_after_second > cached_after_first
+
+
+def test_process_scheduled_call_jitter_zero_keeps_regular_timestamps(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    args = {
+        "waveforms": '[{"type":"constant","value":1.0}]',
+        "jitter_amplitude_seconds": "0",
+    }
+    first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+    process_scheduled_call(mock, first_time, args)
+    second_time = datetime(2026, 4, 10, 12, 0, 3, tzinfo=timezone.utc)
+    process_scheduled_call(mock, second_time, args)
+    base_ns = int(first_time.timestamp() * 1_000_000_000)
+    assert written_timestamps_ns(mock) == [
+        base_ns + 1_000_000_000,
+        base_ns + 2_000_000_000,
+        base_ns + 3_000_000_000,
+    ]
+
+
+def test_process_scheduled_call_seeded_jitter_offsets_timestamps(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    args = {
+        "waveforms": '[{"type":"constant","value":1.0}]',
+        "jitter_amplitude_seconds": "0.1",
+        "jitter_seed": "7",
+    }
+    first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+    process_scheduled_call(mock, first_time, args)
+    second_time = datetime(2026, 4, 10, 12, 0, 3, tzinfo=timezone.utc)
+    process_scheduled_call(mock, second_time, args)
+    assert written_timestamps_ns(mock) == [
+        1775822401062348800,
+        1775822402047160576,
+        1775822403008397312,
+    ]
+
+
+def test_process_scheduled_call_seeded_jitter_varies_across_one_point_calls(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    args = {
+        "waveforms": '[{"type":"constant","value":1.0}]',
+        "jitter_amplitude_seconds": "0.1",
+        "jitter_seed": "7",
+    }
+    first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+    process_scheduled_call(mock, first_time, args)
+    for seconds in [1, 2, 3]:
+        process_scheduled_call(
+            mock,
+            datetime(2026, 4, 10, 12, 0, seconds, tzinfo=timezone.utc),
+            args,
+        )
+
+    timestamps = written_timestamps_ns(mock)
+    deltas = [
+        later - earlier
+        for earlier, later in zip(timestamps, timestamps[1:])
+    ]
+    assert deltas != [1_000_000_000, 1_000_000_000]
+
+
+def test_process_scheduled_call_invalid_jitter_logs_and_writes_nothing(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    args = {"jitter_amplitude_seconds": "0.5"}
+    call_time = datetime(2026, 4, 10, 12, 0, 0)
+    process_scheduled_call(mock, call_time, args)
+    assert len(mock.written_lines) == 0
+    assert mock.cache.get("signal_gen:last_time") is None
+    assert any("Invalid jitter config" in log for log in mock.logs["error"])
+
+
+def test_process_scheduled_call_default_jitter_offsets_timestamps(monkeypatch):
+    import signal_generator
+    monkeypatch.setattr(signal_generator, "LineBuilder", MockLineBuilder)
+    from signal_generator import process_scheduled_call
+    mock = MockInfluxDB3Local()
+    args = {"waveforms": '[{"type":"constant","value":1.0}]'}
+    first_time = datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc)
+    process_scheduled_call(mock, first_time, args)
+    second_time = datetime(2026, 4, 10, 12, 0, 3, tzinfo=timezone.utc)
+    process_scheduled_call(mock, second_time, args)
+
+    timestamps = written_timestamps_ns(mock)
+    assert len(timestamps) == 3
+    base_ns = int(first_time.timestamp() * 1_000_000_000)
+    nominal = [base_ns + i * 1_000_000_000 for i in (1, 2, 3)]
+    # Default amplitude is 10% of the 1s interval.
+    for timestamp, nominal_ns in zip(timestamps, nominal):
+        assert abs(timestamp - nominal_ns) <= 100_000_000
+    assert timestamps != nominal
+    assert all(
+        earlier < later
+        for earlier, later in zip(timestamps, timestamps[1:])
+    )

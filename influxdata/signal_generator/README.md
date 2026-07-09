@@ -9,6 +9,7 @@ The Signal Generator Plugin lets new users produce realistic time-series data fo
 - **Zero dependencies**: Uses Python standard library only — no packages to install
 - **Composable waveforms**: Mix sine, square, triangle, sawtooth, noise, and spike signals by stacking them
 - **Realistic signals**: Default preset produces a signal centered at 30 with a slow sine trend, Gaussian noise, and occasional large spikes — immediately useful for alert testing
+- **Timestamp jitter**: Offsets point timestamps by default to simulate sensors that do not sample at perfectly uniform intervals
 - **Gap-filling**: Generates continuous, gapless data between executions regardless of trigger schedule
 - **Flexible output**: Configure measurement name, field name, and custom tags per trigger
 
@@ -41,7 +42,22 @@ This plugin has no required parameters.
 | `field`            | string       | `value`          | Output field name.                                                                           |
 | `tags`             | JSON string  | *(none)*         | Optional JSON object of tags to add to each data point. Example: `{"host": "server01"}`.    |
 | `points_per_second`| float        | `1.0`            | Data point resolution in points per second. Controls how many points are generated per second of elapsed time. |
+| `jitter_amplitude_seconds` | float | 10% of point interval | Maximum timestamp offset in seconds. Set to `0` to disable timestamp jitter. |
+| `jitter_seed`      | integer      | *(none)*         | Optional seed for reproducible per-timestamp jitter, mainly useful for tests.              |
 | `target_database`  | string       | *(none)*         | Optional target database. If omitted, writes to the trigger's own database.                 |
+
+### Timestamp jitter
+
+Timestamp jitter is enabled by default. If `jitter_amplitude_seconds` is omitted, the plugin uses 10% of the point interval:
+
+```text
+point_interval_seconds = 1 / points_per_second
+default_jitter_amplitude_seconds = 0.10 * point_interval_seconds
+```
+
+Each generated timestamp receives an independent random offset from `[-jitter_amplitude_seconds, +jitter_amplitude_seconds]`. When `jitter_seed` is set, the offset is derived from the seed and the nominal timestamp, so each timestamp still gets its own offset even if scheduled executions generate one point at a time. Waveforms are still evaluated at the nominal cadence timestamps, then jitter is applied only to the timestamp that is written. With the same waveform seeds, jittered and non-jittered runs produce the same field values.
+
+Set `jitter_amplitude_seconds=0` to preserve perfectly regular timestamps. The plugin rejects jitter settings that could produce duplicate or reordered timestamps.
 
 ### Waveform types
 
@@ -124,7 +140,8 @@ curl -X POST "http://localhost:8181/api/v3/configure/processing_engine_trigger" 
     "trigger_arguments": {
       "waveforms": "[{\"type\":\"constant\",\"value\":30.0},{\"type\":\"sine\",\"frequency\":0.005,\"amplitude\":10.0},{\"type\":\"noise\",\"stddev\":0.5}]",
       "measurement": "signal",
-      "field": "value"
+      "field": "value",
+      "jitter_amplitude_seconds": "0.2"
     },
     "trigger_settings": {
       "run_async": false,
@@ -331,16 +348,17 @@ Example with `tags={"host": "server01", "region": "us-west"}`:
 
 **Timestamp:**
 
-- Nanosecond precision Unix epoch timestamps. Each point's timestamp reflects the exact simulated time, not the wall-clock time of the write.
+- Nanosecond precision Unix epoch timestamps. Each point's timestamp reflects simulated sample time, not the wall-clock time of the write.
+- Timestamp jitter is enabled by default, so adjacent timestamps are usually close to, but not exactly on, the nominal cadence grid. Set `jitter_amplitude_seconds=0` for regular intervals.
 
 ### Line protocol examples
 
 Without tags (default):
 
 ```
-signal value=32.47 1712678400000000000
-signal value=31.89 1712678401000000000
-signal value=33.21 1712678402000000000
+signal value=32.47 1712678399918245021
+signal value=31.89 1712678401084217139
+signal value=33.21 1712678401962364102
 ```
 
 With custom measurement, field, and tags:
@@ -410,13 +428,14 @@ Entry point for scheduled triggers. Orchestrates the full execution: parses conf
 
 Key operations:
 
-1. Parses waveform, output, and resolution configuration from trigger arguments
+1. Parses waveform, output, resolution, and timestamp jitter configuration from trigger arguments
 2. Reads `last_time` from the trigger-local cache
 3. On first run: stores current time and returns without writing (initialization)
 4. Generates timestamps in the half-open interval `(last_time, now]`
-5. Evaluates the combined waveform at each timestamp
-6. Writes all points using `write_sync` with `no_sync=True`
-7. Updates `last_time` in the cache
+5. Evaluates the combined waveform at each nominal timestamp
+6. Applies timestamp jitter without changing field values
+7. Writes all points using `write_sync` with `no_sync=True`
+8. Updates `last_time` in the cache
 
 #### Waveform factories
 
@@ -429,6 +448,10 @@ Composes a list of waveform functions by summing their outputs: `combined(t) = s
 #### `generate_timestamps(start, end, points_per_second)`
 
 Generates timestamps in the half-open interval `(start, end]`. The interval is exclusive of `start` to prevent duplicate points across consecutive executions.
+
+#### `apply_timestamp_jitter(points, amplitude_seconds, seed)`
+
+Offsets generated point timestamps after signal evaluation. Values are unchanged; only timestamps are moved.
 
 ## Troubleshooting
 
@@ -464,6 +487,12 @@ echo '[{"type": "sine"}, {"type": "noise"}]' | python3 -m json.tool
 **Cause**: The trigger fires more frequently than `1 / points_per_second` seconds, so no timestamps fall in the interval.
 
 **Solution**: Increase `points_per_second` to match your trigger frequency, or reduce trigger frequency. For example, if firing every 1 s with `points_per_second=1.0`, at least one point is generated per execution. If firing every 100ms, increase to `points_per_second=10.0`.
+
+#### Issue: Invalid jitter config in logs
+
+**Cause**: `jitter_amplitude_seconds` is negative, non-numeric, or too large for the configured `points_per_second`, or `jitter_seed` is not an integer.
+
+**Solution**: Reduce `jitter_amplitude_seconds`, reduce `points_per_second`, set `jitter_amplitude_seconds=0`, or use an integer `jitter_seed`. The plugin requires at least a 1 microsecond minimum gap between any two possible jittered timestamps.
 
 #### Issue: Write failures for individual points
 

@@ -52,12 +52,6 @@ batch_size = 2000
 excluded_fields = ["usage_idle", "usage_guest"]
 ```
 
-## Example plugin
-
-`examples/simple_downsampler/` is a scheduled plugin that exercises every module:
-config + validation, cached schema introspection, a windowed query, and
-batched/retried writes. See `examples/simple_downsampler/simple_downsampler.toml` for config.
-
 ## Write helpers
 
 `LineBuilder` is a runtime global injected into the plugin, so builders take the

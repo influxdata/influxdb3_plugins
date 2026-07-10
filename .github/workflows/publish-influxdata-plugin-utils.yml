@@ -3,7 +3,7 @@ name: Publish influxdata-plugin-utils
 on:
   push:
     tags:
-      - 'pkg-v*'
+      - 'utils-v*'
 
 concurrency:
   group: publish-influxdata-plugin-utils-${{ github.ref }}
@@ -15,21 +15,32 @@ permissions:
 env:
   PACKAGE_DIR: influxdata-plugin-utils
   PACKAGE_NAME: influxdata-plugin-utils
+  TAG_PREFIX: utils-v
 
 jobs:
+  test:
+    name: Test
+    uses: ./.github/workflows/test-influxdata-plugin-utils.yml
+    permissions:
+      contents: read
+
   build:
     name: Build distribution
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.x"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build twine packaging
 
       - name: Verify tag matches package version
         shell: bash
@@ -41,8 +52,10 @@ jobs:
           import sys
           from pathlib import Path
 
+          from packaging.version import InvalidVersion, Version
+
           tag = os.environ["GITHUB_REF_NAME"]
-          prefix = "pkg-v"
+          prefix = os.environ["TAG_PREFIX"]
           if not tag.startswith(prefix):
               print(f"Expected tag to start with {prefix!r}, got {tag!r}", file=sys.stderr)
               sys.exit(1)
@@ -60,7 +73,18 @@ jobs:
               if actual is not None:
                   break
 
-          if actual != expected:
+          if actual is None:
+              print(f"Could not find __version__ in {init_path}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              tag_version = Version(expected)
+              package_version = Version(actual)
+          except InvalidVersion as exc:
+              print(f"Invalid version: {exc}", file=sys.stderr)
+              sys.exit(1)
+
+          if tag_version != package_version:
               print(
                   f"Tag {tag!r} resolves to version {expected!r}, but package version is {actual!r}",
                   file=sys.stderr,
@@ -69,22 +93,19 @@ jobs:
           print(f"Publishing {os.environ['PACKAGE_NAME']} {actual}")
           PY
 
-      - name: Install build tooling
-        run: python -m pip install --upgrade build twine
-
       - name: Build wheel and source distribution
-        working-directory: influxdata-plugin-utils
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: python -m build
 
       - name: Check distribution metadata
-        working-directory: influxdata-plugin-utils
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: python -m twine check dist/*
 
       - name: Upload distribution artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: influxdata-plugin-utils-dist
-          path: influxdata-plugin-utils/dist/
+          name: ${{ env.PACKAGE_NAME }}-dist
+          path: ${{ env.PACKAGE_DIR }}/dist/
           if-no-files-found: error
 
   publish:
@@ -99,10 +120,10 @@ jobs:
       id-token: write
     steps:
       - name: Download distribution artifact
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           name: influxdata-plugin-utils-dist
           path: dist/
 
       - name: Publish distribution to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

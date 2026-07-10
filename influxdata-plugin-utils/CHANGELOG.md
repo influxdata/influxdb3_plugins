@@ -22,5 +22,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `write` — `build_line`, `build_line_typed`, `add_field_with_type`,
   `write_data` (batching + retry), `BatchLines`.
 
-[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/pkg-v0.1.0...HEAD
-[0.1.0]: https://github.com/influxdata/influxdb3_plugins/releases/tag/pkg-v0.1.0
+[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.1.0...HEAD
+[0.1.0]: https://github.com/influxdata/influxdb3_plugins/releases/tag/utils-v0.1.0

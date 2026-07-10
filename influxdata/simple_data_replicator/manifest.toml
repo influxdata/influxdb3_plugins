@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "simple_data_replicator"
 version = "0.1.0"
-description = "Replicates data from a local InfluxDB 3 Core/Enterprise instance to a remote InfluxDB 3 instance over HTTP, with table/field filtering and renaming. Supports scheduler and data write trigger modes, buffering data in a compressed queue with automatic retries."
+description = "Replicates data between InfluxDB 3 instances over HTTP with table and field filtering, renaming, scheduler/write triggers, and compressed retry queue buffering."
 triggers = ["process_writes", "process_scheduled_call"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/simple_data_replicator"

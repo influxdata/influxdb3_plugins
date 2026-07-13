@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "nori_regression"
+version = "0.1.0"
+description = "Predict a numeric InfluxDB 3 field from other columns with Synthefy's Nori in-context tabular regression model (via the Baseten gateway). Imputes rows where the target field is null."
+triggers = ["process_scheduled_call", "process_request"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/nori_regression"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/nori_regression/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!nori_regression.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["requests", "pandas", "numpy"]

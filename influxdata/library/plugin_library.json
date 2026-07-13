@@ -341,6 +341,17 @@
                 "trigger_types_supported": ["http"]
             },
             {
+                "name": "Nori Regression",
+                "path": "influxdata/nori_regression/nori_regression.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Predict a numeric field in an InfluxDB 3 measurement from other columns with Nori, Synthefy's in-context-learning tabular regression model, via the Baseten gateway. Trains on the rows where the target field is present and predicts (imputes) the rows where it is null, writing the predictions back to InfluxDB. Scheduled and HTTP triggers; the model gateway slug is configurable (synthefy/nori or synthefy/nori-30m).",
+                "author": "Synthefy",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/nori_regression/README.md",
+                "required_plugins": [],
+                "required_libraries": ["requests", "pandas", "numpy"],
+                "last_update": "2026-07-15",
+                "trigger_types_supported": ["scheduler", "http"]
+            },
+            {
                 "name": "SageMaker Inference",
                 "path": "influxdata/sagemaker/sagemaker.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Runs scheduled inference against Amazon SageMaker endpoints using recent InfluxDB 3 rows, supports multiple request and response shapes, and writes prediction results back to InfluxDB.",

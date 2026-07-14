@@ -1,0 +1,74 @@
+# Signal Filter Plugin Data Write Configuration Template
+# Copy this file to your PLUGIN_DIR (e.g., /plugins) and reference it with
+#   --trigger-arguments config_file_path=<relative_path>
+# Example: If the file is at /plugins/configs/signal_filter_config_data_writes.toml, use
+#   config_file_path=configs/signal_filter_config_data_writes.toml
+# This file supplies all parameters; it is mutually exclusive with inline
+# trigger arguments (passing both is rejected).
+
+########## Required Parameters ##########
+# Filter type: 'lowpass', 'highpass', 'bandpass', or 'bandstop'.
+filter_type = "lowpass"  # e.g., "lowpass", "bandpass"
+
+# Cutoff frequency in Hz. lowpass -> fc2 (or fc); highpass -> fc1 (or fc);
+# band filters -> fc1 and fc2 with fc1 < fc2. Required for preset design.
+fc2 = 5.0  # e.g., 5.0
+#fc1 = 1.0  # e.g., 1.0  (lower cutoff; required for highpass and band filters)
+
+########## Optional Parameters ##########
+# Table to filter. Omit to filter every table the trigger fires for.
+#input_measurement = "signal"  # e.g., "signal", "sensors"
+
+# Space-separated numeric fields to filter; each is filtered independently.
+input_fields = "value"  # e.g., "value", "temp humidity"
+
+# Space-separated tag columns defining a series. Omit to auto-detect
+# (all string-valued columns except 'time' and the input fields).
+#tag_keys = "host region"  # e.g., "host region"
+
+# 'preset' (SciPy-designed IIR) or 'manual' (supply 'sos' below).
+design_type = "preset"  # e.g., "preset", "manual"
+
+# Preset prototype: 'butter', 'cheby1', or 'bessel'.
+prototype = "butter"  # e.g., "butter", "cheby1", "bessel"
+
+# Filter order, 1-12. Band filters yield effective order 2N.
+order = 4  # e.g., 4
+
+# Passband ripple in dB (0.01-80). Required for 'cheby1' only.
+#ripple = 1.0  # e.g., 1.0
+
+# Bessel normalization: 'phase', 'delay', or 'mag'. Bessel only.
+#bessel_norm = "phase"  # e.g., "phase", "delay", "mag"
+
+# Manual second-order sections, JSON-style nested arrays [[b0,b1,b2,a0,a1,a2], ...].
+# Required when design_type = "manual".
+#sos = "[[0.2, 0.4, 0.2, 1.0, -0.4, 0.2]]"  # e.g., "[[0.2,0.4,0.2,1.0,-0.4,0.2]]"
+
+# Sample rate in Hz. Omit to infer per series from the data (frozen after
+# 8 observed inter-sample intervals).
+sample_rate = 10.0  # e.g., 10.0, 100.0
+
+# Initialize filter state from the first sample to suppress the startup transient.
+init_from_first_sample = true  # e.g., true, false
+
+# Database for the filtered output. Omit for the trigger's database.
+#output_target_database = "filtered_db"  # e.g., "filtered_db"
+
+# Measurement for the filtered output. Omit for the source measurement.
+#output_measurement = "signal_filtered"  # e.g., "signal_filtered"
+
+# Base name override for the output field (single input field only).
+#output_field = "smoothed"  # e.g., "smoothed"
+
+# Output field name = field_prefix + (output_field or source field) + field_suffix.
+#field_prefix = ""  # e.g., "flt_"
+field_suffix = "_filtered"  # e.g., "_filtered"
+
+###### Example: Create Trigger Using This Config ######
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --plugin-filename signal_filter.py \
+#   --trigger-spec "table:signal" \
+#   --trigger-arguments config_file_path=signal_filter_config_data_writes.toml \
+#   your_trigger_name

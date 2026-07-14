@@ -19,7 +19,7 @@ pip install -e influxdata-plugin-utils
 | Module          | What it provides                                                                                                            |
 |-----------------|-----------------------------------------------------------------------------------------------------------------------------|
 | `config`        | `load_plugin_config(args, validators)` (dynaconf-backed), `resolve_plugin_dir()`, `resolve_path()`, re-exported `Validator` |
-| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `query_window()`                                               |
+| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `query_window()` with optional `database=`                    |
 | `parsing`       | `parse_timedelta()`, `parse_timestamp_ns()`, `parse_int()`, `parse_bool()`, `parse_delimited_list()`, `parse_key_value()`   |
 | `cache`         | `cached(influxdb3_local, key, producer, ttl_seconds=3600)`                                                                  |
 | `write`         | `build_line()`, `build_line_typed()`, `add_field_with_type()`, `write_data()`, `BatchLines`                                 |
@@ -67,6 +67,27 @@ write_data(influxdb3_local, lines)            # batched + retried by default
 # write_data(influxdb3_local, lines, batch=False, retries=0)  # opt out
 # write_data(influxdb3_local, lines, database="other_db")     # another database
 # write_data(influxdb3_local, lines, no_sync=True)            # write_sync API (3.8+)
+```
+
+## Cross-database queries
+
+On InfluxDB versions that support processing-engine cross-database queries,
+the introspection helpers accept `database=` and pass it through to
+`influxdb3_local.query`.
+Cached schema results are separated per database.
+
+```python
+from influxdata_plugin_utils.introspection import get_field_names, query_window
+
+fields = get_field_names(influxdb3_local, "cpu", database="source_db")
+rows = query_window(
+    influxdb3_local,
+    "cpu",
+    start=start,
+    end=end,
+    columns=fields,
+    database="source_db",
+)
 ```
 
 ## License

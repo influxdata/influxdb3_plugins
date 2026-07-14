@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `write.write_data` — optional `database` parameter for writing to another
   database.
+- `introspection` — optional `database` parameter for schema helpers and
+  `query_window`.
 - `parsing.parse_timedelta` — `ms` (milliseconds) and `us` (microseconds)
   duration units.
 

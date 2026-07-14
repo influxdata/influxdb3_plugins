@@ -255,7 +255,7 @@
             {
                 "name": "Signal Filter",
                 "path": "influxdata/signal_filter/signal_filter.py",
-                "description": "[BETA] Requires InfluxDB 3.8.2+. Applies streaming digital IIR filters (Butterworth, Chebyshev I, Bessel; lowpass/highpass/bandpass/bandstop, or manual second-order sections) to numeric fields as they are written to InfluxDB 3.",
+                "description": "Applies streaming digital IIR filters to numeric fields",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/signal_filter/README.md",
                 "required_plugins": [],

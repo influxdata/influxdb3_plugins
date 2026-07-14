@@ -1,0 +1,179 @@
+name: Validate Registry Plugins
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - 'influxdata/**'
+      - '.github/workflows/publish-registry.yml'
+      - '.github/workflows/validate-registry-plugins.yml'
+      - '.github/plugin-sdk-version'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PLUGIN_ROOT: influxdata
+  SDK_REPO: influxdata/influxdb3-plugin-sdk
+  EXCLUDE_DIRS: "library"
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  changes:
+    # Runs on every pull request so the `result` job below always reports a
+    # status and can be marked required without blocking unrelated PRs.
+    name: Detect registry plugin changes
+    runs-on: ubuntu-latest
+    outputs:
+      validate: ${{ steps.filter.outputs.validate }}
+    steps:
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Filter changed paths
+        id: filter
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then
+            echo "validate=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Diff merge-base(base, head)..head so files changed on the base
+          # branch after the PR branched don't trigger validation.
+          changed=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
+
+          # Changes limited to excluded (non-plugin) directories don't need
+          # validation.
+          for ex in ${EXCLUDE_DIRS:-}; do
+            changed=$(printf '%s\n' "${changed}" | grep -v "^${PLUGIN_ROOT}/${ex}/" || true)
+          done
+
+          echo "Changed files considered:"
+          echo "${changed}"
+
+          if echo "${changed}" | grep -qE '^(influxdata/|\.github/(workflows/(publish-registry|validate-registry-plugins)\.yml|plugin-sdk-version)$)'; then
+            echo "validate=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "validate=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  validate:
+    name: Validate packageable plugins
+    needs: changes
+    if: needs.changes.outputs.validate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Resolve SDK version
+        shell: bash
+        run: echo "SDK_VERSION=$(cat .github/plugin-sdk-version)" >> "$GITHUB_ENV"
+
+      - name: Install influxdb3-plugin CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="influxdb3-plugin-x86_64-unknown-linux-gnu.tar.gz"
+          gh release download "$SDK_VERSION" \
+            --repo "$SDK_REPO" \
+            --pattern "$asset" \
+            --pattern "SHA256SUMS" \
+            --dir /tmp/sdk --clobber
+          (cd /tmp/sdk && grep " ${asset}\$" SHA256SUMS | sha256sum -c -)
+          install_dir="${RUNNER_TEMP}/bin"
+          mkdir -p "$install_dir"
+          tar xzf "/tmp/sdk/${asset}" -C "$install_dir" influxdb3-plugin
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "${install_dir}/influxdb3-plugin" --version
+
+      - name: Find packageable plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          if [ ! -d "$PLUGIN_ROOT" ]; then
+            echo "Plugin root does not exist: ${PLUGIN_ROOT}" >&2
+            exit 1
+          fi
+
+          read -ra excluded <<< "${EXCLUDE_DIRS:-}"
+
+          plugin_list="${RUNNER_TEMP}/plugin-directories.txt"
+          : > "$plugin_list"
+          for dir in "${PLUGIN_ROOT}"/*/; do
+            name="$(basename "$dir")"
+            skip=false
+            for ex in "${excluded[@]:-}"; do
+              if [ "$name" = "$ex" ]; then skip=true; break; fi
+            done
+            if [ "$skip" = true ]; then
+              echo "Excluding non-plugin directory: ${name}"
+              continue
+            fi
+            printf '%s\n' "$dir" >> "$plugin_list"
+          done
+
+          if [ -s "$plugin_list" ]; then
+            echo "Packageable plugin directories:"
+            cat "$plugin_list"
+          else
+            # An empty list means the discovery glob is broken, not that there
+            # is nothing to validate; fail rather than pass without validating.
+            echo "No packageable plugin directories found under ${PLUGIN_ROOT}." >&2
+            exit 1
+          fi
+
+      - name: Validate plugins
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          plugin_list="${RUNNER_TEMP}/plugin-directories.txt"
+          while IFS= read -r dir; do
+            [ -n "$dir" ] || continue
+            name="$(basename "$dir")"
+            log="${RUNNER_TEMP}/validate-${name}.log"
+
+            echo "Validating ${name}..."
+            if influxdb3-plugin validate "$dir" --output json >"$log" 2>&1; then
+              cat "$log"
+            else
+              echo "Validation failed for ${name}:" >&2
+              cat "$log" >&2
+              exit 1
+            fi
+          done < "$plugin_list"
+
+  result:
+    # Single stable check name for branch protection. Passes when registry
+    # plugin validation was skipped because no packageable plugin inputs changed.
+    name: registry-plugin-validate
+    needs: [changes, validate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        run: |
+          results="${{ join(needs.*.result, ' ') }}"
+          echo "Job results: ${results}"
+          for r in ${results}; do
+            if [ "${r}" = "failure" ] || [ "${r}" = "cancelled" ]; then
+              exit 1
+            fi
+          done

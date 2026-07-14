@@ -10,7 +10,8 @@ The Signal Generator Plugin lets new users produce realistic time-series data fo
 - **Composable waveforms**: Mix sine, square, triangle, sawtooth, noise, and spike signals by stacking them
 - **Realistic signals**: Default preset produces a signal centered at 30 with a slow sine trend, Gaussian noise, and occasional large spikes — immediately useful for alert testing
 - **Timestamp jitter**: Offsets point timestamps by default to simulate sensors that do not sample at perfectly uniform intervals
-- **Gap-filling**: Generates continuous, gapless data between executions regardless of trigger schedule
+- **Simulated gaps**: Simulates temporary data-source outages by default — bounded windows with no written points, useful for testing deadman alerts and gap handling. Set `gap_enabled=false` for continuous output
+- **Catch-up generation**: Generates data for the full span between executions regardless of trigger schedule — the only missing spans are the simulated gaps
 - **Flexible output**: Configure measurement name, field name, and custom tags per trigger
 
 ## Important CLI limitation
@@ -44,6 +45,12 @@ This plugin has no required parameters.
 | `points_per_second`| float        | `1.0`            | Data point resolution in points per second. Controls how many points are generated per second of elapsed time. |
 | `jitter_amplitude_seconds` | float | 10% of point interval | Maximum timestamp offset in seconds. Set to `0` to disable timestamp jitter. |
 | `jitter_seed`      | integer      | *(none)*         | Optional seed for reproducible per-timestamp jitter, mainly useful for tests.              |
+| `gap_enabled`      | boolean      | `true`           | Enables simulated data-source outage gaps. Set to `false` for continuous output.           |
+| `gap_min_duration_seconds` | float | `10.0`          | Shortest simulated outage duration, in seconds.                                            |
+| `gap_max_duration_seconds` | float | `30.0`          | Longest simulated outage duration, in seconds.                                             |
+| `gap_min_interval_seconds` | float | `120.0`         | Shortest time between consecutive outage starts, in seconds. Must be at least `gap_max_duration_seconds`. |
+| `gap_max_interval_seconds` | float | `240.0`         | Longest time between consecutive outage starts, in seconds.                                |
+| `gap_seed`         | integer      | *(none)*         | Optional seed for reproducible gap timing.                                                 |
 | `target_database`  | string       | *(none)*         | Optional target database. If omitted, writes to the trigger's own database.                 |
 
 ### Timestamp jitter
@@ -58,6 +65,28 @@ default_jitter_amplitude_seconds = 0.10 * point_interval_seconds
 Each generated timestamp receives an independent random offset from `[-jitter_amplitude_seconds, +jitter_amplitude_seconds]`. When `jitter_seed` is set, the offset is derived from the seed and the nominal timestamp, so each timestamp still gets its own offset even if scheduled executions generate one point at a time. Waveforms are still evaluated at the nominal cadence timestamps, then jitter is applied only to the timestamp that is written. With the same waveform seeds, jittered and non-jittered runs produce the same field values.
 
 Set `jitter_amplitude_seconds=0` to preserve perfectly regular timestamps. The plugin rejects jitter settings that could produce duplicate or reordered timestamps.
+
+### Simulated gaps
+
+Simulated gaps are enabled by default. The plugin periodically simulates a data-source outage: points whose final (jittered) timestamps fall inside an outage window are not written, leaving realistic missing spans in the output.
+
+With the default configuration, each outage lasts 10–30 seconds, consecutive outages start 2–4 minutes apart, and about 11% of generated points are removed. The min/max bounds are hard guarantees:
+
+- Every outage duration lies in `[gap_min_duration_seconds, gap_max_duration_seconds]`.
+- The time between consecutive outage starts lies in `[gap_min_interval_seconds, gap_max_interval_seconds]`.
+- At least `gap_min_interval_seconds - gap_max_duration_seconds` seconds of continuous data separate consecutive outages (90 seconds at defaults).
+
+Gap windows are anchored to absolute time, so the same outage pattern is produced whether each scheduled execution writes one point or thousands, and catch-up after downtime contains the same gaps an uninterrupted run would have. When `gap_seed` is set, gap timing is fully reproducible. When omitted, the plugin generates a seed during first-run initialization and caches it, so the schedule stays coherent across executions; a restart that clears the trigger cache starts a new schedule.
+
+Missing spans are never backfilled: the generation boundary advances even when every point in a window was removed. Runs that removed points log a summary, for example:
+
+```text
+Wrote 585 points to signal.value (600 generated, 15 removed by 1 gap windows)
+```
+
+Set `gap_enabled=false` to disable simulated gaps entirely.
+
+**Upgrade note:** existing triggers pick up default gaps on upgrade with no configuration change. Downstream demos that use deadman or no-data alerts will begin firing on the simulated outages — useful for exercising those alerts, but set `gap_enabled=false` if you need continuous data.
 
 ### Waveform types
 
@@ -350,6 +379,7 @@ Example with `tags={"host": "server01", "region": "us-west"}`:
 
 - Nanosecond precision Unix epoch timestamps. Each point's timestamp reflects simulated sample time, not the wall-clock time of the write.
 - Timestamp jitter is enabled by default, so adjacent timestamps are usually close to, but not exactly on, the nominal cadence grid. Set `jitter_amplitude_seconds=0` for regular intervals.
+- Simulated gaps are enabled by default, so output contains periodic missing spans of 10–30 seconds. Set `gap_enabled=false` for continuous data.
 
 ### Line protocol examples
 
@@ -428,14 +458,15 @@ Entry point for scheduled triggers. Orchestrates the full execution: parses conf
 
 Key operations:
 
-1. Parses waveform, output, resolution, and timestamp jitter configuration from trigger arguments
+1. Parses waveform, output, resolution, timestamp jitter, and gap configuration from trigger arguments
 2. Reads `last_time` from the trigger-local cache
-3. On first run: stores current time and returns without writing (initialization)
+3. On first run: stores current time (and the auto-generated gap seed when gaps are enabled and unseeded) and returns without writing (initialization)
 4. Generates timestamps in the half-open interval `(last_time, now]`
 5. Evaluates the combined waveform at each nominal timestamp
 6. Applies timestamp jitter without changing field values
-7. Writes all points using `write_sync` with `no_sync=True`
-8. Updates `last_time` in the cache
+7. Removes points whose final timestamps fall inside simulated gap windows (see [Simulated gaps](#simulated-gaps))
+8. Writes the remaining points using `write_sync` with `no_sync=True`
+9. Updates `last_time` in the cache
 
 #### Waveform factories
 
@@ -452,6 +483,10 @@ Generates timestamps in the half-open interval `(start, end]`. The interval is e
 #### `apply_timestamp_jitter(points, amplitude_seconds, seed)`
 
 Offsets generated point timestamps after signal evaluation. Values are unchanged; only timestamps are moved.
+
+#### `gap_window(gap_config, n)` / `in_gap(gap_config, t)` / `apply_gaps(points, gap_config)`
+
+Implements the simulated gap schedule: absolute time is divided into fixed strata, and stratum `n` contains one gap whose start offset and duration are derived from a `blake2b` hash of `(seed, n)`. Every window is a pure function of seed, configuration, and gap index, so results are identical regardless of how many points each scheduled call generates. `apply_gaps` filters final (jittered) timestamps and reports how many points were removed. See `GAP_DESIGN.md` for the full design.
 
 ## Troubleshooting
 
@@ -482,6 +517,12 @@ Look for a log entry containing `"Signal generator initializing"` — this confi
 echo '[{"type": "sine"}, {"type": "noise"}]' | python3 -m json.tool
 ```
 
+#### Issue: Missing spans in query results
+
+**Cause**: Simulated gaps are enabled by default. The plugin periodically simulates a data-source outage and writes no points inside the outage window.
+
+**Solution**: This is expected behavior. To confirm a missing span is a simulated gap rather than a real failure, check the logs — runs that removed points report `... (N generated, M removed by K gap windows)`. Set `gap_enabled=false` in the trigger arguments for continuous output.
+
 #### Issue: No points generated (interval too short)
 
 **Cause**: The trigger fires more frequently than `1 / points_per_second` seconds, so no timestamps fall in the interval.
@@ -510,7 +551,7 @@ influxdb3 query \
 
 **Cause**: Deterministic waveforms (sine, square, triangle, sawtooth) are anchored to absolute Unix time, so they are always at the correct phase for a given wall-clock time. If the signal appears discontinuous, check that the `frequency` parameter is the same before and after the restart.
 
-**Cause of gaps in data**: If the trigger was disabled or InfluxDB was stopped, the cache retains `last_time` from the last successful execution. On restart, the plugin generates all missing points from `last_time` to the current time, filling the gap automatically.
+**Cause of gaps in data**: Short gaps (10–30 seconds by default) are simulated outages; see [Simulated gaps](#simulated-gaps). For downtime-related gaps: if the trigger was disabled or InfluxDB was stopped, the cache retains `last_time` from the last successful execution, and on restart the plugin generates all missing points from `last_time` to the current time — the caught-up span contains the same simulated gap windows an uninterrupted run would have.
 
 ### Viewing logs
 

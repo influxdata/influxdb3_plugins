@@ -244,12 +244,12 @@
             {
                 "name": "Signal Generator",
                 "path": "influxdata/signal_generator/signal_generator.py",
-                "description": "[BETA] Requires InfluxDB 3.8.2+. Generates configurable waveform-based time-series data on a schedule for demos, testing, dashboards, alerts, and downstream plugin validation without requiring an external data source.",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Generates configurable waveform-based time-series data on a schedule for demos, testing, dashboards, alerts, and downstream plugin validation without requiring an external data source. Simulates data-source outage gaps by default.",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/signal_generator/README.md",
                 "required_plugins": [],
                 "required_libraries": [],
-                "last_update": "2026-05-15",
+                "last_update": "2026-07-09",
                 "trigger_types_supported": ["scheduler"]
             },
             {

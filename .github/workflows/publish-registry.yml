@@ -17,7 +17,7 @@ env:
   PLUGIN_ROOT: influxdata
   REGISTRY_RELEASE: registry
   SDK_REPO: influxdata/influxdb3-plugin-sdk
-  SDK_VERSION: v0.5.0
+  SDK_VERSION: v0.6.0
   EXCLUDE_DIRS: "library"
   GH_TOKEN: ${{ github.token }}
 

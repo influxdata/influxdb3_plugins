@@ -2,6 +2,8 @@
 
 Each helper takes ``influxdb3_local`` explicitly and may optionally use the
 TTL cache. Queries mirror the patterns already used across the plugins.
+Helpers accept an optional ``database`` argument for engines that support
+cross-database plugin queries.
 """
 
 from .cache import cached
@@ -22,13 +24,40 @@ def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
+def _query(
+    influxdb3_local,
+    query: str,
+    args: dict | None = None,
+    database: str | None = None,
+):
+    """Run a plugin query, preserving the old call shape when no database is set."""
+    if database is None:
+        if args is None:
+            return influxdb3_local.query(query)
+        return influxdb3_local.query(query, args)
+    if args is None:
+        return influxdb3_local.query(query, database=database)
+    return influxdb3_local.query(query, args, database=database)
+
+
+def _cache_key(base: str, database: str | None) -> str:
+    """Return a cache key, keeping existing default-database keys unchanged."""
+    if database is None:
+        return base
+    return f"{base}:database:{database}"
+
+
 def get_table_names(
-    influxdb3_local, *, use_cache: bool = True, ttl_seconds: int = 3600
+    influxdb3_local,
+    *,
+    database: str | None = None,
+    use_cache: bool = True,
+    ttl_seconds: int = 3600,
 ) -> list[str]:
     """Return base table names via ``SHOW TABLES``."""
 
     def producer() -> list[str]:
-        rows = influxdb3_local.query("SHOW TABLES")
+        rows = _query(influxdb3_local, "SHOW TABLES", database=database)
         return [
             row["table_name"]
             for row in rows
@@ -36,12 +65,22 @@ def get_table_names(
         ]
 
     if use_cache:
-        return cached(influxdb3_local, "shared:tables", producer, ttl_seconds=ttl_seconds)
+        return cached(
+            influxdb3_local,
+            _cache_key("shared:tables", database),
+            producer,
+            ttl_seconds=ttl_seconds,
+        )
     return producer()
 
 
 def get_tag_names(
-    influxdb3_local, table: str, *, use_cache: bool = True, ttl_seconds: int = 3600
+    influxdb3_local,
+    table: str,
+    *,
+    database: str | None = None,
+    use_cache: bool = True,
+    ttl_seconds: int = 3600,
 ) -> list[str]:
     """Return tag column names of a table (``Dictionary(Int32, Utf8)`` columns)."""
 
@@ -50,14 +89,20 @@ def get_tag_names(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = $table AND data_type = $data_type"
         )
-        rows = influxdb3_local.query(
-            query, {"table": table, "data_type": _TAG_DATA_TYPE}
+        rows = _query(
+            influxdb3_local,
+            query,
+            {"table": table, "data_type": _TAG_DATA_TYPE},
+            database=database,
         )
         return [row["column_name"] for row in rows]
 
     if use_cache:
         return cached(
-            influxdb3_local, f"shared:tags:{table}", producer, ttl_seconds=ttl_seconds
+            influxdb3_local,
+            _cache_key(f"shared:tags:{table}", database),
+            producer,
+            ttl_seconds=ttl_seconds,
         )
     return producer()
 
@@ -67,6 +112,7 @@ def get_field_names(
     table: str,
     *,
     numeric_only: bool = False,
+    database: str | None = None,
     use_cache: bool = True,
     ttl_seconds: int = 3600,
 ) -> list[str]:
@@ -80,7 +126,7 @@ def get_field_names(
             "SELECT column_name, data_type FROM information_schema.columns "
             "WHERE table_name = $table"
         )
-        rows = influxdb3_local.query(query, {"table": table})
+        rows = _query(influxdb3_local, query, {"table": table}, database=database)
         names: list[str] = []
         for row in rows:
             name = row["column_name"]
@@ -93,7 +139,7 @@ def get_field_names(
         return names
 
     if use_cache:
-        key = f"shared:fields:{table}:{int(numeric_only)}"
+        key = _cache_key(f"shared:fields:{table}:{int(numeric_only)}", database)
         return cached(influxdb3_local, key, producer, ttl_seconds=ttl_seconds)
     return producer()
 
@@ -105,6 +151,7 @@ def query_window(
     start,
     end,
     columns: list[str] | None = None,
+    database: str | None = None,
 ) -> list[dict]:
     """Run a basic ``time``-window query and return rows (``[]`` if none).
 
@@ -118,5 +165,10 @@ def query_window(
         f"SELECT {selected} FROM {_quote_identifier(table)} "
         "WHERE time >= $start AND time < $end ORDER BY time"
     )
-    rows = influxdb3_local.query(query, {"start": start, "end": end})
+    rows = _query(
+        influxdb3_local,
+        query,
+        {"start": start, "end": end},
+        database=database,
+    )
     return rows or []

@@ -192,11 +192,11 @@ def write_data(
     attempts = max(retries, 0) + 1
 
     if no_sync is None:
-        if database:
+        if database is not None:
             write_fn = partial(influxdb3_local.write_to_db, database)
         else:
             write_fn = influxdb3_local.write
-    elif database:
+    elif database is not None:
         write_fn = partial(influxdb3_local.write_sync_to_db, database, no_sync=no_sync)
     else:
         write_fn = partial(influxdb3_local.write_sync, no_sync=no_sync)

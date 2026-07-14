@@ -65,6 +65,8 @@ lines = [
 ]
 write_data(influxdb3_local, lines)            # batched + retried by default
 # write_data(influxdb3_local, lines, batch=False, retries=0)  # opt out
+# write_data(influxdb3_local, lines, database="other_db")     # another database
+# write_data(influxdb3_local, lines, no_sync=True)            # write_sync API (3.8+)
 ```
 
 ## License

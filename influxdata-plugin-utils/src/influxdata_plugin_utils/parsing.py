@@ -19,6 +19,8 @@ __all__ = [
 
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([a-zA-Z]+)\s*$")
 _DURATION_UNITS = {
+    "us": "microseconds",
+    "ms": "milliseconds",
     "s": "seconds",
     "min": "minutes",
     "h": "hours",
@@ -33,7 +35,7 @@ _FALSE = {"false", "f", "0", "no", "off"}
 
 
 def parse_timedelta(raw) -> timedelta:
-    """Parse a duration like ``30s``, ``5min``, ``1h``, ``2d``, ``1w``."""
+    """Parse a duration like ``500us``, ``100ms``, ``30s``, ``5min``, ``1h``, ``2d``, ``1w``."""
     if isinstance(raw, timedelta):
         return raw
     match = _DURATION_RE.match(str(raw))

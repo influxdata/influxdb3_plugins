@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-12
+
+### Added
+
+- `write.write_data` — optional `database` parameter for writing to another
+  database.
+- `parsing.parse_timedelta` — `ms` (milliseconds) and `us` (microseconds)
+  duration units.
+
+### Changed
+
+- `write.write_data` — `no_sync` now defaults to `None`: writes go through
+  `write` / `write_to_db` (available on all InfluxDB 3 versions); passing a
+  boolean switches to `write_sync` / `write_sync_to_db` (InfluxDB 3.8+).
+
 ## [0.1.0] - 2026-07-08
 
 ### Added
@@ -22,5 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `write` — `build_line`, `build_line_typed`, `add_field_with_type`,
   `write_data` (batching + retry), `BatchLines`.
 
-[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.1.0...HEAD
+[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.2.0...HEAD
+[0.2.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.1.0...utils-v0.2.0
 [0.1.0]: https://github.com/influxdata/influxdb3_plugins/releases/tag/utils-v0.1.0

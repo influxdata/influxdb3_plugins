@@ -9,6 +9,7 @@ write helpers operate on already-built line objects and need no class.
 import math
 import random
 import time
+from functools import partial
 
 from .parsing import parse_bool
 
@@ -160,7 +161,8 @@ def write_data(
     batch: bool = True,
     retries: int = 3,
     base_delay: float = 1.0,
-    no_sync: bool = True,
+    no_sync: bool | None = None,
+    database: str | None = None,
 ) -> None:
     """Write LineBuilder objects with optional batching and retry.
 
@@ -170,8 +172,17 @@ def write_data(
         batch: Combine all lines into one payload via :class:`BatchLines`.
             Set ``False`` to write each line individually.
         retries: Number of extra attempts on failure (``0`` disables retry).
+            Effective only when ``no_sync`` is set: the default buffered
+            ``write`` / ``write_to_db`` never raise at call time.
         base_delay: Base seconds for exponential backoff with jitter.
-        no_sync: Passed through to ``write_sync``.
+        no_sync: When set, writes go through ``write_sync`` /
+            ``write_sync_to_db`` with this flag (requires InfluxDB 3.8+),
+            which write immediately and raise on failure. When ``None``
+            (default), the universally available ``write`` / ``write_to_db``
+            are used: they only queue lines that are flushed after plugin
+            execution completes, so failures are not reported to the caller.
+        database: Target database; when ``None``, writes to the trigger's
+            database.
     """
     builders = [builder for builder in line_builders if builder is not None]
     if not builders:
@@ -180,10 +191,20 @@ def write_data(
     payloads = [BatchLines(builders)] if batch else builders
     attempts = max(retries, 0) + 1
 
+    if no_sync is None:
+        if database:
+            write_fn = partial(influxdb3_local.write_to_db, database)
+        else:
+            write_fn = influxdb3_local.write
+    elif database:
+        write_fn = partial(influxdb3_local.write_sync_to_db, database, no_sync=no_sync)
+    else:
+        write_fn = partial(influxdb3_local.write_sync, no_sync=no_sync)
+
     for payload in payloads:
         for attempt in range(attempts):
             try:
-                influxdb3_local.write_sync(payload, no_sync=no_sync)
+                write_fn(payload)
                 break
             except Exception:
                 if attempt == attempts - 1:

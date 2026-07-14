@@ -2,7 +2,7 @@ manifest_schema_version = "1.3"
 
 [plugin]
 name = "mad_check"
-version = "1.1.0"
+version = "1.2.0"
 description = "Provides Median Absolute Deviation (MAD)-based anomaly detection using data writes trigger. Maintains in-memory deques for efficient computation and supports count-based and duration-based thresholds."
 triggers = ["process_writes"]
 homepage = "https://www.influxdata.com/"

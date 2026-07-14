@@ -2,7 +2,7 @@ manifest_schema_version = "1.3"
 
 [plugin]
 name = "threshold_deadman_checks"
-version = "1.1.0"
+version = "1.2.0"
 description = "Provides comprehensive monitoring capabilities including deadman alerts and aggregation-based threshold checks. Supports both scheduler and data write triggers with multi-channel notifications."
 triggers = ["process_writes", "process_scheduled_call"]
 homepage = "https://www.influxdata.com/"

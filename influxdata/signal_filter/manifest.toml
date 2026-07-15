@@ -1,0 +1,19 @@
+manifest_schema_version = "1.3"
+
+[plugin]
+name = "signal_filter"
+version = "0.1.0"
+description = "Applies streaming digital IIR filters to numeric fields"
+triggers = ["process_writes"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/signal_filter"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/signal_filter/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!signal_filter.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["numpy", "scipy", "influxdata-plugin-utils>=0.2.0"]

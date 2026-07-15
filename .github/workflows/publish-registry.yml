@@ -17,7 +17,6 @@ env:
   PLUGIN_ROOT: influxdata
   REGISTRY_RELEASE: registry
   SDK_REPO: influxdata/influxdb3-plugin-sdk
-  SDK_VERSION: v0.6.0
   EXCLUDE_DIRS: "library"
   GH_TOKEN: ${{ github.token }}
 
@@ -26,7 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Resolve SDK version
+        shell: bash
+        run: echo "SDK_VERSION=$(cat .github/plugin-sdk-version)" >> "$GITHUB_ENV"
 
       - name: Install influxdb3-plugin CLI
         shell: bash
@@ -39,8 +42,11 @@ jobs:
             --pattern "SHA256SUMS" \
             --dir /tmp/sdk --clobber
           (cd /tmp/sdk && grep " ${asset}\$" SHA256SUMS | sha256sum -c -)
-          tar xzf "/tmp/sdk/${asset}" -C /usr/local/bin/ influxdb3-plugin
-          influxdb3-plugin --version
+          install_dir="${RUNNER_TEMP}/bin"
+          mkdir -p "$install_dir"
+          tar xzf "/tmp/sdk/${asset}" -C "$install_dir" influxdb3-plugin
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "${install_dir}/influxdb3-plugin" --version
 
       - name: Fetch registry index
         shell: bash
@@ -88,7 +94,10 @@ jobs:
             echo "Plugin directories to publish:"
             cat /tmp/plugin-directories.txt
           else
-            echo "No plugin directories found under ${PLUGIN_ROOT}."
+            # An empty list means the discovery glob is broken, not that there
+            # is nothing to publish; fail rather than silently publish nothing.
+            echo "No plugin directories found under ${PLUGIN_ROOT}." >&2
+            exit 1
           fi
 
       - name: Package plugins

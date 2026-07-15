@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2026-06-24T00:00:00+00:00",
+        "last_updated": "2026-07-14T00:00:00+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -251,6 +251,17 @@
                 "required_libraries": [],
                 "last_update": "2026-07-09",
                 "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Signal Filter",
+                "path": "influxdata/signal_filter/signal_filter.py",
+                "description": "Applies streaming digital IIR filters to numeric fields",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/signal_filter/README.md",
+                "required_plugins": [],
+                "required_libraries": ["numpy", "scipy", "influxdata-plugin-utils>=0.2.0"],
+                "last_update": "2026-07-14",
+                "trigger_types_supported": ["data_writes"]
             },
             {
                 "name": "River Auto Profiler",

@@ -253,6 +253,17 @@
                 "trigger_types_supported": ["scheduler"]
             },
             {
+                "name": "Resampler",
+                "path": "influxdata/resampler/resampler.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Resamples time series with non-uniform timestamps (sensor jitter) onto a uniform time grid using configurable interpolation, or snaps timestamps to grid nodes keeping values and types unchanged.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/resampler/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdata-plugin-utils>=0.2.0", "scipy"],
+                "last_update": "2026-07-15",
+                "trigger_types_supported": ["scheduler"]
+            },
+            {
                 "name": "River Auto Profiler",
                 "path": "influxdata/river_auto_profiler/river_auto_profiler.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Incrementally profiles incoming time-series data with River ML streaming statistics and writes per-series recommendations for anomaly detection tuning, including thresholds, fading factors, and profile maturity.",

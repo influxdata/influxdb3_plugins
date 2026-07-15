@@ -1,0 +1,33 @@
+# Resampler plugin configuration for scheduled trigger.
+# Use via the config_file_path trigger argument (path relative to PLUGIN_DIR).
+
+########## Required ##########
+# Source measurement with non-uniform timestamps.
+measurement = "signal"
+# Target measurement for resampled data (must differ from the source measurement).
+target_measurement = "signal_resampled"
+
+########## Optional ##########
+# Uniform grid step, at least 1ms. Units: us, ms, s, min, h, d, w. Default: "1s".
+#interval = "1s"
+# How much history each run processes, at least one interval. Default: "10min".
+#window = "10min"
+# Processing delay for late-arriving data. Default: "0s".
+#offset = "10s"
+# Processing mode: interpolate (recalculate numeric fields at grid nodes) or
+# snap (round timestamps only, values unchanged). Default: "interpolate".
+#mode = "interpolate"
+# Space-separated numeric fields to interpolate; numeric fields not listed are
+# dropped. In snap mode: fields of any type to carry. Default: all.
+#fields = "value"
+# Space-separated fields of any type to exclude from the output. Default: none.
+#excluded_fields = "status"
+# Interpolation method: linear, nearest, cubic, previous, or next. Default: "linear".
+#interpolation_method = "linear"
+# Source-point spacing above which grid points are not written, at least one
+# interval. Default: 2x interval.
+#max_gap = "2s"
+# Target database. Default: the trigger's database.
+#target_database = "mydb"
+# Maximum number of write attempts. Default: 5.
+#max_retries = 5

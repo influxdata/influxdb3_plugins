@@ -253,6 +253,16 @@
                 "trigger_types_supported": ["scheduler"]
             },
             {
+                "name": "Resampler",
+                "path": "influxdata/resampler/resampler.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Resamples time series with non-uniform timestamps (sensor jitter) onto a uniform time grid using configurable interpolation, or snaps timestamps to grid nodes keeping values and types unchanged.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/resampler/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdata-plugin-utils>=0.2.0", "scipy"],
+                "last_update": "2026-07-15",
+                "trigger_types_supported": ["scheduler"]
+            },
                 "name": "Signal Filter",
                 "path": "influxdata/signal_filter/signal_filter.py",
                 "description": "Applies streaming digital IIR filters to numeric fields",

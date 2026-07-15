@@ -1,0 +1,2 @@
+influxdata-plugin-utils>=0.2.0
+scipy

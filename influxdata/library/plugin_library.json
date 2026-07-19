@@ -263,6 +263,7 @@
                 "last_update": "2026-07-15",
                 "trigger_types_supported": ["scheduler"]
             },
+            {
                 "name": "Signal Filter",
                 "path": "influxdata/signal_filter/signal_filter.py",
                 "description": "Applies streaming digital IIR filters to numeric fields",

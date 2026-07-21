@@ -1,0 +1,49 @@
+# Gapfill plugin configuration for scheduled trigger.
+# Use via the config_file_path trigger argument (path relative to PLUGIN_DIR).
+
+########## Required ##########
+# Source measurement to scan for gaps.
+source_measurement = "signal_resampled"
+
+########## Optional ##########
+# Target measurement: the full series (existing points plus fills) is written
+# there. Omit to append only the fill points into the source measurement
+# (in-place repair). Must differ from the source measurement.
+#target_measurement = "signal_filled"
+# Expected series cadence and fill grid step, at least 1ms.
+# Units: us, ms, s, min, h, d, w. Default: "1s".
+#interval = "1s"
+# How much history each run processes, at least one interval. Default: "10min".
+#window = "10min"
+# Processing delay for late-arriving data. Default: "0s".
+#offset = "10s"
+# Fill method: linear, previous (LOCF), next, nearest, cubic, pchip, or
+# constant. Default: "linear".
+#method = "linear"
+# Constant used when method = "constant"; required for it, invalid otherwise.
+#fill_value = "0"
+# Spacing between consecutive points above which a gap is detected, at least
+# one interval. Default: 1.5x interval.
+#gap_threshold = "2s"
+# Gaps longer than this are not filled, only reported, at least one
+# gap_threshold. Default: unlimited (bounded by the lookback).
+#max_fill_gap = "5min"
+# Space-separated numeric fields to fill with the configured method; numeric
+# fields not listed are dropped. Non-numeric fields are carried into fill
+# points by last known value unless excluded. Default: all numeric fields.
+#fields = "value"
+# Space-separated fields of any type to exclude from the output. Default: none.
+#excluded_fields = "status"
+# When true, filled points carry a boolean marker field. Default: false.
+#mark_filled = false
+# Name of the marker field written when mark_filled = true; must not collide
+# with an existing source field. Default: "filled".
+#filled_field_name = "filled"
+# Optional measurement receiving one row per detected gap (series, boundaries,
+# duration, points, status). Default: no report.
+#report_measurement = "gapfill_report"
+# Target database; requires target_measurement (chain mode).
+# Default: the trigger's database.
+#target_database = "mydb"
+# Maximum number of write attempts. Default: 5.
+#max_retries = 5

@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "gapfill"
+version = "0.1.0"
+description = "Detects gaps in time series and fills them with imputed values using configurable interpolation methods, with optional fill marking and per-gap quality reports. Supports scheduled and HTTP backfill."
+triggers = ["process_scheduled_call", "process_request"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/gapfill"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/gapfill/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!gapfill.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["influxdata-plugin-utils>=0.2.0", "scipy"]

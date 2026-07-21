@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "notifier"
-version = "1.0.0"
+version = "1.1.0"
 description = "Notification dispatcher that sends notifications through various channels (Slack, Discord, HTTP, SMS, WhatsApp) based on incoming HTTP requests. Features retry logic and environment variable support."
 triggers = ["process_request"]
 homepage = "https://www.influxdata.com/"

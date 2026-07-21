@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "influxdb_to_iceberg"
-version = "1.1.0"
+version = "1.2.0"
 description = "Transfers data from InfluxDB 3 to Apache Iceberg tables with automatic schema management, customizable namespace and table naming, field filtering, and batch processing support."
 triggers = ["process_scheduled_call", "process_request"]
 homepage = "https://www.influxdata.com/"

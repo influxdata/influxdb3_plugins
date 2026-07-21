@@ -1,6 +1,20 @@
 """
 {
-    "plugin_type": ["http"]
+    "plugin_type": ["http"],
+    "http_args_config": [
+        {
+            "name": "notification_text",
+            "example": "Alert: High CPU usage detected on server1",
+            "description": "Text content of the notification message in the HTTP request body.",
+            "required": true
+        },
+        {
+            "name": "senders_config",
+            "example": {"slack": {"slack_webhook_url": "https://hooks.slack.com/services/...", "slack_headers": "eyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vanNvbiJ9"}, "sms": {"twilio_from_number": "+19876543210", "twilio_to_number": "+1234567890"}},
+            "description": "HTTP request body object mapping sender names to channel-specific configuration. Supported senders: slack (slack_webhook_url, slack_headers), discord (discord_webhook_url, discord_headers), http (http_webhook_url, http_headers), sms and whatsapp (twilio_sid, twilio_token, twilio_from_number, twilio_to_number). Twilio credentials may also come from TWILIO_SID and TWILIO_TOKEN.",
+            "required": true
+        }
+    ]
 }
 """
 

@@ -95,7 +95,7 @@
         {
             "name": "tag_values",
             "example": "sensor_id:A1@A2.env:prod",
-            "description": "Optional tag filter applied to the source query. Syntax: 'tag1:val1@val2.tag2:val3'. Dot separates tag pairs; colon separates tag from values; @ separates multiple values for the same tag; values may be quoted (\\"foo\\" or 'foo') to include special characters. Tags with a single value are also written to the output line; tags with multiple values are filtered in the query but not written.",
+            "description": "Optional tag filter applied to the source query. Syntax: 'tag1:val1@val2.tag2:val3'. Dot separates tag pairs; colon separates tag from values; @ separates multiple values for the same tag; values may be quoted with double or single quotes to include special characters. Tags with a single value are also written to the output line; tags with multiple values are filtered in the query but not written.",
             "required": false
         },
         {

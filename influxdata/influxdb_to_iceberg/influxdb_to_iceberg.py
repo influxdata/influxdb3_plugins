@@ -56,6 +56,68 @@
             "description": "Automatically update Iceberg table schema when data doesn't match existing schema (default: false).",
             "required": false
         }
+    ],
+    "http_args_config": [
+        {
+            "name": "measurement",
+            "example": "temperature",
+            "description": "Source measurement containing data to transfer.",
+            "required": true
+        },
+        {
+            "name": "catalog_configs",
+            "example": {"type": "sql", "uri": "sqlite:///path/to/catalog.db"},
+            "description": "Iceberg catalog configuration dictionary passed to PyIceberg load_catalog.",
+            "required": true
+        },
+        {
+            "name": "included_fields",
+            "example": ["temp_celsius", "humidity", "sensor_id"],
+            "description": "List of field and tag names to include in replication.",
+            "required": false
+        },
+        {
+            "name": "excluded_fields",
+            "example": ["usage_system"],
+            "description": "List of field and tag names to exclude from replication.",
+            "required": false
+        },
+        {
+            "name": "namespace",
+            "example": "weather",
+            "description": "Iceberg namespace for the target table. Default: default.",
+            "required": false
+        },
+        {
+            "name": "table_name",
+            "example": "temperature_metrics",
+            "description": "Iceberg table name. Default: same as measurement.",
+            "required": false
+        },
+        {
+            "name": "batch_size",
+            "example": "12h",
+            "description": "Batch size duration for HTTP processing. Format: <number><unit> where unit is s, min, h, d, or w. Default: 1d.",
+            "required": false
+        },
+        {
+            "name": "backfill_start",
+            "example": "2024-01-01T00:00:00+00:00",
+            "description": "ISO 8601 datetime with timezone for the start of the HTTP backfill window. If omitted, starts from the oldest source point.",
+            "required": false
+        },
+        {
+            "name": "backfill_end",
+            "example": "2024-01-07T00:00:00+00:00",
+            "description": "ISO 8601 datetime with timezone for the end of the HTTP backfill window. Default: current time.",
+            "required": false
+        },
+        {
+            "name": "auto_update_schema",
+            "example": "true",
+            "description": "Automatically update Iceberg table schema when data doesn't match existing schema. Default: false.",
+            "required": false
+        }
     ]
 }
 """

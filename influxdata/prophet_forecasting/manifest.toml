@@ -2,7 +2,7 @@ manifest_schema_version = "1.3"
 
 [plugin]
 name = "prophet_forecasting"
-version = "1.2.0"
+version = "1.3.0"
 description = "Provides time series forecasting capabilities for InfluxDB 3 data using the Prophet library."
 triggers = ["process_scheduled_call", "process_request"]
 homepage = "https://www.influxdata.com/"

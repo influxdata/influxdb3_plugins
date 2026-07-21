@@ -80,6 +80,86 @@
             "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
             "required": false
         }
+    ],
+    "http_args_config": [
+        {
+            "name": "source_measurement",
+            "example": "metrics",
+            "description": "Name of the source measurement to downsample.",
+            "required": true
+        },
+        {
+            "name": "target_measurement",
+            "example": "metrics_daily",
+            "description": "Name of the target measurement to write downsampled data.",
+            "required": true
+        },
+        {
+            "name": "interval",
+            "example": "1d",
+            "description": "Time interval for downsampling batches. Units: 's', 'min', 'h', 'd', 'w', 'm', 'q', 'y'. Default: 10min.",
+            "required": false
+        },
+        {
+            "name": "batch_size",
+            "example": "7d",
+            "description": "Time interval for each HTTP backfill batch. Units: 's', 'min', 'h', 'd', 'w', 'm', 'q', 'y'. Default: 30d.",
+            "required": false
+        },
+        {
+            "name": "calculations",
+            "example": [["cpu_usage", "avg"], ["memory_usage", "max"]],
+            "description": "Aggregation functions. Use 'avg' for all fields, or a list of [field, aggregation] pairs. Valid functions: avg, sum, min, max, median, count, stddev, first_value, last_value, var, approx_median.",
+            "required": false
+        },
+        {
+            "name": "specific_fields",
+            "example": ["cpu_usage", "memory_usage"],
+            "description": "List of field names to downsample.",
+            "required": false
+        },
+        {
+            "name": "excluded_fields",
+            "example": ["status", "host"],
+            "description": "List of field and tag names to exclude from downsampling results.",
+            "required": false
+        },
+        {
+            "name": "tag_values",
+            "example": {"host": ["server1", "server2"]},
+            "description": "Tag filters as a JSON object mapping tag names to lists of allowed values.",
+            "required": false
+        },
+        {
+            "name": "max_retries",
+            "example": "5",
+            "description": "Maximum number of retries for write operations.",
+            "required": false
+        },
+        {
+            "name": "target_database",
+            "example": "analytics",
+            "description": "Target database for writing downsampled data. If not provided, uses the trigger's database.",
+            "required": false
+        },
+        {
+            "name": "backfill_start",
+            "example": "2024-01-01T00:00:00+00:00",
+            "description": "ISO 8601 datetime with timezone for the start of the HTTP backfill window. If omitted, starts from the oldest source point.",
+            "required": false
+        },
+        {
+            "name": "backfill_end",
+            "example": "2024-01-31T00:00:00+00:00",
+            "description": "ISO 8601 datetime with timezone for the end of the HTTP backfill window. Default: current time.",
+            "required": false
+        },
+        {
+            "name": "enable_full_logging",
+            "example": "true",
+            "description": "When true, full exception details (messages) are written to logs. When false (default), only the exception type is logged to avoid leaking sensitive values. Default: false.",
+            "required": false
+        }
     ]
 }
 """

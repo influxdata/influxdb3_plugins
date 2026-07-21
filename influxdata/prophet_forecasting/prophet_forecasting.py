@@ -212,6 +212,122 @@
             "description": "Path to config file to override args. Format: 'config.toml'.",
             "required": false
         }
+    ],
+    "http_args_config": [
+        {
+            "name": "measurement",
+            "example": "temperature",
+            "description": "Source InfluxDB measurement name to query historical data from.",
+            "required": true
+        },
+        {
+            "name": "field",
+            "example": "value",
+            "description": "Field name within the measurement to forecast.",
+            "required": true
+        },
+        {
+            "name": "forecast_horizont",
+            "example": "7d",
+            "description": "Forecast horizon duration. Format: <number><unit> where unit is s, min, h, d, w, m, q, or y.",
+            "required": true
+        },
+        {
+            "name": "tag_values",
+            "example": {"region": "us-west", "device": "sensor1"},
+            "description": "Tag filters for the InfluxDB query as a JSON object.",
+            "required": true
+        },
+        {
+            "name": "target_measurement",
+            "example": "temperature_forecast",
+            "description": "Destination measurement name to write forecast points.",
+            "required": true
+        },
+        {
+            "name": "unique_suffix",
+            "example": "model_v1_20250722",
+            "description": "Unique identifier for model versioning and storage.",
+            "required": true
+        },
+        {
+            "name": "start_time",
+            "example": "2025-05-20T00:00:00+00:00",
+            "description": "Historical window start time as an ISO 8601 datetime with timezone.",
+            "required": true
+        },
+        {
+            "name": "end_time",
+            "example": "2025-06-19T00:00:00+00:00",
+            "description": "Historical window end time as an ISO 8601 datetime with timezone.",
+            "required": true
+        },
+        {
+            "name": "seasonality_mode",
+            "example": "additive",
+            "description": "Prophet seasonality mode: additive or multiplicative. Default: additive.",
+            "required": false
+        },
+        {
+            "name": "changepoint_prior_scale",
+            "example": "0.05",
+            "description": "Flexibility of trend changepoints. Default: 0.05.",
+            "required": false
+        },
+        {
+            "name": "changepoints",
+            "example": ["2025-01-01", "2025-06-01"],
+            "description": "List of changepoint dates or datetimes in ISO format.",
+            "required": false
+        },
+        {
+            "name": "save_mode",
+            "example": "true",
+            "description": "Whether to save or load a persisted model using unique_suffix. Default: false.",
+            "required": false
+        },
+        {
+            "name": "validation_window",
+            "example": "3d",
+            "description": "Duration for validation window. Defaults to 0s (no validation). Format: <number><unit>.",
+            "required": false
+        },
+        {
+            "name": "msre_threshold",
+            "example": "0.05",
+            "description": "Maximum acceptable Mean Squared Relative Error for validation. Defaults to infinity.",
+            "required": false
+        },
+        {
+            "name": "target_database",
+            "example": "forecast_db",
+            "description": "Optional InfluxDB database name for writing forecast results.",
+            "required": false
+        },
+        {
+            "name": "holiday_date_list",
+            "example": ["2025-01-01", "2025-12-25"],
+            "description": "List of custom holiday dates in ISO format.",
+            "required": false
+        },
+        {
+            "name": "holiday_names",
+            "example": ["New Year", "Christmas"],
+            "description": "List of names corresponding to holiday_date_list.",
+            "required": false
+        },
+        {
+            "name": "holiday_country_names",
+            "example": ["US", "UK"],
+            "description": "List of country codes or names for built-in Prophet holidays.",
+            "required": false
+        },
+        {
+            "name": "inferred_freq",
+            "example": "1D",
+            "description": "Manually specified frequency. If omitted, frequency is inferred from data.",
+            "required": false
+        }
     ]
 }
 """

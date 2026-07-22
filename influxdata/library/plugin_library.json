@@ -275,6 +275,17 @@
                 "trigger_types_supported": ["data_writes"]
             },
             {
+                "name": "Gapfill",
+                "path": "influxdata/gapfill/gapfill.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Detects gaps in time series and fills them with imputed values using configurable interpolation methods (linear, LOCF, spline, constant), with optional fill marking and per-gap quality reports. Supports scheduled operation and one-off HTTP backfill.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/gapfill/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdata-plugin-utils>=0.2.0", "scipy"],
+                "last_update": "2026-07-21",
+                "trigger_types_supported": ["scheduler", "http"]
+            },
+            {
                 "name": "River Auto Profiler",
                 "path": "influxdata/river_auto_profiler/river_auto_profiler.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Incrementally profiles incoming time-series data with River ML streaming statistics and writes per-series recommendations for anomaly detection tuning, including thresholds, fading factors, and profile maturity.",

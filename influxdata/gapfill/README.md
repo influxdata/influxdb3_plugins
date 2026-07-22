@@ -65,8 +65,8 @@ display and configure the plugin.
 | `fields`             | string  | all numeric    | Space-separated numeric fields to fill with the configured method; numeric fields not listed are dropped. Non-numeric fields are carried into fill points by last known value unless excluded. |
 | `excluded_fields`    | string  | none           | Space-separated fields of any type to exclude from the output.                                                                                                                                 |
 | `mark_filled`        | boolean | `false`        | When `true`, points that received filled values carry a boolean marker field (`filled=true` by default); such a point may also hold real values of other fields.                               |
-| `filled_field_name`  | string  | `filled`       | Name of the marker field written when `mark_filled` is true; must not collide with an existing source field.                                                                                   |
-| `report_measurement` | string  | *(off)*        | Optional measurement receiving one row per detected gap.                                                                                                                                       |
+| `filled_field_name`  | string  | `filled`       | Name of the marker field written when `mark_filled` is true; must not collide with an existing source column.                                                                                  |
+| `report_measurement` | string  | *(off)*        | Optional measurement receiving one row per detected gap; written to `target_database` when set.                                                                                               |
 | `target_database`    | string  | *(trigger db)* | Database for writing output. Requires `target_measurement` (chain mode).                                                                                                                       |
 | `max_retries`        | integer | `5`            | Maximum number of write attempts.                                                                                                                                                              |
 | `config_file_path`   | string  | —              | Path to a TOML file supplying all parameters — replaces the trigger arguments or HTTP body entirely. Relative paths resolve against `PLUGIN_DIR`.                                              |
@@ -107,11 +107,11 @@ annotated template.
   value (and the marker, when enabled) is added to that point; existing values
   are never modified.
 
-Blending methods (`linear`, `cubic`, `pchip`, `constant`) produce float64
-values; in chain mode, copied values of method-filled fields are cast to float
-so the target field type stays consistent. In in-place mode, every fill is
-written with the column's stored type (integer-typed fills are rounded,
-UInt64 written as uint), so fills never conflict with the source schema.
+Every value is written with the source column's stored type: integer fills are
+rounded and UInt64 stays `uint`, so output never conflicts with the schema.
+Blending methods (`linear`, `cubic`, `pchip`, `constant`) produce float64, so
+in chain mode those columns — fills and copied values alike — become float in
+the target; in in-place mode such fills are cast back to the column's type.
 
 ## Gap report
 
@@ -121,9 +121,12 @@ With `report_measurement` set, each detected gap produces one row:
   in).
 - **Fields**: `gap_start_ns`, `gap_end_ns` (boundary timestamps), `duration_s`
   (float seconds), `points` (fill points actually written for the gap; `0`
-  when skipped), `status` (`filled` or `skipped` for gaps longer than
-  `max_fill_gap`).
+  when skipped), `status` (`filled`, or `skipped` when the gap is longer than
+  `max_fill_gap` or no point could be written).
 - **Timestamp**: the gap end, so re-reporting the same gap overwrites in place.
+
+Report rows are written next to the output: with `target_database` set they
+land in that database, not in the trigger's.
 
 Alerting on this measurement (e.g., with the
 [`notifier`](https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/notifier)
@@ -361,11 +364,12 @@ longer than `max_fill_gap` or the lookback, or the series/field has fewer than
 **Solution**: Check the info logs for skip counts; increase `max_fill_gap` or
 repair the range explicitly via the HTTP trigger.
 
-#### Issue: "source_measurement already has a field named 'filled'"
+#### Issue: "source_measurement already has a column named 'filled'"
 
-**Cause**: `mark_filled` is true and the source already has a field with the
-marker name (`filled_field_name`, default `filled`); the plugin refuses to
-overwrite it.
+**Cause**: `mark_filled` is true and the marker name (`filled_field_name`,
+default `filled`) is taken by a source tag or by a non-boolean field; the
+plugin refuses to overwrite it. In in-place mode, a boolean column of that
+name is treated as the plugin's own marker from earlier runs and reused.
 
 **Solution**: Set `filled_field_name` to a name not used by the source, or
 disable `mark_filled`. With `mark_filled` off, a source field named `filled`

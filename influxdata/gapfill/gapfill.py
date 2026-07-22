@@ -83,7 +83,7 @@
         {
             "name": "report_measurement",
             "example": "gapfill_report",
-            "description": "Optional measurement receiving one row per detected gap (series, boundaries, duration, points, status).",
+            "description": "Optional measurement receiving one row per detected gap (series, boundaries, duration, points, status). Written to target_database when set.",
             "required": false
         },
         {
@@ -124,7 +124,6 @@ from influxdata_plugin_utils.parsing import (
     parse_timestamp_ns,
 )
 from influxdata_plugin_utils.write import (
-    _infer_type,
     build_line,
     build_line_typed,
     write_data,
@@ -193,14 +192,29 @@ LINE_TYPES: dict = {
 }
 
 
+def infer_line_type(value) -> str:
+    """Line-protocol type for a field missing from the resolved schema."""
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return "string"
+
+
 def resolve_schema(
-    influxdb3_local, measurement: str, marker: str | None, task_id: str
+    influxdb3_local,
+    measurement: str,
+    marker: str | None,
+    task_id: str,
+    in_place: bool = False,
 ) -> dict:
     """Resolve the measurement schema with one information_schema query.
 
     Returns tags, all_fields, numeric_fields and a field -> line-type map.
-    A source field named `marker` (set only with mark_filled) is rejected as
-    a collision with the plugin-written marker.
+    A source column named `marker` (set only with mark_filled) is rejected as a
+    collision, except for the plugin's own Boolean marker in in-place mode.
     """
     rows: list[dict] = influxdb3_local.query(
         "SELECT column_name, data_type FROM information_schema.columns "
@@ -213,17 +227,21 @@ def resolve_schema(
     line_types: dict[str, str] = {}
     for row in rows:
         name, data_type = row["column_name"], row.get("data_type", "")
+        if marker is not None and name == marker:
+            if in_place and data_type == "Boolean":
+                # Marker written by an earlier in-place run: plugin-owned,
+                # not an input column.
+                continue
+            raise Exception(
+                f"[{task_id}] source_measurement '{measurement}' already has a "
+                f"column named '{marker}'; rename filled_field_name or disable "
+                f"mark_filled."
+            )
         if data_type == TAG_DATA_TYPE:
             tags.append(name)
             continue
         if name == "time":
             continue
-        if marker is not None and name == marker:
-            raise Exception(
-                f"[{task_id}] source_measurement '{measurement}' already has a "
-                f"field named '{marker}'; rename filled_field_name or disable "
-                f"mark_filled."
-            )
         all_fields.append(name)
         if data_type in NUMERIC_TYPES:
             numeric_fields.append(name)
@@ -360,7 +378,7 @@ def normalize_config(cfg, task_id: str) -> dict:
         raise Exception(
             f"[{task_id}] filled_field_name must be a non-empty field name."
         )
-    report: str | None = cfg.get("report_measurement")
+    report: str | None = str(cfg.get("report_measurement") or "").strip() or None
     if report and report in (measurement, target):
         raise Exception(
             f"[{task_id}] report_measurement must differ from measurement "
@@ -399,21 +417,21 @@ def fill_series(
     fields: list[str],
     filled_fields: set[str],
     cfg: dict,
-    node_end_ns: int,
     node_start_ns: int,
-    field_types: dict[str, str] | None,
+    node_end_ns: int,
+    clip_fills: bool,
+    field_types: dict[str, str],
     budget: int,
     task_id: str,
 ) -> tuple[list, list, dict]:
     """Detect and fill gaps of one series.
 
     Gaps are detected per method-filled field on its non-null timestamps;
-    non-numeric fields are only attached to fill points by LOCF. In-place mode
-    fills a closed gap back to its start, chain mode clips at node_start_ns;
-    nodes past node_end_ns wait for the next run. field_types forces each
-    column's stored type (in-place); None infers types from values (chain).
-    Raises when the series would push fill points past budget. Returns
-    (fill lines, report lines, stats).
+    non-numeric fields are only attached to fill points by LOCF. Only gaps
+    intersecting [node_start_ns, node_end_ns) are processed; clip_fills also
+    keeps their fill nodes inside that range. field_types forces each field's
+    line-protocol type. Raises when the series would push fill points past
+    budget. Returns (fill lines, report lines, stats).
     """
     fill_points: dict[int, dict] = {}
     reports: list = []
@@ -465,13 +483,15 @@ def fill_series(
                 interpolator = cls(x, vals)
 
         for start_ns, end_ns in gaps:
+            # A gap outside the processed range belongs to another run; the
+            # padded query window only makes boundary points visible.
+            if end_ns <= node_start_ns or start_ns >= node_end_ns:
+                continue
             # Nodes sit on the epoch-anchored grid strictly inside the gap, so
-            # overlapping runs overwrite the same points idempotently. Chain
-            # mode clips at node_start_ns so fills stay inside the copied
-            # window.
+            # overlapping runs overwrite the same points idempotently.
             first: int = (start_ns // interval_ns + 1) * interval_ns
-            if not cfg["in_place"] and first < node_start_ns:
-                first = node_start_ns
+            if clip_fills:
+                first = max(first, -(-node_start_ns // interval_ns) * interval_ns)
             too_long: bool = bool(
                 cfg["max_fill_gap_ns"] and (end_ns - start_ns) > cfg["max_fill_gap_ns"]
             )
@@ -480,6 +500,7 @@ def fill_series(
                 (hi - first + interval_ns - 1) // interval_ns if first < hi else 0
             )
             filled_now: bool = not too_long and n_writable > 0
+            written: int = 0
             if filled_now:
                 if stats["points"] + n_writable > budget:
                     raise Exception(
@@ -487,9 +508,8 @@ def fill_series(
                         f"in one run; narrow the processing range, increase "
                         f"interval, or set max_fill_gap."
                     )
-                stats["filled"] += 1
                 left, right = points[start_ns], points[end_ns]
-                ftype: str | None = field_types.get(field) if field_types else None
+                ftype: str | None = field_types.get(field)
                 int_fill: bool = ftype in ("int", "uint")
                 for node in np.arange(first, hi, interval_ns, dtype=np.int64):
                     ts = int(node)
@@ -521,7 +541,13 @@ def fill_series(
                             out_of_range_fields.add(field)
                             continue
                     fill_points.setdefault(ts, {})[field] = value
-                stats["points"] += n_writable
+                    written += 1
+                stats["points"] += written
+                if written:
+                    stats["filled"] += 1
+                else:
+                    # Every node fell outside the column range: nothing landed.
+                    stats["skipped"] += 1
             elif too_long:
                 stats["skipped"] += 1
 
@@ -537,8 +563,8 @@ def fill_series(
                             "gap_start_ns": start_ns,
                             "gap_end_ns": end_ns,
                             "duration_s": (end_ns - start_ns) / NS_PER_SECOND,
-                            "points": n_writable if filled_now else 0,
-                            "status": "skipped" if too_long else "filled",
+                            "points": written,
+                            "status": "filled" if written else "skipped",
                         },
                         time_ns=end_ns,
                     )
@@ -574,29 +600,18 @@ def fill_series(
         values: dict = fill_points[ts]
         if cfg["mark_filled"]:
             values[cfg["filled_field_name"]] = True
-        if field_types is None:
-            lines.append(
-                build_line(
-                    LineBuilder,
-                    cfg["output_measurement"],
-                    tags=tag_values,
-                    fields=values,
-                    time_ns=ts,
-                )
+        lines.append(
+            build_line_typed(
+                LineBuilder,
+                cfg["output_measurement"],
+                tags=tag_values,
+                typed_fields={
+                    f: (v, field_types.get(f) or infer_line_type(v))
+                    for f, v in values.items()
+                },
+                time_ns=ts,
             )
-        else:
-            lines.append(
-                build_line_typed(
-                    LineBuilder,
-                    cfg["output_measurement"],
-                    tags=tag_values,
-                    typed_fields={
-                        f: (v, field_types.get(f) or _infer_type(v))
-                        for f, v in values.items()
-                    },
-                    time_ns=ts,
-                )
-            )
+        )
     stats["out_of_range"] = sorted(out_of_range_fields)
     return lines, reports, stats
 
@@ -605,17 +620,15 @@ def copy_series_rows(
     series_rows: list[dict],
     tag_values: dict,
     fields: list[str],
-    filled_fields: set[str],
     cfg: dict,
+    field_types: dict[str, str],
     node_start_ns: int,
     node_end_ns: int,
 ) -> list:
     """Copy existing points into the target measurement (chain mode).
 
-    Blending methods emit float fills, so copied values of method-filled
-    fields are cast to float to keep the target field type consistent.
+    field_types keeps copied values and fills on the same target column type.
     """
-    cast: bool = cfg["method"] in BLENDING_METHODS
     copied: dict[int, dict] = {}
     for row in series_rows:
         ts = int(row["time"])
@@ -626,23 +639,19 @@ def copy_series_rows(
             value = row.get(field)
             if value is None:
                 continue
-            if (
-                cast
-                and field in filled_fields
-                and isinstance(value, (int, float))
-                and not isinstance(value, bool)
-            ):
-                value = float(value)
             values[field] = value
         if values:
             copied.setdefault(ts, {}).update(values)
 
     return [
-        build_line(
+        build_line_typed(
             LineBuilder,
             cfg["output_measurement"],
             tags=tag_values,
-            fields=copied[ts],
+            typed_fields={
+                f: (v, field_types.get(f) or infer_line_type(v))
+                for f, v in copied[ts].items()
+            },
             time_ns=ts,
         )
         for ts in sorted(copied)
@@ -669,11 +678,13 @@ def run_gapfill(
     node_end: datetime,
     task_id: str,
     schema: dict | None = None,
+    clip_range: bool = False,
 ) -> dict:
     """Detect and fill gaps with fill nodes inside [node_start, node_end).
 
     The query is padded by `lookback` on both sides so gap boundary points
-    stay visible; gaps longer than the lookback are skipped.
+    stay visible; gaps longer than the lookback are skipped. clip_range keeps
+    fills inside [node_start, node_end) even in in-place mode.
     """
     # At least the node-range span, so a small max_fill_gap does not shrink
     # visibility (a gap needs both boundary points in one query window).
@@ -687,6 +698,7 @@ def run_gapfill(
             cfg["source_measurement"],
             cfg["filled_field_name"] if cfg["mark_filled"] else None,
             task_id,
+            in_place=cfg["in_place"],
         )
     tags: list[str] = schema["tags"]
     fields, filled_fields = select_fields(
@@ -698,13 +710,14 @@ def run_gapfill(
         task_id,
     )
 
-    # In-place writes land in existing columns, so fills carry each column's
-    # stored type. Chain mode owns the target and infers types from values.
-    field_types: dict[str, str] | None = None
-    if cfg["in_place"]:
-        field_types = dict(schema["line_types"])
-        if cfg["mark_filled"]:
-            field_types[cfg["filled_field_name"]] = "bool"
+    # Fills carry each source column's stored type. Blending methods emit
+    # float64, so in chain mode those columns become float in the target.
+    field_types: dict[str, str] = dict(schema["line_types"])
+    if not cfg["in_place"] and cfg["method"] in BLENDING_METHODS:
+        for field in filled_fields:
+            field_types[field] = "float"
+    if cfg["mark_filled"]:
+        field_types[cfg["filled_field_name"]] = "bool"
 
     rows: list[dict] = query_window(
         influxdb3_local,
@@ -726,6 +739,7 @@ def run_gapfill(
 
     node_start_ns: int = datetime_to_ns(node_start)
     node_end_ns: int = datetime_to_ns(node_end)
+    clip_fills: bool = clip_range or not cfg["in_place"]
     series_map: dict[tuple, list[dict]] = group_by_series(rows, tags)
     stats["series"] = len(series_map)
 
@@ -744,8 +758,9 @@ def run_gapfill(
             fields,
             filled_fields,
             cfg,
-            node_end_ns,
             node_start_ns,
+            node_end_ns,
+            clip_fills,
             field_types,
             MAX_FILL_POINTS - stats["fills_written"],
             task_id,
@@ -770,8 +785,8 @@ def run_gapfill(
                 series_rows,
                 tag_values,
                 fields,
-                filled_fields,
                 cfg,
+                field_types,
                 node_start_ns,
                 node_end_ns,
             )
@@ -845,7 +860,7 @@ def process_scheduled_call(
             f"[{task_id}] Scanned {stats['rows']} rows across "
             f"{stats['series']} series: filled {stats['gaps_filled']} gaps "
             f"({stats['fills_written']} points), skipped "
-            f"{stats['gaps_skipped']} too-long gaps, copied "
+            f"{stats['gaps_skipped']} gaps, copied "
             f"{stats['rows_copied']} rows to '{parsed['output_measurement']}'."
         )
     except Exception as e:
@@ -955,6 +970,7 @@ def process_request(
             parsed["source_measurement"],
             parsed["filled_field_name"] if parsed["mark_filled"] else None,
             task_id,
+            in_place=parsed["in_place"],
         )
         cursor: datetime = backfill_start
         while cursor < backfill_end:
@@ -966,6 +982,7 @@ def process_request(
                 batch_end,
                 task_id,
                 schema=schema,
+                clip_range=True,
             )
             totals["batches"] += 1
             totals["rows_scanned"] += stats["rows"]

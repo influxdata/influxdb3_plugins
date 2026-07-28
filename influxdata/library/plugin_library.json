@@ -238,7 +238,7 @@
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/opcua/README.md",
                 "required_plugins": [],
                 "required_libraries": ["asyncua"],
-                "last_update": "2026-03-30",
+                "last_update": "2026-07-28",
                 "trigger_types_supported": ["scheduler"]
             },
             {

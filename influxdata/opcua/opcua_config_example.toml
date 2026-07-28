@@ -38,6 +38,11 @@ table_name = "cnc_machine"
 # exception type is logged, to avoid leaking sensitive values into log output.
 # enable_full_logging = false
 
+# Seconds to cache the parsed configuration (default: 3600, max: 2592000).
+# Controls how quickly credential/endpoint/table/filter changes take effect.
+# Independent of browse_cache_ttl.
+# config_cache_ttl = 3600
+
 # Static tags added to every data point
 [opcua.default_tags]
 location = "factory_1"

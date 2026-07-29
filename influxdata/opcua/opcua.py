@@ -35,13 +35,19 @@
         {
             "name": "browse_root",
             "example": "ns=2;s=Devices",
-            "description": "Root node ID for auto-discovery mode. The plugin browses the OPC UA address space from this node, discovers all Variable nodes grouped by parent Object (device), and reads their values. Required unless 'nodes' is set.",
+            "description": "Root node ID for auto-discovery mode. The plugin browses the OPC UA address space from this node, discovers all Variable nodes grouped by parent Object (device), and reads their values. Accepts a numeric namespace ('ns=2;s=Devices') or a namespace URI ('nsu=<uri>;s=Devices'), which is resolved to the current numeric index at connection time for stability across server restarts. Required unless 'nodes' is set.",
             "required": false
         },
         {
             "name": "browse_depth",
             "example": "2",
             "description": "Maximum browse depth for auto-discovery (default: 2). Depth 1 = direct children of browse_root, depth 2 = children of children, etc.",
+            "required": false
+        },
+        {
+            "name": "browse_cache_ttl",
+            "example": "300",
+            "description": "Time in seconds to cache the discovered node set before re-browsing the address space (default: 3600, max: 2592000). Discovery runs on the first call and every 'browse_cache_ttl' seconds thereafter; cached node IDs are read in between. Set it much larger than the trigger interval to run discovery rarely while collecting frequently. Independent of 'config_cache_ttl'.",
             "required": false
         },
         {
@@ -135,9 +141,15 @@
             "required": false
         },
         {
+            "name": "config_cache_ttl",
+            "example": "3600",
+            "description": "Time in seconds to cache the parsed configuration (default: 3600, max: 2592000). Controls how quickly credential, endpoint, table, or filter changes take effect. Independent of 'browse_cache_ttl'.",
+            "required": false
+        },
+        {
             "name": "disable_config_cache",
             "example": "true",
-            "description": "Disable configuration caching. When set to 'true', the configuration is reloaded from file/arguments on every scheduled call instead of being cached for 1 hour. Useful during development or when the config file changes frequently. Default: false.",
+            "description": "Disable configuration caching. When set to 'true', the configuration is reloaded from file/arguments on every scheduled call instead of being cached for 'config_cache_ttl' seconds. This also disables caching of the discovered browse structure, so in browse mode the address space is re-walked on every call. Useful during development or when the config file changes frequently. Default: false.",
             "required": false
         },
         {
@@ -157,6 +169,9 @@
 """
 
 import asyncio
+import copy
+import hashlib
+import json
 import os
 import re
 import threading
@@ -166,7 +181,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from asyncua import Client, ua
 
@@ -178,6 +193,8 @@ _BAD_STATUS_THRESHOLD = 0x80000000  # OPC UA Bad status codes (bit 31 set)
 
 # Browse mode defaults
 _DEFAULT_BROWSE_DEPTH = 2
+_DEFAULT_BROWSE_CACHE_TTL = 60 * 60  # seconds — TTL for cached browse structure
+_MAX_CACHE_TTL = 30 * 24 * 60 * 60  # seconds — ceiling for cache TTLs (30 days)
 
 # OPC UA VariantType sets for type detection
 _INT_VARIANT_TYPES = {
@@ -213,19 +230,45 @@ _VALID_SECURITY_MODES = {"Sign", "SignAndEncrypt"}
 _VALID_QUALITY_CATEGORIES = {"good", "uncertain", "bad"}
 _DEFAULT_QUALITY_FILTER = {"good"}
 
-_CONFIG_CACHE_TTL = 60 * 60  # seconds — TTL for config and browse structure cache
+_CONFIG_CACHE_TTL = 60 * 60  # seconds — TTL for the parsed config cache
 
 # Allowed URL schemes for 'server_url'. Restricted to OPC UA transport schemes
 _ALLOWED_OPCUA_SCHEMES = ("opc.tcp", "opc.tls")
 
-# Default True so config/validation errors log in full; set from config
-# (default False) once known so runtime errors don't leak values.
+# Default True so config-load errors log in full; set from config (default
+# False) once known so runtime errors don't leak values.
 _ENABLE_FULL_LOGGING: bool = True
 
 
 def _exc(e: BaseException) -> str:
     """Return exception detail when full logging is enabled, else the type name."""
     return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
+
+
+def _split_nsu_node_id(node_id: str) -> tuple[str, str]:
+    """Split 'nsu=<uri>;<identifier>' into (uri, identifier).
+
+    Raises ValueError if the ';<identifier>' part is missing or empty.
+    """
+    parts = node_id[4:].split(";", 1)
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        raise ValueError(
+            f"Malformed node ID '{node_id}': expected "
+            f"'nsu=<namespace-uri>;<identifier>', e.g. 'nsu=urn:example;s=Devices'"
+        )
+    return unquote(parts[0]), parts[1]
+
+
+def _browse_fingerprint(config: dict[str, Any]) -> str:
+    """Hash of the browse-relevant config (server URL + browse section).
+
+    Lets the cached browse structure survive a config reload when the address
+    space to discover has not changed.
+    """
+    payload = {"server_url": config.get("server_url"), "browse": config.get("browse")}
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 
 """
@@ -579,6 +622,12 @@ class OPCUAConfig:
                 "Parameter 'opcua.disable_config_cache' must be a boolean or string (true/false)"
             )
 
+        opcua_config["config_cache_ttl"] = OPCUAConfig._validate_positive_int(
+            opcua_config.get("config_cache_ttl", _CONFIG_CACHE_TTL),
+            "opcua.config_cache_ttl",
+            max_value=_MAX_CACHE_TTL,
+        )
+
         # Validate allow_insecure_auth if present (accepts bool or string)
         allow_insecure_auth = opcua_config.get("allow_insecure_auth")
         if allow_insecure_auth is not None and not isinstance(
@@ -598,6 +647,7 @@ class OPCUAConfig:
             if isinstance(node_spec, str):
                 if not node_spec.strip():
                     raise ValueError(f"Empty node_id for field '{field_name}'")
+                node_id = node_spec
             elif isinstance(node_spec, list):
                 if len(node_spec) != 2:
                     raise ValueError(
@@ -618,6 +668,39 @@ class OPCUAConfig:
                     f"Expected string or [node_id, type] list."
                 )
 
+            # nsu= node IDs must be 'nsu=<uri>;<identifier>'.
+            if node_id.startswith("nsu="):
+                _split_nsu_node_id(node_id)
+
+    @staticmethod
+    def _validate_positive_int(
+        value: Any, param_name: str, max_value: int | None = None
+    ) -> int:
+        """Validate a positive-integer parameter, coercing numeric strings.
+
+        Rejects booleans, floats, and non-numeric values with a uniform message.
+        When max_value is set, also rejects values above that ceiling.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError(
+                f"Parameter '{param_name}' must be a positive integer, got: {value}"
+            )
+        try:
+            parsed = int(value)
+        except ValueError:
+            raise ValueError(
+                f"Parameter '{param_name}' must be a positive integer, got: {value}"
+            )
+        if parsed < 1:
+            raise ValueError(
+                f"Parameter '{param_name}' must be a positive integer, got: {value}"
+            )
+        if max_value is not None and parsed > max_value:
+            raise ValueError(
+                f"Parameter '{param_name}' must be at most {max_value}, got: {value}"
+            )
+        return parsed
+
     @staticmethod
     def _validate_toml_browse(browse: Any):
         """Validate browse section in TOML config"""
@@ -632,12 +715,19 @@ class OPCUAConfig:
         browse_root = browse["browse_root"]
         if not isinstance(browse_root, str) or not browse_root.strip():
             raise ValueError("Parameter 'opcua.browse.browse_root' must be a non-empty string")
+        if browse_root.startswith("nsu="):
+            _split_nsu_node_id(browse_root)
 
-        browse_depth = browse.get("browse_depth", _DEFAULT_BROWSE_DEPTH)
-        if not isinstance(browse_depth, int) or browse_depth < 1:
-            raise ValueError(
-                f"Parameter 'opcua.browse.browse_depth' must be a positive integer, got: {browse_depth}"
-            )
+        browse["browse_depth"] = OPCUAConfig._validate_positive_int(
+            browse.get("browse_depth", _DEFAULT_BROWSE_DEPTH), "opcua.browse.browse_depth"
+        )
+        browse_depth = browse["browse_depth"]
+
+        browse["browse_cache_ttl"] = OPCUAConfig._validate_positive_int(
+            browse.get("browse_cache_ttl", _DEFAULT_BROWSE_CACHE_TTL),
+            "opcua.browse.browse_cache_ttl",
+            max_value=_MAX_CACHE_TTL,
+        )
 
         # path_tags: required list of tag names for Object hierarchy levels
         if "path_tags" not in browse:
@@ -785,19 +875,21 @@ class OPCUAConfig:
             if not browse_root:
                 raise ValueError("Parameter 'browse_root' must be non-empty")
 
+            if browse_root.startswith("nsu="):
+                _split_nsu_node_id(browse_root)
             browse_config["browse_root"] = browse_root
 
             browse_depth = self.args.get("browse_depth")
             if browse_depth is not None:
-                try:
-                    depth_val = int(browse_depth)
-                    if depth_val < 1:
-                        raise ValueError
-                    browse_config["browse_depth"] = depth_val
-                except ValueError:
-                    raise ValueError(
-                        f"Parameter 'browse_depth' must be a positive integer, got: {browse_depth}"
-                    )
+                browse_config["browse_depth"] = self._validate_positive_int(
+                    browse_depth, "browse_depth"
+                )
+
+            browse_config["browse_cache_ttl"] = self._validate_positive_int(
+                self.args.get("browse_cache_ttl", _DEFAULT_BROWSE_CACHE_TTL),
+                "browse_cache_ttl",
+                max_value=_MAX_CACHE_TTL,
+            )
 
             # path_tags: required list of tag names for hierarchy levels
             path_tags_arg = self.args.get("path_tags")
@@ -959,6 +1051,12 @@ class OPCUAConfig:
             str(self.args.get("disable_config_cache", "false")).lower() == "true"
         )
 
+        config_cache_ttl: int = self._validate_positive_int(
+            self.args.get("config_cache_ttl", _CONFIG_CACHE_TTL),
+            "config_cache_ttl",
+            max_value=_MAX_CACHE_TTL,
+        )
+
         allow_insecure_auth: bool = (
             str(self.args.get("allow_insecure_auth", "false")).lower() == "true"
         )
@@ -974,6 +1072,7 @@ class OPCUAConfig:
                 "security": security_config,
                 "auth": auth_config,
                 "disable_config_cache": disable_config_cache,
+                "config_cache_ttl": config_cache_ttl,
                 "allow_insecure_auth": allow_insecure_auth,
                 "enable_full_logging": enable_full_logging,
             }
@@ -1072,7 +1171,8 @@ class OPCUAConnectionManager:
     """Manages OPC UA client connection and node reading"""
 
     def __init__(self, config: dict[str, Any], influxdb3_local, task_id: str):
-        self.config: dict[str, Any] = config
+        self._original_config: dict[str, Any] = config
+        self.config: dict[str, Any] = config  # working copy is set by _resolve_namespace_uris on connect
         self.influxdb3_local = influxdb3_local
         self.task_id: str = task_id
         self.client: Client | None = None
@@ -1130,6 +1230,13 @@ class OPCUAConnectionManager:
 
             return True
 
+        except ValueError as e:
+            self.influxdb3_local.error(
+                f"[{self.task_id}] OPC UA configuration error: {_exc(e)}"
+            )
+            await self.disconnect_silent()
+            return False
+
         except Exception:
             if self.config.get("security", {}).get("security_policy"):
                 self.influxdb3_local.error(
@@ -1142,17 +1249,27 @@ class OPCUAConnectionManager:
                     f"[{self.task_id}] Error connecting to OPC UA server: "
                     f"connection failed. Check server address and availability."
                 )
+            await self.disconnect_silent()
             return False
+
+    async def apply_config(self, config: dict[str, Any]) -> None:
+        """Replace the source config and resolve nsu= URIs against the live session."""
+        self._original_config = config
+        await self._resolve_namespace_uris()
 
     async def _resolve_namespace_uris(self):
         """Resolve nsu= prefixed node IDs to ns= using server's namespace array.
 
-        Scans all node IDs in 'nodes' and 'tag_nodes' config sections.
-        Replaces 'nsu=<uri>;...' with 'ns=<index>;...' using the server's
-        namespace array lookup.
+        Scans all node IDs in the 'nodes' and 'tag_nodes' config sections and
+        the 'browse.browse_root'. Replaces 'nsu=<uri>;...' with 'ns=<index>;...'
+        using the server's namespace array lookup.
         """
         if not self.client:
             return
+
+        # Resolve from the original (nsu=) config so every reconnect re-resolves
+        # against the current server namespace array instead of reusing a stale index.
+        self.config = copy.deepcopy(self._original_config)
 
         # Collect unique URIs to resolve
         uris_to_resolve: set[str] = set()
@@ -1161,8 +1278,14 @@ class OPCUAConnectionManager:
             for node_spec in nodes_config.values():
                 node_id = node_spec[0] if isinstance(node_spec, list) else node_spec
                 if node_id.startswith("nsu="):
-                    uri = node_id.split(";", 1)[0][4:]  # strip "nsu="
+                    uri, _ = _split_nsu_node_id(node_id)
                     uris_to_resolve.add(uri)
+
+        browse_config: dict = self.config.get("browse", {})
+        browse_root = browse_config.get("browse_root")
+        if isinstance(browse_root, str) and browse_root.startswith("nsu="):
+            uri, _ = _split_nsu_node_id(browse_root)
+            uris_to_resolve.add(uri)
 
         if not uris_to_resolve:
             return
@@ -1192,13 +1315,17 @@ class OPCUAConnectionManager:
                     node_id = node_spec
 
                 if node_id.startswith("nsu="):
-                    uri, rest = node_id[4:].split(";", 1)
+                    uri, rest = _split_nsu_node_id(node_id)
                     idx = uri_to_index[uri]
                     resolved = f"ns={idx};{rest}"
                     if isinstance(node_spec, list):
                         nodes_config[field_name] = [resolved, node_spec[1]]
                     else:
                         nodes_config[field_name] = resolved
+
+        if isinstance(browse_root, str) and browse_root.startswith("nsu="):
+            uri, rest = _split_nsu_node_id(browse_root)
+            browse_config["browse_root"] = f"ns={uri_to_index[uri]};{rest}"
 
     async def read_nodes(self, config_key: str = "nodes") -> list[dict[str, Any]]:
         """Batch-read all configured nodes in a single OPC UA Read request.
@@ -1785,7 +1912,7 @@ async def _read_with_reconnect(opcua_client, operation, label, influxdb3_local, 
     try:
         return await operation()
     except Exception as e:
-        influxdb3_local.warn(f"[{task_id}] {label} failed ({e}), reconnecting...")
+        influxdb3_local.warn(f"[{task_id}] {label} failed ({_exc(e)}), reconnecting...")
         influxdb3_local.cache.delete("opcua_browse_structure")
         if not await opcua_client.reconnect():
             influxdb3_local.cache.delete("opcua_connection")
@@ -1808,18 +1935,36 @@ async def _async_scheduled_call(
         config_from_cache: bool = True
         cached_config: dict | None = influxdb3_local.cache.get("opcua_config")
 
+        disable_config_cache: bool = False
         if cached_config is None:
             config_from_cache = False
             config_loader: OPCUAConfig = OPCUAConfig(influxdb3_local, args, task_id)
             cached_config = config_loader.get_opcua_config()
 
-            if not str(cached_config.get("disable_config_cache", False)).lower() == "true":
-                influxdb3_local.cache.put(
-                    "opcua_config", cached_config, _CONFIG_CACHE_TTL
-                )
+            disable_config_cache = (
+                str(cached_config.get("disable_config_cache", False)).lower() == "true"
+            )
 
-            # Config changed — invalidate cached browse structure
-            influxdb3_local.cache.delete("opcua_browse_structure")
+            if disable_config_cache:
+                # Dev mode: reload everything on every call.
+                influxdb3_local.cache.delete("opcua_browse_structure")
+                influxdb3_local.cache.delete("opcua_browse_fingerprint")
+            else:
+                influxdb3_local.cache.put(
+                    "opcua_config", cached_config, cached_config["config_cache_ttl"]
+                )
+                # Rebrowse only when the browse-relevant config changed; otherwise
+                # keep the cached structure across config reloads.
+                new_fp = _browse_fingerprint(cached_config)
+                if influxdb3_local.cache.get("opcua_browse_fingerprint") != new_fp:
+                    influxdb3_local.cache.delete("opcua_browse_structure")
+                    browse_ttl = (cached_config.get("browse") or {}).get(
+                        "browse_cache_ttl", _DEFAULT_BROWSE_CACHE_TTL
+                    )
+                    fp_ttl = max(cached_config["config_cache_ttl"], browse_ttl)
+                    influxdb3_local.cache.put(
+                        "opcua_browse_fingerprint", new_fp, fp_ttl
+                    )
 
             browse_config_log = cached_config.get("browse")
             if browse_config_log:
@@ -1871,6 +2016,9 @@ async def _async_scheduled_call(
             opcua_client = OPCUAConnectionManager(cached_config, influxdb3_local, task_id)
             if not await opcua_client.connect():
                 influxdb3_local.error(f"[{task_id}] Failed to connect to OPC UA server")
+                # Drop the cached config so a credential/endpoint change is
+                # re-read on the next call instead of after config_cache_ttl.
+                influxdb3_local.cache.delete("opcua_config")
                 opcua_client = None
                 return
             influxdb3_local.cache.put("opcua_connection", opcua_client)
@@ -1878,7 +2026,24 @@ async def _async_scheduled_call(
             # Reuse existing connection — update task_id and config for this call
             opcua_client.task_id = task_id
             if not config_from_cache:
-                opcua_client.config = cached_config
+                # Fresh config has unresolved nsu= URIs — re-resolve on the live connection.
+                try:
+                    await opcua_client.apply_config(cached_config)
+                except ValueError as e:
+                    influxdb3_local.error(
+                        f"[{task_id}] Namespace/config error resolving nsu= URIs: {_exc(e)}"
+                    )
+                    influxdb3_local.cache.delete("opcua_config")
+                    return
+                except Exception as e:
+                    influxdb3_local.warn(
+                        f"[{task_id}] Namespace resolution on cached connection "
+                        f"failed ({_exc(e)}), reconnecting..."
+                    )
+                    if not await opcua_client.reconnect():
+                        influxdb3_local.cache.delete("opcua_connection")
+                        influxdb3_local.error(f"[{task_id}] Reconnect failed")
+                        return
 
         dynamic_tags: dict[str, str] = {}
         if cached_config.get("tag_nodes"):
@@ -1918,13 +2083,23 @@ async def _async_scheduled_call(
                         return
                     browse_structure = await opcua_client.browse_nodes()
                     if not browse_structure:
+                        resolved_root = opcua_client.config.get("browse", {}).get("browse_root")
                         influxdb3_local.warn(
-                            f"[{task_id}] Browse still empty after reconnect"
+                            f"[{task_id}] Browse from '{resolved_root}' "
+                            f"returned no variables after reconnect. Likely causes: "
+                            f"browse_root does not exist on the server (wrong or stale "
+                            f"ns= index), 'filter'/'exclude_branches' excludes every "
+                            f"variable, browse_depth is too shallow to reach Variable "
+                            f"nodes, or the subtree genuinely has no variables."
                         )
                         return
-                influxdb3_local.cache.put(
-                    "opcua_browse_structure", browse_structure, _CONFIG_CACHE_TTL
-                )
+                # Skip when the config cache is disabled
+                if not disable_config_cache:
+                    influxdb3_local.cache.put(
+                        "opcua_browse_structure",
+                        browse_structure,
+                        browse_config["browse_cache_ttl"],
+                    )
 
             group_results = await _read_with_reconnect(
                 opcua_client,
@@ -2046,6 +2221,7 @@ async def _async_scheduled_call(
         influxdb3_local.cache.delete("opcua_config")
         influxdb3_local.cache.delete("opcua_connection")
         influxdb3_local.cache.delete("opcua_browse_structure")
+        influxdb3_local.cache.delete("opcua_browse_fingerprint")
 
 
 def process_scheduled_call(

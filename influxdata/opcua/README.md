@@ -46,10 +46,10 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 **One of the following is required** (mutually exclusive):
 
-| Parameter     | Type    | TOML Section     | Description                                                                                               |
-|---------------|---------|------------------|-----------------------------------------------------------------------------------------------------------|
-| `nodes`       | string  | `[opcua.nodes]`  | Space-separated node mappings. Format: `field_name:namespace:identifier[:type]`. See [Node mapping](#node-mapping-format). |
-| `browse_root` | string  | `[opcua.browse]` | Root node ID for auto-discovery mode (e.g., `ns=2;s=Devices`). See [Browse mode](#browse-mode-parameters). |
+| Parameter     | Type    | TOML Section     | Description                                                                                                                         |
+|---------------|---------|------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `nodes`       | string  | `[opcua.nodes]`  | Space-separated node mappings. Format: `field_name:namespace:identifier[:type]`. See [Node mapping](#node-mapping-format).          |
+| `browse_root` | string  | `[opcua.browse]` | Root node ID for auto-discovery mode (e.g., `ns=2;s=Devices` or `nsu=<uri>;s=Devices`). See [Browse mode](#browse-mode-parameters). |
 
 ### Namespace parameters
 
@@ -78,16 +78,19 @@ The plugin resolves `nsu=` URIs to numeric `ns=` indexes after connecting to the
 
 ### Browse mode parameters
 
-| Parameter          | Type   | Default   | TOML Section     | Description                                                                                                                                                                                                                                                                                                                             |
-|--------------------|--------|-----------|------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `browse_root`      | string | none      | `[opcua.browse]` | Root node ID for auto-discovery (e.g., `ns=2;s=Devices`)                                                                                                                                                                                                                                                                                |
-| `browse_depth`     | int    | 2         | `[opcua.browse]` | Maximum browse depth. 1 = direct children, 2 = children of children, etc.                                                                                                                                                                                                                                                               |
-| `path_tags`        | list   | `[]`      | `[opcua.browse]` | Tag names mapping Object hierarchy levels to InfluxDB tags. First entry maps to depth-1 Objects, second to depth-2, etc. Length must be strictly less than `browse_depth`. Objects beyond `path_tags` length become field name prefixes. **Required in TOML** (specify `[]` explicitly for no hierarchy tags); defaults to `[]` in CLI. |
-| `filter`           | string | none      | `[opcua.browse]` | Regex pattern to filter discovered variable names. Only matching variables are included. Matches the original Variable browse name, not the prefixed field name (see [filter in nested hierarchies](#filter-in-nested-hierarchies)).                                                                                                    |
-| `exclude_branches` | string | none      | `[opcua.browse]` | Regex pattern to exclude Object nodes (branches) by browse name. Matched Objects and their entire subtree are skipped. Works at all browse depths. See [Exclude branches](#exclude-branches).                                                                                                                                           |
-| `browse_tags`      | list   | none      | `[opcua.browse]` | Variable names that should be stored as InfluxDB tags instead of fields. Values are converted to strings. See [Browse tags](#browse-tags).                                                                                                                                                                                              |
-| `name_separator`   | string | none      | `[opcua.browse]` | Separator for splitting Variable browse names into segments for tag extraction. Required when `name_tags` is set. See [Name tags](#name-tags).                                                                                                                                                                                          |
-| `name_tags`        | list   | none      | `[opcua.browse]` | Tag names extracted from leading segments of Variable browse names split by `name_separator`. Remaining segments form the field name (joined with `_`). See [Name tags](#name-tags).                                                                                                                                                    |
+| Parameter          | Type   | Default   | TOML Section     | Description                                                                                                                                                                                                                                                                                                                                                  |
+|--------------------|--------|-----------|------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `browse_root`      | string | none      | `[opcua.browse]` | Root node ID for auto-discovery. Accepts a numeric namespace (`ns=2;s=Devices`) or a namespace URI (`nsu=<uri>;s=Devices`) resolved at connection time for restart stability. See [Namespace URI resolution](#namespace-uri-resolution).                                                                                                                     |
+| `browse_depth`     | int    | 2         | `[opcua.browse]` | Maximum browse depth. 1 = direct children, 2 = children of children, etc.                                                                                                                                                                                                                                                                                    |
+| `browse_cache_ttl` | int    | 3600      | `[opcua.browse]` | Seconds to cache the discovered node set before re-browsing. Discovery runs on the first call and every `browse_cache_ttl` seconds thereafter; cached node IDs are read in between. Set low for a fast-changing address space, high to run discovery infrequently while collecting on a short trigger interval. See [Discovery caching](#discovery-caching). |
+| `path_tags`        | list   | `[]`      | `[opcua.browse]` | Tag names mapping Object hierarchy levels to InfluxDB tags. First entry maps to depth-1 Objects, second to depth-2, etc. Length must be strictly less than `browse_depth`. Objects beyond `path_tags` length become field name prefixes. **Required in TOML** (specify `[]` explicitly for no hierarchy tags); defaults to `[]` in CLI.                      |
+| `filter`           | string | none      | `[opcua.browse]` | Regex pattern to filter discovered variable names. Only matching variables are included. Matches the original Variable browse name, not the prefixed field name (see [filter in nested hierarchies](#filter-in-nested-hierarchies)).                                                                                                                         |
+| `exclude_branches` | string | none      | `[opcua.browse]` | Regex pattern to exclude Object nodes (branches) by browse name. Matched Objects and their entire subtree are skipped. Works at all browse depths. See [Exclude branches](#exclude-branches).                                                                                                                                                                |
+| `browse_tags`      | list   | none      | `[opcua.browse]` | Variable names that should be stored as InfluxDB tags instead of fields. Values are converted to strings. See [Browse tags](#browse-tags).                                                                                                                                                                                                                   |
+| `name_separator`   | string | none      | `[opcua.browse]` | Separator for splitting Variable browse names into segments for tag extraction. Required when `name_tags` is set. See [Name tags](#name-tags).                                                                                                                                                                                                               |
+| `name_tags`        | list   | none      | `[opcua.browse]` | Tag names extracted from leading segments of Variable browse names split by `name_separator`. Remaining segments form the field name (joined with `_`). See [Name tags](#name-tags).                                                                                                                                                                         |
+
+> **Note:** integer parameters (`browse_depth`, `browse_cache_ttl`) also accept numeric strings, so `browse_depth = "2"` is valid in TOML. `browse_cache_ttl` is capped at 30 days.
 
 ### Tag parameters
 
@@ -142,7 +145,8 @@ quality_filter = ["good", "uncertain"]
 | Parameter              | Type   | Default | TOML Section | Description                                                                                                                                                                                                              |
 |------------------------|--------|---------|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `config_file_path`     | string | none    | CLI only     | Path to TOML config file (absolute or relative to `PLUGIN_DIR`)                                                                                                                                                          |
-| `disable_config_cache` | bool   | false   | `[opcua]`    | Reload configuration on every call instead of caching for 1 hour. Useful during development.                                                                                                                             |
+| `config_cache_ttl`     | int    | 3600    | `[opcua]`    | Seconds to cache the parsed configuration (max 2592000). Controls how quickly credential, endpoint, table, or filter changes take effect. Independent of `browse_cache_ttl`.                                             |
+| `disable_config_cache` | bool   | false   | `[opcua]`    | Reload configuration on every call instead of caching for `config_cache_ttl` seconds. Also disables caching of the discovered browse structure, so in browse mode the address space is re-walked on every call. Useful during development. |
 | `allow_insecure_auth`  | bool   | false   | `[opcua]`    | Permit sending `username`/`password` when `security_policy` is not set (credentials sent in cleartext over an unencrypted connection). Only enable on a trusted network.                                                 |
 | `enable_full_logging`  | bool   | false   | `[opcua]`    | When `true`, full exception messages are written to logs. When `false` (default), only the exception type is logged, to avoid leaking sensitive values (credentials, payloads, paths). Enable temporarily for debugging. |
 
@@ -316,16 +320,16 @@ If a relative path is specified and `PLUGIN_DIR` is not set, the plugin will ret
 
 ### TOML section reference
 
-| TOML section           | Description                                                                                                                                         |
-|------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `[opcua]`              | Required. `server_url`, `table_name`, `quality_filter`, `disable_config_cache`, `allow_insecure_auth`                                               |
-| `[opcua.default_tags]` | Static tags as `key = "value"` pairs                                                                                                                |
-| `[opcua.namespaces]`   | Namespace alias mappings as `alias = "uri"` pairs. Validated but not used for alias substitution in TOML — use `nsu=<uri>;...` directly in node IDs |
-| `[opcua.tag_nodes]`    | Dynamic tags from OPC UA nodes                                                                                                                      |
-| `[opcua.nodes]`        | Explicit node mappings (mutually exclusive with `[opcua.browse]`)                                                                                   |
-| `[opcua.browse]`       | Browse mode settings: `browse_root`, `browse_depth`, `path_tags`, `filter`, `exclude_branches`, `browse_tags`, `name_separator`, `name_tags`        |
-| `[opcua.security]`     | `security_policy`, `security_mode`, `certificate`, `private_key`                                                                                    |
-| `[opcua.auth]`         | `username`, `password`                                                                                                                              |
+| TOML section           | Description                                                                                                                                                      |
+|------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `[opcua]`              | Required. `server_url`, `table_name`, `quality_filter`, `config_cache_ttl`, `disable_config_cache`, `allow_insecure_auth`                                        |
+| `[opcua.default_tags]` | Static tags as `key = "value"` pairs                                                                                                                             |
+| `[opcua.namespaces]`   | Namespace alias mappings as `alias = "uri"` pairs. Validated but not used for alias substitution in TOML — use `nsu=<uri>;...` directly in node IDs              |
+| `[opcua.tag_nodes]`    | Dynamic tags from OPC UA nodes                                                                                                                                   |
+| `[opcua.nodes]`        | Explicit node mappings (mutually exclusive with `[opcua.browse]`)                                                                                                |
+| `[opcua.browse]`       | Browse mode settings: `browse_root`, `browse_depth`, `browse_cache_ttl`, `path_tags`, `filter`, `exclude_branches`, `browse_tags`, `name_separator`, `name_tags` |
+| `[opcua.security]`     | `security_policy`, `security_mode`, `certificate`, `private_key`                                                                                                 |
+| `[opcua.auth]`         | `username`, `password`                                                                                                                                           |
 
 ## Node Mapping Format
 
@@ -773,16 +777,26 @@ Unlike `tag_nodes` which always require "good" quality, `browse_tags` variables 
 
 If all variables in a device group are listed in `browse_tags` (no regular fields remain), no data point is written for that group. InfluxDB requires at least one field per point — browse_tags alone are not sufficient.
 
-### Config and browse structure caching
+### Discovery caching
 
-Both the parsed configuration and the browse structure are cached for **1 hour** (controlled by `_CONFIG_CACHE_TTL`). This means:
-- Changes to the TOML configuration file will not take effect until the cache expires (or use `disable_config_cache = true` during development)
-- New devices added to the OPC UA server will not appear until the browse cache expires
+Two independent caches, each with its own TTL:
+
+- **Parsed configuration** — cached for `config_cache_ttl` seconds (default **1 hour**). Controls how quickly a change to credentials, endpoint, table, or filters is picked up.
+- **Discovered browse structure** — cached for `browse_cache_ttl` seconds (default **1 hour**). Discovery runs on the first call and every `browse_cache_ttl` seconds thereafter; cached node IDs are read in between.
+
+This means:
+- Set a low `browse_cache_ttl` for a fast-changing address space, or set it much larger than the trigger interval so discovery runs rarely while collection stays frequent — the recommended pattern for large or high-latency servers where a full browse is expensive
+- New devices added to the OPC UA server appear after at most `browse_cache_ttl` seconds
+- Changes to the config take effect after at most `config_cache_ttl` seconds. Changes to the browse-relevant part (`server_url`, `browse_root`, `browse_depth`, `filter`, `exclude_branches`, …) also trigger an immediate re-browse on the next config reload; other changes keep the cached structure
+- A failed connection drops the cached config, so a credential or endpoint fix is retried on the next call rather than after `config_cache_ttl`
+- `disable_config_cache = true` disables both caches, so config and address space are re-read on every call
 - Any unhandled error clears all caches, forcing a fresh reload on the next call
 
 ### Namespace URI resolution
 
 When using `nsu=` node IDs (either from `namespaces` aliases in CLI mode or directly in TOML), the URI-to-index resolution happens **once at connection time**. The resolved numeric indexes are stored in the config object. If the server assigns different namespace indexes after a restart, the plugin will re-resolve them on the next reconnect.
+
+This applies to `nodes`, `tag_nodes`, and `browse_root` — use `browse_root = "nsu=<uri>;s=..."` in browse mode for the same restart stability. If the URI is not found on the server, connection fails with a configuration error rather than browsing into an empty result.
 
 ### Namespace aliases in TOML vs CLI
 
@@ -872,6 +886,7 @@ When using a security policy, both files are required:
 #### "Browse discovered no variables" (browse mode)
 
 - Verify `browse_root` points to a valid node that contains Object or Variable children
+- If `browse_root` uses a numeric `ns=` index, confirm the index is still current — it can shift after a server restart. Use `nsu=<uri>;s=...` instead so the plugin resolves the index at connection time
 - Check that `browse_depth` is sufficient to reach Variable nodes
 - The root node may contain nodes of other types (e.g., Methods) — only Objects and Variables are traversed
 - If using `filter`, verify the regex pattern matches your variable names
@@ -880,7 +895,7 @@ When using a security policy, both files are required:
 
 #### Config changes not taking effect
 
-- Configuration is cached for 1 hour — either wait for expiry or set `disable_config_cache = true`
+- Configuration is cached for `config_cache_ttl` seconds (default 1 hour) — either wait for expiry, lower `config_cache_ttl`, or set `disable_config_cache = true`
 - Any plugin error automatically clears the cache
 
 #### "Previous opcua call still running, skipping this tick"

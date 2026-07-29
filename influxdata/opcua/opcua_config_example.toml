@@ -38,6 +38,11 @@ table_name = "cnc_machine"
 # exception type is logged, to avoid leaking sensitive values into log output.
 # enable_full_logging = false
 
+# Seconds to cache the parsed configuration (default: 3600, max: 2592000).
+# Controls how quickly credential/endpoint/table/filter changes take effect.
+# Independent of browse_cache_ttl.
+# config_cache_ttl = 3600
+
 # Static tags added to every data point
 [opcua.default_tags]
 location = "factory_1"
@@ -240,6 +245,9 @@ is_running = "ns=2;s=MachineRunning"
 #                                       #   1 = only direct children of browse_root
 #                                       #   2 = children of children (device -> variables)
 #                                       #   3 = deeper nesting (device -> subgroup -> variables)
+# browse_cache_ttl = 3600               # Seconds to cache the discovered node set (default: 3600)
+#                                       #   Lower for a fast-changing address space; higher to
+#                                       #   discover infrequently while collecting on a short interval
 # path_tags = ["device"]                # Depth-1 Objects -> "device" tag
 # # filter = "Temperature|Pressure"     # Optional: regex to include only matching variable names
 # # exclude_branches = "debug_.*|test_bench"  # Optional: regex to exclude Object branches by name

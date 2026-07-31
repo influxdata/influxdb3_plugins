@@ -1,0 +1,56 @@
+# Nori Regression plugin configuration for a scheduled trigger.
+# Use via the config_file_path trigger argument (path relative to PLUGIN_DIR).
+# This file supplies EVERY parameter: it is mutually exclusive with inline trigger arguments
+# and with an HTTP request body.
+
+########## Required ##########
+# Source measurement (table) to read from.
+measurement = "sensors"
+# The numeric field to predict. The plugin trains on the rows where it is present and predicts
+# (imputes) the rows where it is null.
+field = "pressure"
+# Numeric feature columns (X) used to predict `field`. A TOML array is the only form that can
+# name a column containing a space.
+feature_fields = ["temp", "humidity"]
+
+########## Optional ##########
+# Time window of rows to read, ending at the trigger's call time.
+# Units: s, min, h, d, w (integer magnitude). Default: "30d".
+#window = "30d"
+# Fixed window instead of a trailing one. With skip_existing left on, a schedule over a fixed
+# window backfills and then stops calling the gateway. Either bound may be given alone.
+#start_time = "2026-01-01T00:00:00Z"
+#end_time = "2026-02-01T00:00:00Z"
+# Filter to a single series. A run must resolve to one series; the plugin fails if the window
+# holds more. Default: no filter.
+#tags = { site = "A" }
+# Nori gateway slug. "synthefy/nori-30m" (default, ~29M parameters) or "synthefy/nori-6m"
+# (cheaper, faster cold start). The bare "synthefy/nori" slug is retired.
+#model = "synthefy/nori-30m"
+# Measurement to write predictions to. Default: "<measurement>_regressed".
+#output_measurement = "sensors_regressed"
+# Write predictions to another database. Default: the trigger's database.
+#target_database = "predictions"
+# Log the predictions without writing them. Default: false.
+#dry_run = false
+# Skip rows that already hold a prediction in output_measurement, so a repeating schedule does
+# not re-send and re-bill the same rows. Set false to refresh earlier predictions with newer
+# training data. Default: true.
+#skip_existing = true
+# Minimum labeled rows (target present) required to train; the run is skipped below this.
+# Default: 50.
+#min_history = 50
+# Cap on labeled rows sent as the in-context training set; the most recent rows are kept.
+# The gateway bills per training row and column, so this is the main cost control. Default: 1000.
+#max_train_rows = 1000
+# Cap on rows predicted per run; the most recent rows are kept and the rest wait for a later
+# run. Default: 5000.
+#max_predict_rows = 5000
+# Rows per gateway call. Each batch re-sends the training context and is billed separately, so a
+# larger value costs less. Default: 1000.
+#predict_batch_size = 1000
+# Timeout for one gateway call. A cold start has been measured at 60-130s, so keep this well
+# above that. Default: "300s".
+#request_timeout = "300s"
+# Maximum attempts per gateway call and per write (1 disables retry). Default: 3.
+#max_retries = 3

@@ -201,7 +201,7 @@ influxdb3 query --database YOUR_DATABASE "SELECT * FROM system.processing_engine
 
 ### Main functions
 
-#### `process_http_request(influxdb3_local, request_body, args)`
+#### `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 
 Handles incoming HTTP notification requests. Parses the request body, extracts notification text and sender configurations, and dispatches notifications to configured channels.
 

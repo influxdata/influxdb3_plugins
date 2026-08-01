@@ -4,6 +4,11 @@ Loads a plugin's TOML config (resolved via the plugin directory), merges
 environment variables and engine-supplied ``args``, and validates the result.
 dynaconf is an implementation detail and must not leak into plugin code beyond
 the re-exported ``Validator``.
+
+All values are treated as literal data. dynaconf's ``@`` token substitution
+(``@read_file``, ``@format``, ``@get``, ...) is disabled so that a value
+beginning with ``@`` is never evaluated against the server's filesystem or
+environment; see https://github.com/influxdata/influxdb3_plugins/issues/134.
 """
 
 import os
@@ -104,8 +109,14 @@ def load_plugin_config(
             with open(resolve_path(config_file_path), "rb") as config_file:
                 layers.update(tomllib.load(config_file))
 
-    # loaders=[] disables the DYNACONF_* env loader; env is read only via env_keys
-    settings = Dynaconf(loaders=[])
+    # loaders=[] disables the DYNACONF_* env loader; env is read only via
+    # env_keys. AUTO_CAST_FOR_DYNACONF=False disables dynaconf's "@" token
+    # substitution (@read_file, @format, @jinja, @get, ... — ~30 tokens, each
+    # beginning with "@"). Without it, any string value that begins with "@" is
+    # evaluated instead of stored as data, so an untrusted value arriving in an
+    # HTTP request body could read the server's files or environment variables.
+    # See https://github.com/influxdata/influxdb3_plugins/issues/134.
+    settings = Dynaconf(loaders=[], AUTO_CAST_FOR_DYNACONF=False)
     settings.update(layers)
     if validators:
         settings.validators.register(*validators)

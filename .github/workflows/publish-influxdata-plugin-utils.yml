@@ -164,7 +164,7 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Upload distribution artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ env.PACKAGE_NAME }}-dist
           path: ${{ env.PACKAGE_DIR }}/dist/
@@ -173,7 +173,7 @@ jobs:
       # Kept out of dist/ so the notes are never offered to PyPI or attached as
       # a release asset.
       - name: Upload release notes artifact
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: ${{ env.PACKAGE_NAME }}-release-notes
           path: ${{ runner.temp }}/release-notes.md
@@ -191,7 +191,7 @@ jobs:
       id-token: write
     steps:
       - name: Download distribution artifact
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ${{ env.PACKAGE_NAME }}-dist
           path: dist/
@@ -216,13 +216,13 @@ jobs:
       PRERELEASE: ${{ needs.build.outputs.prerelease }}
     steps:
       - name: Download distribution artifact
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ${{ env.PACKAGE_NAME }}-dist
           path: dist/
 
       - name: Download release notes artifact
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: ${{ env.PACKAGE_NAME }}-release-notes
           path: ${{ runner.temp }}/

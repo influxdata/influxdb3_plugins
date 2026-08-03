@@ -180,7 +180,7 @@ plugin) turns gapfill into a sensor-health monitor.
 2. Install the Python dependencies into the plugin environment:
 
    ```bash
-   influxdb3 install package "influxdata-plugin-utils>=0.2.0"
+   influxdb3 install package "influxdata-plugin-utils>=0.3.0"
    influxdb3 install package scipy
    ```
 
@@ -342,7 +342,7 @@ report rows.
 
 **Cause**: The plugin environment lacks `scipy` or `influxdata-plugin-utils`.
 
-**Solution**: Run `influxdb3 install package "influxdata-plugin-utils>=0.2.0"`
+**Solution**: Run `influxdb3 install package "influxdata-plugin-utils>=0.3.0"`
 and `influxdb3 install package scipy`, then re-enable the trigger.
 
 #### Issue: Field type conflict on write

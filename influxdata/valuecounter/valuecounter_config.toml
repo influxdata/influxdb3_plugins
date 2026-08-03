@@ -7,7 +7,7 @@
 # Mode A — WAL trigger (process_writes)
 # ------------------------------------------------------------
 # 'table' is determined by the WAL trigger spec (`table:<name>`); do NOT set it here.
-# period = "60s"
+# period = "60s"   # or period_seconds = 60; units: s, min, h, d, w
 # fields = ["status", "method"]
 # output_suffix = "_valuecounts"
 # dest_database = "rollups"

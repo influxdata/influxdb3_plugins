@@ -90,7 +90,7 @@ grid node is written only when it has a source point on each side at most
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled
 - **Python packages** (declared in `manifest.toml`):
-  - `influxdata-plugin-utils>=0.2.0`
+  - `influxdata-plugin-utils>=0.3.0`
   - `scipy` (installs `numpy`)
 
 ## Installation steps
@@ -108,7 +108,7 @@ grid node is written only when it has a source point on each side at most
 2. Install required Python packages:
 
    ```bash
-   influxdb3 install package "influxdata-plugin-utils>=0.2.0"
+   influxdb3 install package "influxdata-plugin-utils>=0.3.0"
    influxdb3 install package scipy
    ```
 

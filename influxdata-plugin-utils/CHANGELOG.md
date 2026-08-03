@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-03
+
+### Changed
+
+- No functional changes. Released to exercise the tag-triggered release
+  automation added in
+  [#137](https://github.com/influxdata/influxdb3_plugins/pull/137), which
+  builds release notes from this file and publishes a GitHub release
+  alongside the PyPI upload.
+
 ## [0.3.0] - 2026-07-31
 
 ### Security
@@ -57,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `write` — `build_line`, `build_line_typed`, `add_field_with_type`,
   `write_data` (batching + retry), `BatchLines`.
 
-[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.0...HEAD
+[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.1...HEAD
+[0.3.1]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.0...utils-v0.3.1
 [0.3.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.2.0...utils-v0.3.0
 [0.2.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.1.0...utils-v0.2.0
 [0.1.0]: https://github.com/influxdata/influxdb3_plugins/releases/tag/utils-v0.1.0

@@ -28,6 +28,9 @@ jobs:
     name: Build distribution
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -43,6 +46,7 @@ jobs:
         run: python -m pip install --upgrade build twine packaging
 
       - name: Verify tag matches package version
+        id: meta
         shell: bash
         run: |
           set -euo pipefail
@@ -78,19 +82,77 @@ jobs:
               sys.exit(1)
 
           try:
-              tag_version = Version(expected)
               package_version = Version(actual)
           except InvalidVersion as exc:
               print(f"Invalid version: {exc}", file=sys.stderr)
               sys.exit(1)
 
-          if tag_version != package_version:
+          # Compare canonical text rather than PEP 440 equality. Version("0.3")
+          # equals Version("0.3.0"), so a loose tag would pass an equality check
+          # here, publish to PyPI as 0.3.0, and only then fail to find a
+          # "## [0.3]" changelog section that was never going to exist.
+          canonical = str(package_version)
+          if expected != canonical:
               print(
-                  f"Tag {tag!r} resolves to version {expected!r}, but package version is {actual!r}",
+                  f"Tag {tag!r} resolves to version {expected!r}, but the canonical "
+                  f"package version is {canonical!r}. Tag the release "
+                  f"{prefix}{canonical} instead.",
                   file=sys.stderr,
               )
               sys.exit(1)
-          print(f"Publishing {os.environ['PACKAGE_NAME']} {actual}")
+
+          # Every later step derives the version from this one canonical string.
+          with open(os.environ["GITHUB_OUTPUT"], "a") as handle:
+              handle.write(f"version={canonical}\n")
+              handle.write(f"prerelease={str(package_version.is_prerelease).lower()}\n")
+          print(f"Publishing {os.environ['PACKAGE_NAME']} {canonical}")
+          PY
+
+      # Generated here, before the PyPI upload, because a PyPI version cannot be
+      # republished. Finding a missing or empty changelog section after the
+      # upload would leave a version burned and no way to fix it from the tag.
+      - name: Generate release notes
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          package = os.environ["PACKAGE_NAME"]
+          changelog = Path(os.environ["PACKAGE_DIR"]) / "CHANGELOG.md"
+          text = changelog.read_text()
+
+          # End the section at the next "## " heading, the first link-definition
+          # line, or end of file. The oldest entry has no heading after it, so
+          # relying on a specific footer line would break whenever the footer
+          # is reordered or dropped.
+          pattern = rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |^\[[^\]]+\]:|\Z)"
+          match = re.search(pattern, text, re.MULTILINE | re.DOTALL)
+          if match is None:
+              print(f"No '## [{version}]' section found in {changelog}", file=sys.stderr)
+              sys.exit(1)
+
+          body = match.group(1).strip()
+          if not body:
+              print(f"The '## [{version}]' section in {changelog} is empty", file=sys.stderr)
+              sys.exit(1)
+
+          notes = (
+              f"{body}\n\n"
+              f"## Install\n\n"
+              f"```bash\n"
+              f"pip install {package}=={version}\n"
+              f"```\n\n"
+              f"[View on PyPI](https://pypi.org/project/{package}/{version}/)\n"
+          )
+          Path(os.environ["RUNNER_TEMP"], "release-notes.md").write_text(notes)
+          print(notes)
           PY
 
       - name: Build wheel and source distribution
@@ -108,6 +170,15 @@ jobs:
           path: ${{ env.PACKAGE_DIR }}/dist/
           if-no-files-found: error
 
+      # Kept out of dist/ so the notes are never offered to PyPI or attached as
+      # a release asset.
+      - name: Upload release notes artifact
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: ${{ env.PACKAGE_NAME }}-release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+
   publish:
     name: Publish distribution to PyPI
     needs: build
@@ -122,8 +193,63 @@ jobs:
       - name: Download distribution artifact
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
-          name: influxdata-plugin-utils-dist
+          name: ${{ env.PACKAGE_NAME }}-dist
           path: dist/
 
+      # skip-existing lets a re-run get past an upload that already succeeded so
+      # it can reach the release job. Tags are immutable under the ruleset, so a
+      # re-run always builds the same commit and the same version.
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          skip-existing: true
+
+  github-release:
+    name: Create GitHub release
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+      PRERELEASE: ${{ needs.build.outputs.prerelease }}
+    steps:
+      - name: Download distribution artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ env.PACKAGE_NAME }}-dist
+          path: dist/
+
+      - name: Download release notes artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: ${{ env.PACKAGE_NAME }}-release-notes
+          path: ${{ runner.temp }}/
+
+      # The registry release keeps the "Latest" badge: moving it would repoint
+      # /releases/latest/download/* away from the registry's index.json. An
+      # existing release is updated in place so a re-run is not a hard failure.
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+
+          flags=(
+            --repo "$GITHUB_REPOSITORY"
+            --title "${PACKAGE_NAME} ${VERSION}"
+            --notes-file "${RUNNER_TEMP}/release-notes.md"
+            --latest=false
+            --prerelease="$PRERELEASE"
+          )
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; updating notes and assets."
+            # --draft=false so a hand-drafted release for this tag is published
+            # rather than silently left invisible.
+            gh release edit "$tag" "${flags[@]}" --draft=false
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* "${flags[@]}" --verify-tag
+          fi

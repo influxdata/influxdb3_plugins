@@ -234,7 +234,7 @@ Key operations:
 2. Applies processing to each row
 3. Writes to target measurement immediately
 
-#### `process_http_request(influxdb3_local, request_body, args)`
+#### `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 Handles HTTP-triggered processing. Processes data sent via HTTP requests.
 
 Key operations:
@@ -256,7 +256,7 @@ Key operations:
 Plugin Module
 ├── process_scheduled_call()   # Scheduled trigger handler
 ├── process_writes()           # Data write trigger handler
-├── process_http_request()     # HTTP trigger handler
+├── process_request()     # HTTP trigger handler
 ├── validate_config()          # Configuration validation
 ├── apply_processing()         # Core processing logic
 └── helper_functions()         # Utility functions

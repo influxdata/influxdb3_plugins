@@ -127,3 +127,89 @@ jobs:
 
       - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+
+  github-release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Download distribution artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: influxdata-plugin-utils-dist
+          path: dist/
+
+      - name: Extract release notes from changelog
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          version = os.environ["GITHUB_REF_NAME"].removeprefix(os.environ["TAG_PREFIX"])
+          changelog = Path(os.environ["PACKAGE_DIR"]) / "CHANGELOG.md"
+          text = changelog.read_text()
+
+          # Capture everything between this version's heading and the next
+          # "## " heading (the previous release, or the link footer).
+          pattern = rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |^\[Unreleased\]:)"
+          match = re.search(pattern, text, re.MULTILINE | re.DOTALL)
+          if match is None:
+              print(f"No '## [{version}]' section found in {changelog}", file=sys.stderr)
+              sys.exit(1)
+
+          body = match.group(1).strip()
+          if not body:
+              print(f"The '## [{version}]' section in {changelog} is empty", file=sys.stderr)
+              sys.exit(1)
+
+          notes = (
+              f"{body}\n\n"
+              f"## Install\n\n"
+              f"```bash\n"
+              f"pip install influxdata-plugin-utils=={version}\n"
+              f"```\n\n"
+              f"[View on PyPI](https://pypi.org/project/influxdata-plugin-utils/{version}/)\n"
+          )
+          Path("/tmp/release-notes.md").write_text(notes)
+          print(notes)
+          PY
+
+      # The registry release keeps the "Latest" badge, so these are always
+      # created with --latest=false. Re-running a published tag must not fail,
+      # so an existing release is updated in place instead.
+      - name: Create or update GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${tag#$TAG_PREFIX}"
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists; updating notes and assets."
+            gh release edit "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "influxdata-plugin-utils ${version}" \
+              --notes-file /tmp/release-notes.md \
+              --latest=false
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "influxdata-plugin-utils ${version}" \
+              --notes-file /tmp/release-notes.md \
+              --latest=false \
+              --verify-tag
+          fi

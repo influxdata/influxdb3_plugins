@@ -246,6 +246,9 @@ influxdb3 create trigger \
 - `threshold_deadman_checks_plugin.py`: The main plugin code containing handlers for scheduled and data write triggers
 - `threshold_deadman_config_scheduler.toml`: Example TOML configuration for scheduled triggers
 - `threshold_deadman_config_data_writes.toml`: Example TOML configuration for data write triggers
+- `test_threshold_deadman_checks.py`: Pytest suite (59 tests, runs without a live InfluxDB 3 server)
+- `requirements.txt`: Runtime dependencies (`influxdata-plugin-utils>=0.3.0`, `requests`)
+- `requirements-dev.txt`: Development dependencies (`pytest`)
 
 ### Logging
 

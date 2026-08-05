@@ -22,8 +22,8 @@
         },
         {
             "name": "window",
-            "example": "5m",
-            "description": "Time window to check for data (e.g., '5m' for 5 minutes).",
+            "example": "5min",
+            "description": "Time window to check for data (e.g., '5min' for 5 minutes). Valid units: s, min, h, d, w. Must be a positive duration.",
             "required": true
         },
         {
@@ -35,7 +35,7 @@
         {
             "name": "trigger_count",
             "example": "3",
-            "description": "Number of consecutive failed checks before sending an alert. Default: 1.",
+            "description": "Number of condition breaches before sending an alert. Threshold checks count consecutive breaches per row identifier, including across the time bins of a single run; deadman checks count consecutive runs without data. Default: 1.",
             "required": false
         },
         {
@@ -266,15 +266,21 @@ import os
 import random
 import re
 import time
-import tomllib
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from string import Template
 from urllib.parse import urlparse
 
 import requests
+from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.introspection import get_table_names, get_tag_names
+from influxdata_plugin_utils.parsing import (
+    parse_bool,
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
+)
 
 # Supported comparison operators
 _OP_FUNCS = {
@@ -303,41 +309,134 @@ AVAILABLE_SENDERS = {
 # List of keywords to exclude from argument validation in AVAILABLE_SENDERS
 EXCLUDED_KEYWORDS = ["headers", "token", "sid"]
 
+# Alert severity levels accepted in conditions
+ALLOWED_MESSAGE_LEVELS = ("INFO", "WARN", "ERROR", "CRITICAL")
 
-def get_all_measurements(influxdb3_local) -> list[str]:
+# Aggregations supported in field_aggregation_values
+AVAILABLE_AGGREGATIONS = (
+    "avg",
+    "count",
+    "sum",
+    "min",
+    "max",
+    "median",
+    "stddev",
+    "first_value",
+    "last_value",
+    "var",
+    "approx_median",
+)
+
+_DEFAULT_NOTIFICATION_TEXT = (
+    "[$level] InfluxDB 3 alert triggered. Condition $field $op_sym $compare_val "
+    "matched $trigger_count times($actual) — matched in row $row."
+)
+_DEFAULT_DEADMAN_TEXT = (
+    "Deadman Alert: No data received from $table from $time_from to $time_to."
+)
+_DEFAULT_THRESHOLD_TEXT = (
+    "[$level] Threshold Alert on table $table: $aggregation of $field $op_sym "
+    "$compare_val (actual: $actual) — matched in row $row."
+)
+
+
+def parse_window(raw) -> timedelta:
+    """Parse a check window, rejecting non-positive durations."""
+    window: timedelta = parse_timedelta(raw)
+    if window <= timedelta(0):
+        raise ValueError(f"Invalid window: {raw!r} (must be a positive duration)")
+    return window
+
+
+_COMMON_VALIDATORS = [
+    Validator("measurement", required=True, cast=str),
+    Validator("senders", required=True),
+    Validator("trigger_count", default=1, cast=lambda raw: parse_int(raw, minimum=1)),
+    Validator(
+        "port_override",
+        default=8181,
+        cast=lambda raw: parse_int(raw, minimum=1, maximum=65535),
+    ),
+    Validator("notification_path", default="notify", cast=str),
+]
+
+_WRITES_VALIDATORS = _COMMON_VALIDATORS + [
+    Validator("field_conditions", required=True),
+    Validator("notification_text", default=_DEFAULT_NOTIFICATION_TEXT, cast=str),
+]
+
+_SCHEDULED_VALIDATORS = _COMMON_VALIDATORS + [
+    Validator("deadman_check", default=False, cast=parse_bool),
+    Validator("window", required=True, cast=parse_window),
+    Validator("interval", default="5min", cast=parse_timedelta),
+    Validator("notification_deadman_text", default=_DEFAULT_DEADMAN_TEXT, cast=str),
+    Validator("notification_threshold_text", default=_DEFAULT_THRESHOLD_TEXT, cast=str),
+]
+
+_WRITES_CONFIG_CACHE_KEY = "thresholds:writes_config"
+_WRITES_CONFIG_TTL_SECONDS = 10 * 60
+
+
+def _load_config(
+    influxdb3_local, args: dict, validators: list, task_id: str
+) -> dict | None:
     """
-    Retrieves a list of all tables of type 'BASE TABLE' from cache or the current InfluxDB database.
+    Load the plugin configuration, applying defaults and type casts.
+
+    A TOML file referenced by 'config_file_path' replaces the inline arguments;
+    INFLUXDB3_AUTH_TOKEN from the environment is used when the token is not
+    configured explicitly.
 
     Args:
         influxdb3_local: InfluxDB client instance.
+        args (dict): Runtime arguments of the trigger.
+        validators (list): Validators providing defaults and casts for the mode.
+        task_id (str): Unique task identifier.
 
     Returns:
-        list[str]: List of table names (e.g., ["cpu", "memory", "disk"]).
+        dict | None: Config values keyed by lower-case name, or None if loading failed.
     """
-    # check cache first
-    measurements: list = influxdb3_local.cache.get("measurements")
-    if measurements:
-        return measurements
+    config_file_path = (args or {}).get("config_file_path")
+    if config_file_path and not str(config_file_path).endswith(".toml"):
+        influxdb3_local.error(
+            f"[{task_id}] Invalid config file format: expected a .toml file"
+        )
+        return None
 
-    # if not in cache, query the database
-    result: list = influxdb3_local.query("SHOW TABLES")
-    measurements = [
-        row["table_name"] for row in result if row.get("table_type") == "BASE TABLE"
-    ]
+    try:
+        loaded = load_plugin_config(
+            args,
+            validators=validators,
+            env_keys=["INFLUXDB3_AUTH_TOKEN"],
+            source="toml" if config_file_path else "args",
+        )
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Failed to load configuration: {e}")
+        return None
 
-    # cache the result for 1 hour
-    influxdb3_local.cache.put(f"measurements", measurements, 60 * 60)
-
-    return measurements
+    return {key.lower(): value for key, value in loaded.as_dict().items()}
 
 
-def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
+def get_measurement_tags(influxdb3_local, measurement: str, task_id: str) -> list[str]:
+    """Return the cached tag names of a measurement, logging when it has none."""
+    tags: list[str] = get_tag_names(influxdb3_local, measurement)
+    if not tags:
+        # an empty list stays cached for an hour and would hide tags added later
+        tags = get_tag_names(influxdb3_local, measurement, use_cache=False)
+    if not tags:
+        influxdb3_local.info(
+            f"[{task_id}] No tags found for measurement '{measurement}'."
+        )
+    return tags
+
+
+def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
     """
-    Parse and validate sender configurations from input arguments.
+    Parse and validate sender configurations from the loaded config.
 
     Args:
         influxdb3_local: InfluxDB client instance.
-        args (dict): Input arguments containing "senders" and related configs.
+        config (dict): Loaded config containing "senders" and related settings.
         task_id (str): Unique task identifier.
 
     Returns:
@@ -347,39 +446,31 @@ def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
         Exception: If no valid senders are found.
     """
     senders_config: defaultdict = defaultdict(dict)
-    senders: str | list = args.get("senders")
-
-    if args["use_config_file"]:
-        if not isinstance(senders, list):
-            raise Exception(
-                f"[{task_id}] 'senders' must be a list when using config file"
-            )
-    else:
-        senders = senders.split(".")
+    senders: list = parse_delimited_list(config["senders"], sep=".")
 
     for sender in senders:
         if sender not in AVAILABLE_SENDERS:
             influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
             continue
         for key in AVAILABLE_SENDERS[sender]:
-            if key not in args and not any(ex in key for ex in EXCLUDED_KEYWORDS):
+            if key not in config and not any(ex in key for ex in EXCLUDED_KEYWORDS):
                 influxdb3_local.warn(
                     f"[{task_id}] Missing required argument for {sender}: {key}"
                 )
                 senders_config.pop(sender, None)
                 break
             if "url" in key and not validate_webhook_url(
-                influxdb3_local, sender, args[key], task_id
+                influxdb3_local, sender, config[key], task_id
             ):
                 senders_config.pop(sender, None)
                 break
 
-            if key not in args:
+            if key not in config:
                 continue
-            senders_config[sender][key] = args[key]
+            senders_config[sender][key] = config[key]
 
     if not senders_config:
-        raise Exception(f"[{task_id}] No valid senders configured")
+        raise Exception("No valid senders configured")
     return senders_config
 
 
@@ -435,61 +526,40 @@ def _coerce_value(raw: str) -> str | int | float | bool:
     return raw
 
 
-def parse_field_conditions(influxdb3_local, args: dict, task_id: str) -> list:
-    """
-    Parse a semicolon-separated list of field conditions or use values from config file.
-
-    Each condition has the form:
-        <field><op><value><level>
-    where <op> is one of: >, <, >=, <=, ==, !=
-    Multiple conditions are separated by semicolons ':'.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        args (dict): Input arguments containing "field_conditions".
-        task_id (str): Unique task identifier.
-
-    Returns:
-        List of lists: [field_name (str), operator_fn (callable), compare_value, level]
-
-    Example:
-        parse_field_conditions("temp>30-ERROR:status=='ok'-INFO:count<=100-WARN")
-        [
-            ["temp", operator.gt, 30, ERROR],
-            ["status", operator.eq, "ok", INFO],
-            ["count", operator.le, 100, WARN]
-        ]
-    """
-    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR", "CRITICAL")
-    cond_input: str | list = args.get("field_conditions")
+def _conditions_from_entries(influxdb3_local, entries: list, task_id: str) -> list:
+    """Parse field conditions given as [field, operator, value, level] entries."""
     conditions: list = []
 
-    if args["use_config_file"]:
-        if not isinstance(cond_input, list):
-            raise Exception(
-                f"[{task_id}] 'field_conditions' must be a list when using config file"
+    for part in entries:
+        if not isinstance(part, (list, tuple)) or len(part) != 4:
+            influxdb3_local.warn(
+                f"[{task_id}] Invalid condition '{part}', expected [field, operator, value, level]"
             )
-        for part in cond_input:
-            field: str = str(part[0])
-            op: str = str(part[1])
-            if op not in _OP_FUNCS:
-                influxdb3_local.warn(
-                    f"[{task_id}] Unsupported operator '{op}' in condition '{part}'"
-                )
-                continue
-            value = part[2]
-            level = part[3]
-            if level not in allowed_message_levels:
-                influxdb3_local.warn(
-                    f"[{task_id}] Invalid message level '{level}' in condition '{part}'"
-                )
-                continue
-            conditions.append((field, _OP_FUNCS[op], value, level))
-        if not conditions:
-            raise Exception(f"[{task_id}] No valid field conditions provided.")
-        return conditions
+            continue
+        field: str = str(part[0])
+        op: str = str(part[1])
+        if op not in _OP_FUNCS:
+            influxdb3_local.warn(
+                f"[{task_id}] Unsupported operator '{op}' in condition '{part}'"
+            )
+            continue
+        value = part[2]
+        level: str = str(part[3]).strip().upper()
+        if level not in ALLOWED_MESSAGE_LEVELS:
+            influxdb3_local.warn(
+                f"[{task_id}] Invalid message level '{part[3]}' in condition '{part}'"
+            )
+            continue
+        conditions.append((field, op, _OP_FUNCS[op], value, level))
 
-    for part in cond_input.split(":"):
+    return conditions
+
+
+def _conditions_from_string(influxdb3_local, raw: str, task_id: str) -> list:
+    """Parse field conditions given as '<field><op><value>-<level>' joined by ':'."""
+    conditions: list = []
+
+    for part in raw.split(":"):
         part = part.strip()
         if not part:
             continue
@@ -503,7 +573,7 @@ def parse_field_conditions(influxdb3_local, args: dict, task_id: str) -> list:
 
         cond_expr, level = part.rsplit("-", 1)
         level = level.strip().upper()
-        if level not in allowed_message_levels:
+        if level not in ALLOWED_MESSAGE_LEVELS:
             influxdb3_local.warn(
                 f"[{task_id}] Invalid message level '{level}' in condition '{part}'"
             )
@@ -523,41 +593,52 @@ def parse_field_conditions(influxdb3_local, args: dict, task_id: str) -> list:
             continue
 
         value = _coerce_value(raw_val)
-        conditions.append([field, _OP_FUNCS[op], value, level])
+        conditions.append((field, op, _OP_FUNCS[op], value, level))
 
-    if not conditions:
-        raise Exception(f"[{task_id}] No valid field conditions provided.")
     return conditions
 
 
-def parse_port_override(args: dict, task_id: str) -> int:
+def parse_field_conditions(influxdb3_local, config: dict, task_id: str) -> list:
     """
-    Parse and validate the 'port_override' argument, converting it from string to int.
+    Parse the field conditions used by the data write trigger.
+
+    Conditions come either as entries of [field, operator, value, level] (TOML) or
+    as a string of '<field><op><value>-<level>' expressions separated by ':'.
 
     Args:
-        args (dict): Runtime arguments containing 'port_override'.
-        task_id (str): Unique task identifier for logging context.
+        influxdb3_local: InfluxDB client instance.
+        config (dict): Loaded config containing "field_conditions".
+        task_id (str): Unique task identifier.
 
     Returns:
-        int: Parsed port number (1–65535), or 8181 if not provided.
+        list[tuple]: Tuples of (field_name, operator, operator_fn, compare_value, level).
 
     Raises:
-        Exception: If 'port_override' is provided but is not a valid integer in the range 1–65535.
+        Exception: If the value has an unsupported type or no valid conditions are found.
+
+    Example:
+        "temp>30-ERROR:status=='ok'-INFO:count<=100-WARN"
+        [
+            ("temp", ">", operator.gt, 30, "ERROR"),
+            ("status", "==", operator.eq, "ok", "INFO"),
+            ("count", "<=", operator.le, 100, "WARN"),
+        ]
     """
-    raw: str | int = args.get("port_override", 8181)
+    raw: str | list = config["field_conditions"]
 
-    try:
-        port = int(raw)
-    except (TypeError, ValueError):
-        raise Exception(f"[{task_id}] Invalid port_override, not an integer: {raw!r}")
-
-    # Validate port range
-    if not (1 <= port <= 65535):
+    if isinstance(raw, (list, tuple)):
+        conditions = _conditions_from_entries(influxdb3_local, raw, task_id)
+    elif isinstance(raw, str):
+        conditions = _conditions_from_string(influxdb3_local, raw, task_id)
+    else:
         raise Exception(
-            f"[{task_id}] Invalid port_override, must be between 1 and 65535: {port}"
+            "'field_conditions' must be a list of entries or a string, "
+            f"got {type(raw).__name__}"
         )
 
-    return port
+    if not conditions:
+        raise Exception("No valid field conditions provided.")
+    return conditions
 
 
 def interpolate_notification_text(text: str, row_data: dict) -> str:
@@ -589,8 +670,8 @@ def send_notification(
         payload (dict): Dict to serialize as JSON in the POST body.
         task_id (str): Unique task identifier.
 
-    Raises:
-        requests.RequestException: If all retries fail or a non-2xx response is received.
+    Request failures and non-2xx responses are retried; after the final attempt
+    the error is logged and the alert is dropped.
     """
     url: str = f"http://localhost:{port}/api/v3/engine/{path}"
     headers: dict = {
@@ -626,110 +707,132 @@ def send_notification(
                 )
 
 
+def generate_cache_key(
+    measurement: str,
+    field: str,
+    level: str,
+    row: dict,
+    tags: list,
+    aggregation: str | None = None,
+) -> str:
+    """Generate the row identifier used in alerts ($row). Aggregation is optional."""
+    base_parts: list = [measurement, field]
+    if aggregation:
+        base_parts.append(aggregation)
+    base_parts.append(level)
+
+    cache_key: str = ":".join(base_parts)
+
+    for tag in sorted(tags):
+        tag_value = row.get(tag)
+        # tags without a value are skipped: line protocol has no empty tag values
+        if tag_value is not None:
+            cache_key += f":{tag}={tag_value}"
+
+    return cache_key
+
+
+def generate_counter_key(row_identifier: str, op_sym: str, compare_value) -> str:
+    """
+    Generate the cache key of the breach counter for one condition.
+
+    Conditions that differ only by operator or threshold share a row identifier, so both
+    are part of the counter key to keep their counts independent.
+    """
+    return f"{row_identifier}|{op_sym}|{compare_value!r}"
+
+
+def record_breach(
+    influxdb3_local, cache_key: str, trigger_count: int
+) -> tuple[bool, int]:
+    """
+    Count one consecutive condition breach for the given cache key.
+
+    The counter is reset as soon as the alert is due, so the next alert requires
+    another 'trigger_count' consecutive breaches.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        cache_key (str): Key identifying the condition and row.
+        trigger_count (int): Number of consecutive breaches required to alert.
+
+    Returns:
+        tuple[bool, int]: Whether an alert is due, and the current breach number.
+    """
+    cached_value = influxdb3_local.cache.get(cache_key)
+    breach_number: int = (int(cached_value) if cached_value is not None else 0) + 1
+
+    if breach_number >= trigger_count:
+        influxdb3_local.cache.put(cache_key, "0")
+        return True, breach_number
+
+    influxdb3_local.cache.put(cache_key, str(breach_number))
+    return False, breach_number
+
+
 def process_writes(influxdb3_local, table_batches: list, args: dict):
     """
     Process incoming data writes and trigger notifications if field conditions are met
     for a specified number of times.
     """
-    task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting writes process with args: {args}")
-
-    # Override args with config file if specified
-    if args:
-        if path := args.get("config_file_path", None):
-            if not path.endswith(".toml"):
-                influxdb3_local.error(
-                    f"[{task_id}] Invalid config file format: expected a .toml file"
-                )
-                return
-            try:
-                plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if plugin_dir_var:
-                    file_path = Path(plugin_dir_var) / path
-                else:
-                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-                    candidates: list[str] = []
-                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                        candidates.append(influxdb3_plugin_dir)
-                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                        candidates.append(str(Path(virtual_env).parent))
-
-                    resolved = None
-                    for base in candidates:
-                        candidate = Path(base) / path
-                        if candidate.exists():
-                            resolved = candidate
-                            break
-
-                    if resolved is None:
-                        candidates_str = ", ".join(candidates) if candidates else "none available"
-                        influxdb3_local.error(
-                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
-                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
-                        )
-                        return
-                    file_path = resolved
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
-                with open(file_path, "rb") as f:
-                    args = tomllib.load(f)
-                    args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
-            except Exception:
-                influxdb3_local.error(f"[{task_id}] Failed to read config file")
-                return
-        else:
-            args["use_config_file"] = False
-
-    if (
-        not args
-        or "measurement" not in args
-        or "field_conditions" not in args
-        or "senders" not in args
-    ):
-        influxdb3_local.error(
-            f"[{task_id}] Missing required arguments: measurement, field_conditions, or senders"
-        )
+    if not table_batches:
         return
 
-    measurement: str = args["measurement"]
-    all_measurements: list = get_all_measurements(influxdb3_local)
+    task_id: str = str(uuid.uuid4())
+    config: dict | None = influxdb3_local.cache.get(_WRITES_CONFIG_CACHE_KEY)
+    if config is None:
+        config = _load_config(influxdb3_local, args, _WRITES_VALIDATORS, task_id)
+        if config is None:
+            return
+        influxdb3_local.cache.put(
+            _WRITES_CONFIG_CACHE_KEY, config, _WRITES_CONFIG_TTL_SECONDS
+        )
+
+    measurement: str = config["measurement"]
+    all_measurements: list = get_table_names(influxdb3_local)
     if measurement not in all_measurements:
         influxdb3_local.error(
             f"[{task_id}] Measurement '{measurement}' not found in database"
         )
         return
 
+    # an 'all_tables' trigger also receives batches of other tables
+    monitored_batches: list = [
+        table_batch
+        for table_batch in table_batches
+        if table_batch["table_name"] == measurement
+    ]
+    if not monitored_batches:
+        return
+
+    influxdb3_local.info(f"[{task_id}] Starting writes process")
+
     try:
-        trigger_count: int = int(args.get("trigger_count", 1))
-        senders_config: dict = parse_senders(influxdb3_local, args, task_id)
-        field_conditions: list = parse_field_conditions(influxdb3_local, args, task_id)
+        trigger_count: int = config["trigger_count"]
+        senders_config: dict = parse_senders(influxdb3_local, config, task_id)
+        field_conditions: list = parse_field_conditions(
+            influxdb3_local, config, task_id
+        )
         influxdb3_local.info(f"[{task_id}] Field conditions: {field_conditions}")
 
-        port_override: int = parse_port_override(args, task_id)
-        notification_path: str = args.get("notification_path", "notify")
-        influxdb3_auth_token: str = args.get("influxdb3_auth_token") or os.getenv(
-            "INFLUXDB3_AUTH_TOKEN"
+        port_override: int = config["port_override"]
+        notification_path: str = config["notification_path"]
+        influxdb3_auth_token: str = (
+            config.get("influxdb3_auth_token")
+            or os.getenv("INFLUXDB3_AUTH_TOKEN")
+            or ""
         )
-        if influxdb3_auth_token is None:
+        if not influxdb3_auth_token:
             influxdb3_local.error(
                 f"[{task_id}] Missing required argument: influxdb3_auth_token"
             )
             return
-        notification_tpl: str = args.get(
-            "notification_text",
-            "[$level] InfluxDB 3 alert triggered. Condition $field $op_sym $compare_val matched $trigger_count times($actual) — matched in row $row.",
-        )
+        notification_tpl: str = config["notification_text"]
 
-        for table_batch in table_batches:
-            table_name: str = table_batch["table_name"]
-            if table_name != measurement:
-                continue
-
-            tags: list = get_tag_names(influxdb3_local, table_name, task_id)
+        tags: list = get_measurement_tags(influxdb3_local, measurement, task_id)
+        for table_batch in monitored_batches:
             for row in table_batch["rows"]:
-                for field, compare_fn, compare_val, level in field_conditions:
+                for field, op_sym, compare_fn, compare_val, level in field_conditions:
                     if field not in row:
                         influxdb3_local.warn(
                             f"[{task_id}] Field '{field}' not found in row: {row}"
@@ -738,105 +841,88 @@ def process_writes(influxdb3_local, table_batches: list, args: dict):
 
                     actual = row[field]
                     cache_key: str = generate_cache_key(
-                        table_name, field, level, row, tags
+                        measurement, field, level, row, tags
                     )
-                    if compare_fn(actual, compare_val):
-                        cache_value = influxdb3_local.cache.get(cache_key)
-                        current_count = (
-                            int(cache_value) if cache_value is not None else 0
+                    counter_key: str = generate_counter_key(
+                        cache_key, op_sym, compare_val
+                    )
+                    if not compare_fn(actual, compare_val):
+                        influxdb3_local.cache.put(counter_key, "0")
+                        continue
+
+                    alert_due, breach_number = record_breach(
+                        influxdb3_local, counter_key, trigger_count
+                    )
+
+                    if not alert_due:
+                        influxdb3_local.warn(
+                            f"[{task_id}] [{level}] Condition {field} {op_sym} {compare_val!r} matched in row {cache_key} ({actual!r}) for the {breach_number}/{trigger_count} time. Skipping alert."
                         )
+                        continue
 
-                        # reconstruct operator symbol from function
-                        op_sym = next(
-                            sym for sym, fn in _OP_FUNCS.items() if fn is compare_fn
-                        )
+                    notification_text = interpolate_notification_text(
+                        notification_tpl,
+                        {
+                            "level": level,
+                            "row": cache_key,
+                            "field": field,
+                            "op_sym": op_sym,
+                            "compare_val": compare_val,
+                            "trigger_count": trigger_count,
+                            "actual": actual,
+                        },
+                    )
 
-                        if current_count >= (trigger_count - 1):
-                            notification_text = interpolate_notification_text(
-                                notification_tpl,
-                                {
-                                    "level": level,
-                                    "row": cache_key,
-                                    "field": field,
-                                    "op_sym": op_sym,
-                                    "compare_val": compare_val,
-                                    "trigger_count": trigger_count,
-                                    "actual": actual,
-                                },
-                            )
+                    payload: dict = {
+                        "notification_text": notification_text,
+                        "senders_config": senders_config,
+                    }
 
-                            payload: dict = {
-                                "notification_text": notification_text,
-                                "senders_config": senders_config,
-                            }
-
-                            influxdb3_local.error(
-                                f"[{task_id}] [{level}] Condition {field} {op_sym} {compare_val!r} matched in row {cache_key} {trigger_count} times ({actual!r}), sending alert"
-                            )
-                            send_notification(
-                                influxdb3_local,
-                                port_override,
-                                notification_path,
-                                influxdb3_auth_token,
-                                payload,
-                                task_id,
-                            )
-                            influxdb3_local.cache.put(cache_key, "0")
-                        else:
-                            influxdb3_local.warn(
-                                f"[{task_id}] [{level}] Condition {field} {op_sym} {compare_val!r} matched in row {cache_key} ({actual!r}) for the {current_count + 1}/{trigger_count} time. Skipping alert."
-                            )
-                            influxdb3_local.cache.put(cache_key, str(current_count + 1))
-
-                    else:
-                        influxdb3_local.cache.put(cache_key, "0")
+                    influxdb3_local.error(
+                        f"[{task_id}] [{level}] Condition {field} {op_sym} {compare_val!r} matched in row {cache_key} {trigger_count} times ({actual!r}), sending alert"
+                    )
+                    send_notification(
+                        influxdb3_local,
+                        port_override,
+                        notification_path,
+                        influxdb3_auth_token,
+                        payload,
+                        task_id,
+                    )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error: {str(e)}")
 
 
-def parse_window(args: dict, task_id: str) -> timedelta:
+def interval_literal(interval: timedelta) -> str:
     """
-    Parses the 'window' argument from args and converts it into a timedelta object.
-    Represents the size of the query window.
+    Render a DATE_BIN interval literal for the aggregation interval.
 
     Args:
-        args (dict): Dictionary with the 'window' key (e.g., {"window": "2h"}).
-        task_id (str): Unique identifier for the current task, used for logging.
+        interval (timedelta): Aggregation interval.
 
     Returns:
-        timedelta: Parsed time delta for the window.
+        str: Interval literal, e.g. "600 seconds".
 
     Raises:
-        Exception: If the window is missing or has an invalid format or unit.
-
-    Example input:
-        args = {"window": "3d"}  # valid units: 's', 'min', 'h', 'd', 'w'
+        ValueError: If the interval is shorter than one second.
     """
-    valid_units: dict = {
-        "s": "seconds",
-        "min": "minutes",
-        "h": "hours",
-        "d": "days",
-        "w": "weeks",
-    }
+    seconds: int = int(interval.total_seconds())
+    if seconds < 1:
+        raise ValueError(
+            f"Invalid interval: {seconds} seconds (must be at least 1 second)"
+        )
+    return f"{seconds} seconds"
 
-    window: str = args.get("window")
 
-    match = re.fullmatch(r"(\d+)([a-zA-Z]+)", window)
-    if match:
-        number, unit = match.groups()
-        number = int(number)
-
-        if number >= 1 and unit in valid_units:
-            return timedelta(**{valid_units[unit]: number})
-
-    raise Exception(f"[{task_id}] Invalid interval format: {window}.")
+def quote_identifier(identifier: str) -> str:
+    """Quote a SQL identifier, escaping embedded double quotes."""
+    return '"' + str(identifier).replace('"', '""') + '"'
 
 
 def generate_fields_string(
     field_aggregation_values: dict,
-    interval: tuple,
+    interval: str,
     tags_list: list,
 ):
     """
@@ -844,28 +930,34 @@ def generate_fields_string(
 
     Args:
         field_aggregation_values: dict
-        interval (tuple[int, str]): Tuple of interval magnitude and unit (e.g., (10, 'minutes')).
+        interval (str): DATE_BIN interval literal (e.g., "600 seconds").
         tags_list (list): List of tag names to include in the query.
 
     Returns:
         str: SQL SELECT clause string including DATE_BIN, aggregations and tags.
     """
-    query: str = f"DATE_BIN(INTERVAL '{interval[0]} {interval[1]}', time, '1970-01-01T00:00:00Z') AS _time"
+    query: str = (
+        f"DATE_BIN(INTERVAL '{interval}', time, '1970-01-01T00:00:00Z') AS _time"
+    )
 
     for field_name, aggregation_value_list in field_aggregation_values.items():
-        for aggregation, op_fn, value, level in aggregation_value_list:
-            if f'{aggregation}("{field_name}")' in query:
+        quoted_field: str = quote_identifier(field_name)
+        for aggregation, *_ in aggregation_value_list:
+            # Dedupe by alias: several conditions may share one aggregation, and
+            # duplicate projection names are rejected by the query planner.
+            alias: str = quote_identifier(f"{field_name}_{aggregation}")
+            if f"as {alias}" in query:
                 continue
             query += ",\n"
 
             # Add ORDER BY time for first_value and last_value to ensure correct temporal ordering
-            if aggregation in ('first_value', 'last_value'):
-                query += f'\t{aggregation}("{field_name}" ORDER BY time) as "{field_name}_{aggregation}"'
+            if aggregation in ("first_value", "last_value"):
+                query += f"\t{aggregation}({quoted_field} ORDER BY time) as {alias}"
             else:
-                query += f'\t{aggregation}("{field_name}") as "{field_name}_{aggregation}"'
+                query += f"\t{aggregation}({quoted_field}) as {alias}"
 
     for tag in tags_list:
-        query += f',\n\t"{tag}"'
+        query += f",\n\t{quote_identifier(tag)}"
 
     return query
 
@@ -882,7 +974,7 @@ def generate_group_by_string(tags_list: list):
     """
     group_by_clause: str = "_time"
     for tag in tags_list:
-        group_by_clause += f', "{tag}"'
+        group_by_clause += f", {quote_identifier(tag)}"
     return group_by_clause
 
 
@@ -890,7 +982,7 @@ def build_query(
     field_aggregation_values: dict,
     measurement: str,
     tags_list: list[str],
-    interval: tuple,
+    interval: str,
     start_time: datetime,
     end_time: datetime,
 ) -> str:
@@ -901,7 +993,7 @@ def build_query(
         field_aggregation_values: dict for aggregation building
         measurement: source measurement name
         tags_list: list of tag keys to GROUP BY
-        interval: (magnitude, unit) for DATE_BIN
+        interval: DATE_BIN interval literal (e.g., "600 seconds")
         start_time: UTC datetime for WHERE time > ...
         end_time:   UTC datetime for WHERE time < ...
 
@@ -915,179 +1007,76 @@ def build_query(
     # GROUP BY clause
     group_by: str = generate_group_by_string(tags_list)
 
-    # ISO timestamps
-    start_iso: str = start_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_iso: str = end_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ISO timestamps, microsecond precision so consecutive windows tile exactly
+    start_iso: str = start_time.astimezone(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
+    end_iso: str = end_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     query: str = f"""
         SELECT
             {fields_clause}
         FROM
-            '{measurement}'
+            {quote_identifier(measurement)}
         WHERE
             time >= '{start_iso}'
-        AND 
+        AND
             time < '{end_iso}'
         GROUP BY
         {group_by}
+        ORDER BY
+            _time
     """
     return query
 
 
-def get_tag_names(influxdb3_local, measurement: str, task_id: str) -> list[str]:
-    """
-    Retrieves the list of tag names for a measurement from cache or the database.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        measurement (str): Name of the measurement to query.
-        task_id (str): The task ID.
-
-    Returns:
-        list[str]: List of tag names with 'Dictionary(Int32, Utf8)' data type.
-    """
-    # check cache first
-    tags: list = influxdb3_local.cache.get(f"{measurement}_tags")
-    if tags:
-        return tags
-
-    # if not in cache, query the database
-    query: str = """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = $measurement
-        AND data_type = 'Dictionary(Int32, Utf8)'
-    """
-    res: list[dict] = influxdb3_local.query(query, {"measurement": measurement})
-
-    if not res:
-        influxdb3_local.info(
-            f"[{task_id}] No tags found for measurement '{measurement}'."
-        )
-        return []
-
-    tag_names: list[str] = [tag["column_name"] for tag in res]
-
-    # cache the result for 1 hour
-    influxdb3_local.cache.put(f"{measurement}_tags", tag_names, 60 * 60)
-
-    return tag_names
-
-
-def parse_time_interval(args: dict, task_id: str) -> tuple[int, str]:
-    """
-    Parses the interval string into a tuple of magnitude and unit.
-
-    Supports time units: seconds (s), minutes (min), hours (h), days (d).
-
-    Args:
-        args (dict): Dictionary containing configuration parameters, including the 'interval' key
-            with a string in the format '<number><unit>' (e.g., '10min', '2s', '1h').
-        task_id (str): The task ID.
-
-    Returns:
-        tuple[int, str]: A tuple containing the magnitude (integer) and the unit (e.g., 'minutes' or 'days').
-            For months, quarters, and years, the magnitude is the equivalent number of days, and the unit is 'days'.
-
-    Raises:
-        Exception: If the interval format is invalid, the unit is not supported, or the magnitude is less than 1.
-    """
-    unit_mapping: dict = {"s": "seconds", "min": "minutes", "h": "hours", "d": "days"}
-    valid_units = unit_mapping.keys()
-
-    interval: str = args.get("interval", "5min")
-
-    match = re.fullmatch(r"(\d+)([a-zA-Z]+)", interval)
-    if match:
-        number_part, unit = match.groups()
-        magnitude = int(number_part)
-        if unit in valid_units and magnitude >= 1:
-            return magnitude, unit_mapping[unit]
-
-    raise Exception(f"[{task_id}] Invalid interval format: {interval}.")
-
-
-def parse_field_aggregation_values(
-    influxdb3_local, args: dict, task_id: str
-) -> dict[str, list] | None:
-    """
-    Parses field aggregation values with comparison operators and message levels or use values from config file.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        args (dict): Contains the 'field_aggregation_values' key with space-separated strings,
-            e.g., 'field:avg@>=10-INFO field2:min@<5.0-WARN'.
-        task_id (str): Task identifier (used for logging/warnings).
-
-    Returns:
-        dict[str, list[list[str, callable, float, str]]]: Dictionary mapping field names to a list of lists:
-            [aggregation, comparison_operator_fn, threshold_value, message_level].
-
-    Raises:
-        Exception: If no valid entries are found.
-    """
-    available_aggregations: tuple = (
-        "avg",
-        "count",
-        "sum",
-        "min",
-        "max",
-        "median",
-        "stddev",
-        "first_value",
-        "last_value",
-        "var",
-        "approx_median",
-    )
-    allowed_operators: tuple = (">", "<", ">=", "<=", "==", "!=")
-    allowed_message_levels: tuple = ("INFO", "WARN", "ERROR", "CRITICAL")
-    raw_input: str | None = args.get("field_aggregation_values")
-    if raw_input is None:
-        return {}
-
+def _aggregations_from_mapping(
+    influxdb3_local, raw: dict, task_id: str
+) -> dict[str, list]:
+    """Parse aggregation conditions given as {field: [[aggregation, op, value, level], ...]}."""
     result: dict[str, list] = {}
 
-    if args["use_config_file"]:
-        if not isinstance(raw_input, dict):
-            raise Exception(
-                f"[{task_id}] field_aggregation_values must be a dictionary when using config file"
+    for field, conditions in raw.items():
+        try:
+            for aggregation, op, value, level in conditions:
+                if aggregation not in AVAILABLE_AGGREGATIONS:
+                    influxdb3_local.warn(
+                        f"[{task_id}] Unsupported aggregation '{aggregation}', skipping..."
+                    )
+                    continue
+                message_level: str = str(level).strip().upper()
+                if message_level not in ALLOWED_MESSAGE_LEVELS:
+                    influxdb3_local.warn(
+                        f"[{task_id}] Invalid message level '{level}', skipping..."
+                    )
+                    continue
+                if op not in _OP_FUNCS:
+                    influxdb3_local.warn(
+                        f"[{task_id}] Invalid operator '{op}', skipping..."
+                    )
+                    continue
+                entry: list = [aggregation, op, _OP_FUNCS[op], value, message_level]
+                result.setdefault(field, []).append(entry)
+        except Exception as e:
+            influxdb3_local.warn(
+                f"[{task_id}] Error parsing field aggregation values for field '{field}': {e}"
             )
-        for field, conditions in raw_input.items():
-            try:
-                for aggregation, op, value, level in conditions:
-                    if aggregation not in available_aggregations:
-                        influxdb3_local.warn(
-                            f"[{task_id}] Unsupported aggregation '{aggregation}', skipping..."
-                        )
-                        continue
-                    if level not in allowed_message_levels:
-                        influxdb3_local.warn(
-                            f"[{task_id}] Invalid message level '{level}', skipping..."
-                        )
-                        continue
-                    if op not in allowed_operators:
-                        influxdb3_local.warn(
-                            f"[{task_id}] Invalid operator '{op}', skipping..."
-                        )
-                        continue
-                    entry: list = [aggregation, _OP_FUNCS[op], value, level]
-                    result.setdefault(field, []).append(entry)
-            except Exception as e:
-                influxdb3_local.warn(
-                    f"[{task_id}] Error parsing field aggregation values for field '{field}': {e}"
-                )
-                continue
+            continue
 
-        if not result:
-            raise Exception(f"[{task_id}] No valid field aggregation values provided.")
-        return result
+    return result
+
+
+def _aggregations_from_string(
+    influxdb3_local, raw: str, task_id: str
+) -> dict[str, list]:
+    """Parse aggregation conditions given as 'field:aggregation@<op><value>-<level>' pairs."""
+    result: dict[str, list] = {}
 
     # Strip quotes around the string if present
-    if raw_input[0] == raw_input[-1] and raw_input[0] in ('"', "'"):
-        raw_input = raw_input[1:-1]
+    if len(raw) > 1 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        raw = raw[1:-1]
 
-    pairs = raw_input.split(" ")
-    for pair in pairs:
+    for pair in raw.split(" "):
         if not pair or ":" not in pair:
             influxdb3_local.warn(
                 f"[{task_id}] Invalid format in pair '{pair}', skipping..."
@@ -1103,21 +1092,25 @@ def parse_field_aggregation_values(
 
         aggregation, value_expr = agg_expr.split("@", 1)
         aggregation = aggregation.strip()
-        if aggregation not in available_aggregations:
+        if aggregation not in AVAILABLE_AGGREGATIONS:
             influxdb3_local.warn(
                 f"[{task_id}] Unsupported aggregation '{aggregation}', skipping..."
             )
             continue
 
         # Strip quotes around the value expression if present
-        if value_expr[0] == value_expr[-1] and value_expr[0] in ('"', "'"):
+        if (
+            len(value_expr) > 1
+            and value_expr[0] == value_expr[-1]
+            and value_expr[0] in ('"', "'")
+        ):
             value_expr = value_expr[1:-1]
 
         # Extract comparison operator
         matched_op = next(
             (
                 op
-                for op in sorted(allowed_operators, key=len, reverse=True)
+                for op in sorted(_OP_FUNCS, key=len, reverse=True)
                 if value_expr.startswith(op)
             ),
             None,
@@ -1139,7 +1132,7 @@ def parse_field_aggregation_values(
             )
             continue
 
-        if level not in allowed_message_levels:
+        if level not in ALLOWED_MESSAGE_LEVELS:
             influxdb3_local.warn(
                 f"[{task_id}] Invalid message level '{level}', skipping..."
             )
@@ -1153,36 +1146,54 @@ def parse_field_aggregation_values(
             )
             continue
 
-        entry: list = [aggregation, _OP_FUNCS[matched_op], value, level]
+        entry: list = [aggregation, matched_op, _OP_FUNCS[matched_op], value, level]
         result.setdefault(field_name.strip(), []).append(entry)
-
-    if not result:
-        raise Exception(f"[{task_id}] No valid field aggregation values provided.")
 
     return result
 
 
-def generate_cache_key(
-    measurement: str,
-    field: str,
-    level: str,
-    row: dict,
-    tags: list,
-    aggregation: str | None = None,
-) -> str:
-    """Generate cache key based on input parameters. Aggregation is optional."""
-    base_parts: list = [measurement, field]
-    if aggregation:
-        base_parts.append(aggregation)
-    base_parts.append(level)
+def parse_field_aggregation_values(
+    influxdb3_local, config: dict, task_id: str
+) -> dict[str, list]:
+    """
+    Parse the aggregation conditions used by the scheduled trigger.
 
-    cache_key: str = ":".join(base_parts)
+    Conditions come either as {field: [[aggregation, operator, value, level], ...]}
+    (TOML) or as a string of 'field:aggregation@<op><value>-<level>' pairs separated
+    by spaces, e.g. 'field:avg@>=10-INFO field2:min@<5.0-WARN'.
 
-    for tag in sorted(tags):
-        tag_value = row.get(tag, "None")
-        cache_key += f":{tag}={tag_value}"
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        config (dict): Loaded config, optionally containing "field_aggregation_values".
+        task_id (str): Unique task identifier.
 
-    return cache_key
+    Returns:
+        dict[str, list]: Field name mapped to a list of
+            [aggregation, operator, operator_fn, threshold_value, message_level].
+
+    Raises:
+        Exception: If the value has an unsupported type, or if it is provided but no
+            valid entries are found.
+    """
+    raw: str | dict | None = config.get("field_aggregation_values")
+    if raw is None:
+        return {}
+
+    if isinstance(raw, dict):
+        result = _aggregations_from_mapping(influxdb3_local, raw, task_id)
+    elif isinstance(raw, str):
+        if not raw.strip():
+            return {}
+        result = _aggregations_from_string(influxdb3_local, raw, task_id)
+    else:
+        raise Exception(
+            "'field_aggregation_values' must be a mapping or a string, "
+            f"got {type(raw).__name__}"
+        )
+
+    if not result:
+        raise Exception("No valid field aggregation values provided.")
+    return result
 
 
 def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
@@ -1197,70 +1208,18 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
             "measurement", "senders", "influxdb3_auth_token", "window", and other alert settings.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting scheduled call with args: {args} and call_time: {call_time}")
+    influxdb3_local.info(
+        f"[{task_id}] Starting scheduled call with call_time: {call_time}"
+    )
 
-    # Override args with config file if specified
-    if args:
-        if path := args.get("config_file_path", None):
-            if not path.endswith(".toml"):
-                influxdb3_local.error(
-                    f"[{task_id}] Invalid config file format: expected a .toml file"
-                )
-                return
-            try:
-                plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if plugin_dir_var:
-                    file_path = Path(plugin_dir_var) / path
-                else:
-                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-                    candidates: list[str] = []
-                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                        candidates.append(influxdb3_plugin_dir)
-                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                        candidates.append(str(Path(virtual_env).parent))
-
-                    resolved = None
-                    for base in candidates:
-                        candidate = Path(base) / path
-                        if candidate.exists():
-                            resolved = candidate
-                            break
-
-                    if resolved is None:
-                        candidates_str = ", ".join(candidates) if candidates else "none available"
-                        influxdb3_local.error(
-                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
-                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
-                        )
-                        return
-                    file_path = resolved
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
-                with open(file_path, "rb") as f:
-                    args = tomllib.load(f)
-                    args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
-            except Exception:
-                influxdb3_local.error(f"[{task_id}] Failed to read config file")
-                return
-        else:
-            args["use_config_file"] = False
-
-    # Configuration
-    if (
-        not args
-        or "measurement" not in args
-        or "senders" not in args
-        or "window" not in args
-    ):
-        influxdb3_local.error(
-            f"[{task_id}] Missing required arguments: measurement, senders, or window"
-        )
+    config: dict | None = _load_config(
+        influxdb3_local, args, _SCHEDULED_VALIDATORS, task_id
+    )
+    if config is None:
         return
 
-    measurement: str = args["measurement"]
-    all_measurements: list = get_all_measurements(influxdb3_local)
+    measurement: str = config["measurement"]
+    all_measurements: list = get_table_names(influxdb3_local)
     if measurement not in all_measurements:
         influxdb3_local.error(
             f"[{task_id}] Measurement '{measurement}' not found in database"
@@ -1268,55 +1227,56 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
         return
 
     try:
-        trigger_count: int = int(args.get("trigger_count", 1))
-        senders_config: dict = parse_senders(influxdb3_local, args, task_id)
+        trigger_count: int = config["trigger_count"]
+        senders_config: dict = parse_senders(influxdb3_local, config, task_id)
         field_aggregation_values: dict = parse_field_aggregation_values(
-            influxdb3_local, args, task_id
+            influxdb3_local, config, task_id
         )
-        influxdb3_local.info(f"[{task_id}] Field aggregation conditions: {field_aggregation_values}")
+        influxdb3_local.info(
+            f"[{task_id}] Field aggregation conditions: {field_aggregation_values}"
+        )
 
-        deadman_check: bool = True if args.get("deadman_check") else False
+        deadman_check: bool = config["deadman_check"]
         if not field_aggregation_values and not deadman_check:
             influxdb3_local.error(
                 "For the plugin to work, you must provide a valid field_aggregation_values parameter or set deadman_check to True"
             )
             return
 
-        port_override: int = parse_port_override(args, task_id)
-        notification_path: str = args.get("notification_path", "notify")
-        influxdb3_auth_token: str = args.get("influxdb3_auth_token") or os.getenv(
-            "INFLUXDB3_AUTH_TOKEN"
+        port_override: int = config["port_override"]
+        notification_path: str = config["notification_path"]
+        influxdb3_auth_token: str = (
+            config.get("influxdb3_auth_token")
+            or os.getenv("INFLUXDB3_AUTH_TOKEN")
+            or ""
         )
-        if influxdb3_auth_token is None:
+        if not influxdb3_auth_token:
             influxdb3_local.error(
                 f"[{task_id}] Missing required environment variable: INFLUXDB3_AUTH_TOKEN"
             )
             return
-        notification_tpl_deadman: str = args.get(
-            "notification_deadman_text",
-            "Deadman Alert: No data received from $table from $time_from to $time_to.",
-        )
-        notification_tpl_threshold: str = args.get(
-            "notification_threshold_text",
-            "[$level] Threshold Alert on table $table: $aggregation of $field $op_sym $compare_val (actual: $actual) — matched in row $row.",
-        )
+        notification_tpl_deadman: str = config["notification_deadman_text"]
+        notification_tpl_threshold: str = config["notification_threshold_text"]
 
-        tags: list = get_tag_names(influxdb3_local, measurement, task_id)
-        window: timedelta = parse_window(args, task_id)
-        interval: tuple = parse_time_interval(args, task_id)
-        time_to = call_time.astimezone(timezone.utc)
+        tags: list = get_measurement_tags(influxdb3_local, measurement, task_id)
+        window: timedelta = config["window"]
+        interval: str = interval_literal(config["interval"])
+        time_to: datetime = call_time.replace(tzinfo=timezone.utc)
         time_from: datetime = time_to - window
-        influxdb3_local.info(f"[{task_id}] Querying data in '{measurement}' from {time_from} to {time_to}")
+        influxdb3_local.info(
+            f"[{task_id}] Querying data in '{measurement}' from {time_from} to {time_to}"
+        )
 
         query: str = build_query(
             field_aggregation_values, measurement, tags, interval, time_from, time_to
         )
         results: list = influxdb3_local.query(query)
         if not results and deadman_check:
-            cache_value: str | None = influxdb3_local.cache.get(measurement)
-            current_count = int(cache_value) if cache_value is not None else 0
+            alert_due, breach_number = record_breach(
+                influxdb3_local, measurement, trigger_count
+            )
 
-            if current_count >= (trigger_count - 1):
+            if alert_due:
                 influxdb3_local.error(
                     f"[{task_id}] No data found in '{measurement}' from {time_from} to {time_to} for {trigger_count} times. Sending alert."
                 )
@@ -1339,24 +1299,26 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                     payload,
                     task_id,
                 )
-                influxdb3_local.cache.put(measurement, "0")
             else:
                 influxdb3_local.warn(
-                    f"[{task_id}] No data found in '{measurement}' from {time_from} to {time_to} for {current_count + 1}/{trigger_count} times. Skipping alert."
+                    f"[{task_id}] No data found in '{measurement}' from {time_from} to {time_to} for {breach_number}/{trigger_count} times. Skipping alert."
                 )
-                influxdb3_local.cache.put(measurement, str(current_count + 1))
         else:
             influxdb3_local.cache.put(measurement, "0")
 
-        influxdb3_local.info(f"[{task_id}] Query executed, {len(results)} records returned")
+        influxdb3_local.info(
+            f"[{task_id}] Query executed, {len(results)} records returned"
+        )
 
         for row in results:
             for field, aggregation_values in field_aggregation_values.items():
-                for aggregation, compare_fn, compare_value, level in aggregation_values:
-                    cache_key: str = generate_cache_key(
-                        measurement, field, level, row, tags, aggregation
-                    )
-
+                for (
+                    aggregation,
+                    op_sym,
+                    compare_fn,
+                    compare_value,
+                    level,
+                ) in aggregation_values:
                     if f"{field}_{aggregation}" not in row:
                         influxdb3_local.warn(
                             f"[{task_id}] Field '{field}_{aggregation}' not found in results received"
@@ -1364,56 +1326,56 @@ def process_scheduled_call(influxdb3_local, call_time: datetime, args: dict):
                         continue
 
                     actual = row[f"{field}_{aggregation}"]
-                    if compare_fn(actual, compare_value):
-                        cache_value: str | None = influxdb3_local.cache.get(cache_key)
-                        current_count = (
-                            int(cache_value) if cache_value is not None else 0
+                    cache_key: str = generate_cache_key(
+                        measurement, field, level, row, tags, aggregation
+                    )
+                    counter_key: str = generate_counter_key(
+                        cache_key, op_sym, compare_value
+                    )
+                    if not compare_fn(actual, compare_value):
+                        influxdb3_local.cache.put(counter_key, "0")
+                        continue
+
+                    alert_due, breach_number = record_breach(
+                        influxdb3_local, counter_key, trigger_count
+                    )
+
+                    if not alert_due:
+                        influxdb3_local.warn(
+                            f"[{task_id}] Condition for row {cache_key} ({aggregation}({field}) {op_sym} {compare_value!r}) matched ({actual!r}) for the {breach_number}/{trigger_count} time. Skipping alert."
                         )
+                        continue
 
-                        # reconstruct operator symbol from function
-                        op_sym = next(
-                            sym for sym, fn in _OP_FUNCS.items() if fn is compare_fn
-                        )
+                    notification_text = interpolate_notification_text(
+                        notification_tpl_threshold,
+                        {
+                            "level": level,
+                            "field": field,
+                            "table": measurement,
+                            "row": cache_key,
+                            "op_sym": op_sym,
+                            "aggregation": aggregation,
+                            "compare_val": compare_value,
+                            "actual": actual,
+                        },
+                    )
 
-                        if current_count >= (trigger_count - 1):
-                            notification_text = interpolate_notification_text(
-                                notification_tpl_threshold,
-                                {
-                                    "level": level,
-                                    "field": field,
-                                    "table": measurement,
-                                    "row": cache_key,
-                                    "op_sym": op_sym,
-                                    "aggregation": aggregation,
-                                    "compare_val": compare_value,
-                                    "actual": actual,
-                                },
-                            )
+                    payload: dict = {
+                        "notification_text": notification_text,
+                        "senders_config": senders_config,
+                    }
 
-                            payload: dict = {
-                                "notification_text": notification_text,
-                                "senders_config": senders_config,
-                            }
-
-                            influxdb3_local.error(
-                                f"[{task_id}] Condition on {measurement}: {aggregation}({field}) {op_sym} {compare_value!r} matched {trigger_count} times in row {cache_key} ({actual!r}), sending alert"
-                            )
-                            send_notification(
-                                influxdb3_local,
-                                port_override,
-                                notification_path,
-                                influxdb3_auth_token,
-                                payload,
-                                task_id,
-                            )
-                            influxdb3_local.cache.put(cache_key, "0")
-                        else:
-                            influxdb3_local.warn(
-                                f"[{task_id}] Condition for row {cache_key} ({aggregation}({field}) {op_sym} {compare_value!r}) matched ({actual!r}) for the {current_count + 1}/{trigger_count} time. Skipping alert."
-                            )
-                            influxdb3_local.cache.put(cache_key, str(current_count + 1))
-                    else:
-                        influxdb3_local.cache.put(cache_key, "0")
+                    influxdb3_local.error(
+                        f"[{task_id}] Condition on {measurement}: {aggregation}({field}) {op_sym} {compare_value!r} matched {trigger_count} times in row {cache_key} ({actual!r}), sending alert"
+                    )
+                    send_notification(
+                        influxdb3_local,
+                        port_override,
+                        notification_path,
+                        influxdb3_auth_token,
+                        payload,
+                        task_id,
+                    )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error: {str(e)}")

@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "gapfill"
-version = "0.1.0"
+version = "0.2.0"
 description = "Detects gaps in time series and fills them with imputed values using configurable interpolation methods, with optional fill marking and per-gap quality reports. Supports scheduled and HTTP backfill."
 triggers = ["process_scheduled_call", "process_request"]
 homepage = "https://www.influxdata.com/"
@@ -16,4 +16,4 @@ exclude = [
 
 [dependencies]
 database_version = ">=3.8.2"
-python = ["influxdata-plugin-utils>=0.2.0", "scipy"]
+python = ["influxdata-plugin-utils>=0.3.0", "scipy"]

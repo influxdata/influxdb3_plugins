@@ -16,7 +16,7 @@ Each plugin must implement specific functions based on its type:
 
 -	`process_scheduled_call(influxdb3_local, call_time, args)` - for scheduled plugins
 -	`process_writes(influxdb3_local, table_batches, args)` - for data write plugins  
--	`process_http_request(influxdb3_local, request_body, args)` - for HTTP plugins
+-	`process_request(influxdb3_local, query_parameters, request_headers, request_body, args)` - for HTTP plugins
 
 ### Plugin Organization
 

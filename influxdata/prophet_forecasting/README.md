@@ -295,7 +295,7 @@ Key operations:
 4. Generates forecasts for specified horizon
 5. Optionally validates against actual data and sends alerts
 
-#### `process_http_request(influxdb3_local, request_body, args)`
+#### `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 
 Handles on-demand forecast requests via HTTP. Supports backfill operations with configurable time ranges.
 

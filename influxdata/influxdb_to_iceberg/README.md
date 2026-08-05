@@ -298,7 +298,7 @@ Key operations:
 3. Creates Iceberg table if needed
 4. Appends data to Iceberg table
 
-#### `process_http_request(influxdb3_local, request_body, args)`
+#### `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 
 Handles on-demand data transfers via HTTP. Supports backfill operations with configurable batch sizes.
 

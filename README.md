@@ -86,7 +86,7 @@ ADATA.md).
    - Implement `process_writes(influxdb3_local, table_batches, args)`  
 
 3. **HTTP Plugins** - respond to HTTP requests:
-   - Implement `process_http_request(influxdb3_local, request_body, args)`
+   - Implement `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 
 ### Development Guidelines
 

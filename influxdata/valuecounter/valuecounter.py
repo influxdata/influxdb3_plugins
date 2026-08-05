@@ -17,7 +17,13 @@
         {
             "name": "period_seconds",
             "example": "60",
-            "description": "Emission period in seconds. Cache TTL = 2x this value. Defaults to 60.",
+            "description": "Emission period in seconds, at least 1. Cache TTL = 2x this value. Defaults to 60.",
+            "required": false
+        },
+        {
+            "name": "period",
+            "example": "5min",
+            "description": "Emission period as a duration (e.g., '30s', '5min', '1h'), at least 1s. Units: 's', 'min', 'h', 'd', 'w'. Overridden by period_seconds when both are set.",
             "required": false
         },
         {
@@ -69,13 +75,19 @@
 """
 
 import hashlib
-import os
 import re
 import time
-import tomllib
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+
+from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.introspection import get_tag_names
+from influxdata_plugin_utils.parsing import (
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
+)
+from influxdata_plugin_utils.write import build_line, write_data
 
 # At server runtime LineBuilder is injected as a builtin. In test environments
 # pytest patches this module-level name to a vendored copy. The reference in
@@ -110,15 +122,16 @@ def _validate_identifier(name, what):
         raise ValueError(f"invalid {what}: {name!r}")
 
 
-_DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhd])\s*$")
-_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_BARE_MINUTES_RE = re.compile(r"^\s*(\d+)\s*m\s*$")
 
 
-def _parse_duration(s):
-    m = _DURATION_RE.match(s)
-    if not m:
-        raise ValueError(f"invalid duration: {s!r} (expected e.g. '60s', '5m', '1h', '1d')")
-    return int(m.group(1)) * _DURATION_UNITS[m.group(2)]
+def _parse_period_seconds(raw):
+    match = _BARE_MINUTES_RE.match(str(raw))
+    text = f"{match.group(1)}min" if match else str(raw)
+    seconds = int(parse_timedelta(text).total_seconds())
+    if seconds < 1:
+        raise ValueError(f"invalid period: {raw!r} (must be at least 1 second)")
+    return seconds
 
 
 @dataclass
@@ -130,126 +143,82 @@ class Config:
     table: str = ""
 
 
-_MODE_A_ALLOWED = {"fields", "output_suffix", "period_seconds", "period", "dest_database", "config_file_path"}
-_MODE_B_ALLOWED = {"table", "fields", "output_suffix", "dest_database", "config_file_path"}
+_MODE_ALLOWED = {
+    "wal": {"fields", "output_suffix", "period", "period_seconds", "dest_database"},
+    "scheduled": {"table", "fields", "output_suffix", "dest_database"},
+}
 
 
-def _parse_inline_args(args, mode):
-    if mode == "wal":
-        allowed = _MODE_A_ALLOWED
-    elif mode == "scheduled":
-        allowed = _MODE_B_ALLOWED
-    else:
+def _parse_fields(raw):
+    """Field names split on any whitespace; TOML may deliver a list already."""
+    if isinstance(raw, (list, tuple)):
+        return parse_delimited_list(raw)
+    return str(raw).split()
+
+
+_COMMON_VALIDATORS = [
+    Validator("fields", default="", cast=_parse_fields),
+    Validator("output_suffix", default="_valuecounts", cast=str),
+    Validator("dest_database", default="", cast=str),
+]
+
+# Only mode-valid keys get a validator, so registered defaults never trip the
+# unknown-key check below.
+_MODE_VALIDATORS = {
+    "wal": _COMMON_VALIDATORS,
+    "scheduled": _COMMON_VALIDATORS + [Validator("table", default="", cast=str)],
+}
+
+
+def _reject_unknown_keys(loaded, mode, from_toml):
+    key_label = "TOML key" if from_toml else "arg"
+    source_label = "the TOML" if from_toml else "inline args"
+    allowed = _MODE_ALLOWED[mode]
+
+    for key in (name.lower() for name in loaded.as_dict()):
+        if key in allowed:
+            continue
+        # special-case better error messages for mode-incompatible knobs
+        if key == "table" and mode == "wal":
+            raise ValueError(
+                f"vc-wal: 'table' is determined by the trigger-spec, not {source_label}"
+            )
+        if key in ("period", "period_seconds") and mode == "scheduled":
+            raise ValueError(
+                "vc-scheduled: 'period'/'period_seconds' is not used; Mode B is drift-based"
+            )
+        raise ValueError(f"unknown {key_label}: {key!r}")
+
+
+def _resolve_config(args, mode):
+    if mode not in _MODE_ALLOWED:
         raise ValueError(f"unknown mode: {mode!r}")
 
-    for key in args:
-        if key not in allowed:
-            # special-case better error messages for mode-incompatible knobs
-            if key == "table" and mode == "wal":
-                raise ValueError(
-                    "vc-wal: 'table' is determined by the trigger-spec, not inline args"
-                )
-            if key in ("period_seconds", "period") and mode == "scheduled":
-                raise ValueError(
-                    "vc-scheduled: 'period_seconds'/'period' is not used; Mode B is drift-based"
-                )
-            raise ValueError(f"unknown arg: {key!r}")
-
-    cfg = Config(fields=[])
-    if "fields" in args:
-        cfg.fields = args["fields"].split()
-    if "output_suffix" in args:
-        cfg.output_suffix = args["output_suffix"]
-    if "dest_database" in args:
-        cfg.dest_database = args["dest_database"]
-    if "table" in args:
-        cfg.table = args["table"]
-    if "period" in args:
-        cfg.period_seconds = _parse_duration(args["period"])
-    if "period_seconds" in args:
-        cfg.period_seconds = int(args["period_seconds"])
-    return cfg
-
-
-def _load_toml_config(path, mode):
-    if mode == "wal":
-        allowed = _MODE_A_ALLOWED - {"config_file_path"}
-    elif mode == "scheduled":
-        allowed = _MODE_B_ALLOWED - {"config_file_path"}
-    else:
-        raise ValueError(f"unknown mode: {mode!r}")
-
-    try:
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except FileNotFoundError:
-        raise
-    except tomllib.TOMLDecodeError as e:
-        raise ValueError(f"TOML parse error in {path}: {e}")
-
-    for key in data:
-        if key not in allowed:
-            if key == "table" and mode == "wal":
-                raise ValueError(
-                    "vc-wal: 'table' is determined by the trigger-spec, not the TOML"
-                )
-            if key in ("period_seconds", "period") and mode == "scheduled":
-                raise ValueError(
-                    "vc-scheduled: 'period'/'period_seconds' is not used; Mode B is drift-based"
-                )
-            raise ValueError(f"unknown TOML key: {key!r}")
-
-    cfg = Config(fields=[])
-    if "fields" in data:
-        f = data["fields"]
-        if isinstance(f, str):
-            f = f.split()
-        cfg.fields = list(f)
-    if "output_suffix" in data:
-        cfg.output_suffix = data["output_suffix"]
-    if "dest_database" in data:
-        cfg.dest_database = data["dest_database"]
-    if "table" in data:
-        cfg.table = data["table"]
-    if "period" in data:
-        cfg.period_seconds = _parse_duration(data["period"])
-    if "period_seconds" in data:
-        cfg.period_seconds = int(data["period_seconds"])
-    return cfg
-
-
-def _resolve_config(args, plugin_dir, mode):
-    args = dict(args)  # defensive copy
-    cfp = args.pop("config_file_path", None)
-
-    if cfp is not None and args:
+    args = dict(args or {})  # defensive copy
+    config_file_path = args.get("config_file_path")
+    if config_file_path is not None and len(args) > 1:
         raise ValueError("set either config_file_path or inline args, not both")
 
-    if cfp is not None:
-        if plugin_dir is not None:
-            path = os.path.join(plugin_dir, cfp)
-        else:
-            # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-            #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-            #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-            candidates = []
-            if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                candidates.append(influxdb3_plugin_dir)
-            if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                candidates.append(str(Path(virtual_env).parent))
+    loaded = load_plugin_config(
+        args,
+        validators=_MODE_VALIDATORS[mode],
+        source="toml" if config_file_path else "args",
+    )
+    _reject_unknown_keys(loaded, mode, from_toml=bool(config_file_path))
 
-            path = None
-            for base in candidates:
-                candidate = os.path.join(base, cfp)
-                if os.path.exists(candidate):
-                    path = candidate
-                    break
-            if path is None:
-                # Original default: resolve against the current directory.
-                path = os.path.join(".", cfp)
-        cfg = _load_toml_config(path, mode=mode)
-    else:
-        cfg = _parse_inline_args(args, mode=mode)
+    cfg = Config(
+        fields=[str(f) for f in loaded.fields],
+        output_suffix=loaded.output_suffix,
+        dest_database=loaded.dest_database,
+        table=str(loaded.get("table") or ""),
+    )
+
+    if mode == "wal":
+        # 'period_seconds' wins when both spellings are present
+        if (period := loaded.get("period")) is not None:
+            cfg.period_seconds = _parse_period_seconds(period)
+        if (period_seconds := loaded.get("period_seconds")) is not None:
+            cfg.period_seconds = parse_int(period_seconds, minimum=1)
 
     if not cfg.fields:
         raise ValueError("config error: 'fields' is empty or missing")
@@ -264,7 +233,9 @@ def _resolve_config(args, plugin_dir, mode):
         _validate_identifier(f, "field")
 
     if cfg.output_suffix == "":
-        raise ValueError("config error: 'output_suffix' cannot be empty (would risk feedback loop in Mode A and ambiguity in Mode B)")
+        raise ValueError(
+            "config error: 'output_suffix' cannot be empty (would risk feedback loop in Mode A and ambiguity in Mode B)"
+        )
 
     return cfg
 
@@ -287,35 +258,14 @@ def _extract_tags(row, tag_names):
     return out
 
 
-def _build_line(table, tags, counts, output_suffix, ts_ns, line_builder_cls):
-    if not counts:
-        return None
-    lb = line_builder_cls(f"{table}{output_suffix}")
-    for k, v in tags.items():
-        lb.tag(k, str(v))
-    for k, v in counts.items():
-        lb.int64_field(k, int(v))
-    lb.time_ns(ts_ns)
-    return lb
-
-
-def _get_tag_names(influxdb3_local, table_name):
-    key = f"vc:tags:{table_name}"
-    cached = influxdb3_local.cache.get(key)
-    if cached is not None:
-        return cached
-    res = influxdb3_local.query(
-        """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = $tbl
-          AND data_type = 'Dictionary(Int32, Utf8)'
-        """,
-        {"tbl": table_name},
+def _build_rollup_line(table, tags, counts, output_suffix, ts_ns):
+    return build_line(
+        LineBuilder,
+        f"{table}{output_suffix}",
+        tags=tags,
+        fields=counts,
+        time_ns=ts_ns,
     )
-    tag_names = [r["column_name"] for r in res]
-    influxdb3_local.cache.put(key, tag_names, ttl=3600)
-    return tag_names
 
 
 def _build_scheduled_query(table, tag_names, field_name):
@@ -339,33 +289,23 @@ def _build_scheduled_query(table, tag_names, field_name):
     )
 
 
-def _query_field_distribution(influxdb3_local, table, tag_names, field_name, start_ns, end_ns):
+def _query_field_distribution(
+    influxdb3_local, table, tag_names, field_name, start_ns, end_ns
+):
     sql = _build_scheduled_query(table, tag_names, field_name)
     params = {"start_ns": str(start_ns), "end_ns": str(end_ns)}
     return influxdb3_local.query(sql, params)
-
-
-class _BatchLines:
-    def __init__(self, line_builders):
-        self._line_builders = list(line_builders)
-        self._built = None
-
-    def build(self):
-        if self._built is None:
-            lines = [b.build() for b in self._line_builders]
-            if not lines:
-                raise ValueError("batch_write received no lines to build")
-            self._built = "\n".join(lines)
-        return self._built
 
 
 def process_scheduled_call(influxdb3_local, call_time, args=None):
     task_id = uuid.uuid4().hex[:8]
 
     # call_time arrives as a PyDateTime per system_py.rs:847,867
-    call_time_ns = int(call_time.timestamp()) * 1_000_000_000 + call_time.microsecond * 1000
+    call_time_ns = (
+        int(call_time.timestamp()) * 1_000_000_000 + call_time.microsecond * 1000
+    )
 
-    cfg = _resolve_config(args or {}, os.environ.get("PLUGIN_DIR"), mode="scheduled")
+    cfg = _resolve_config(args, mode="scheduled")
 
     anchor_key = f"vc:scheduled:last_call_ns:{cfg.table}"
     last_call_ns = influxdb3_local.cache.get(anchor_key)
@@ -377,7 +317,7 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
         )
         return
 
-    tag_names = _get_tag_names(influxdb3_local, cfg.table)
+    tag_names = get_tag_names(influxdb3_local, cfg.table)
     for t in tag_names:
         _validate_identifier(t, "tag column")
 
@@ -390,8 +330,12 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
     for field_name in cfg.fields:
         try:
             rows = _query_field_distribution(
-                influxdb3_local, cfg.table, tag_names, field_name,
-                window_start_ns, window_end_ns,
+                influxdb3_local,
+                cfg.table,
+                tag_names,
+                field_name,
+                window_start_ns,
+                window_end_ns,
             )
         except Exception as e:
             influxdb3_local.error(
@@ -431,21 +375,20 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
         return
 
     builders = [
-        _build_line(ss["table"], ss["tags"], ss["counts"], cfg.output_suffix,
-                    call_time_ns, LineBuilder)
+        _build_rollup_line(
+            ss["table"], ss["tags"], ss["counts"], cfg.output_suffix, call_time_ns
+        )
         for ss in series.values()
     ]
-    builders = [b for b in builders if b is not None]
-    if not builders:
-        influxdb3_local.cache.put(anchor_key, call_time_ns, ttl=None)
-        return
 
     try:
-        batch = _BatchLines(builders)
-        if cfg.dest_database:
-            influxdb3_local.write_sync_to_db(cfg.dest_database, batch, no_sync=True)
-        else:
-            influxdb3_local.write_sync(batch, no_sync=True)
+        write_data(
+            influxdb3_local,
+            builders,
+            retries=0,
+            no_sync=True,
+            database=cfg.dest_database or None,
+        )
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] vc-scheduled: write failed: {e}")
         return  # anchor unchanged → next fire's window covers two periods
@@ -457,7 +400,7 @@ def process_writes(influxdb3_local, table_batches, args=None):
     task_id = uuid.uuid4().hex[:8]
     now_ns = time.time_ns()
 
-    cfg = _resolve_config(args or {}, os.environ.get("PLUGIN_DIR"), mode="wal")
+    cfg = _resolve_config(args, mode="wal")
 
     period_ns = cfg.period_seconds * 1_000_000_000
     ttl = 2 * cfg.period_seconds
@@ -470,7 +413,7 @@ def process_writes(influxdb3_local, table_batches, args=None):
         by_table.setdefault(name, []).extend(batch["rows"])
 
     for table_name, rows in by_table.items():
-        tag_names = _get_tag_names(influxdb3_local, table_name)
+        tag_names = get_tag_names(influxdb3_local, table_name)
         for t in tag_names:
             _validate_identifier(t, "tag column")
 
@@ -527,7 +470,9 @@ def process_writes(influxdb3_local, table_batches, args=None):
                 continue
             if now_ns - state["last_emit_ns"] < period_ns:
                 continue
-            to_emit.append((sh, state["table"], dict(state["tags"]), dict(state["counts"])))
+            to_emit.append(
+                (sh, state["table"], dict(state["tags"]), dict(state["counts"]))
+            )
 
         # Prune index — only live hashes survive
         if live != active_hashes:
@@ -540,19 +485,18 @@ def process_writes(influxdb3_local, table_batches, args=None):
             continue
 
         builders = [
-            _build_line(t_, tags, counts, cfg.output_suffix, now_ns, LineBuilder)
+            _build_rollup_line(t_, tags, counts, cfg.output_suffix, now_ns)
             for _sh, t_, tags, counts in to_emit
         ]
-        builders = [b for b in builders if b is not None]
-        if not builders:
-            continue
 
         try:
-            batch = _BatchLines(builders)
-            if cfg.dest_database:
-                influxdb3_local.write_sync_to_db(cfg.dest_database, batch, no_sync=True)
-            else:
-                influxdb3_local.write_sync(batch, no_sync=True)
+            write_data(
+                influxdb3_local,
+                builders,
+                retries=0,
+                no_sync=True,
+                database=cfg.dest_database or None,
+            )
         except Exception as e:
             influxdb3_local.error(
                 f"[{task_id}] vc-wal: emit failed, counts retained for retry: {e}"

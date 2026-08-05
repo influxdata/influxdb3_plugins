@@ -25,11 +25,12 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Data write trigger parameters
 
-| Parameter        | Type    | Default          | Description                                                                                              |
-|------------------|---------|------------------|----------------------------------------------------------------------------------------------------------|
-| `period_seconds` | integer | `60`             | Emission period in seconds. Cache TTL is set to `2 * period_seconds`. Accepts `period=60s` form via TOML |
-| `output_suffix`  | string  | `_valuecounts`   | Suffix appended to the source measurement name for rollup output. Must be non-empty                      |
-| `dest_database`  | string  | trigger's own DB | Optional database to write rollups to via `write_sync_to_db`                                             |
+| Parameter        | Type    | Default          | Description                                                                                                                      |
+|------------------|---------|------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| `period_seconds` | integer | `60`             | Emission period in seconds, at least `1`. Cache TTL is set to `2 * period_seconds`                                               |
+| `period`         | string  | `60s`            | Emission period as a duration, at least `1s`. Units: `s`, `min`, `h`, `d`, `w`. Overridden by `period_seconds` when both are set |
+| `output_suffix`  | string  | `_valuecounts`   | Suffix appended to the source measurement name for rollup output. Must be non-empty                                              |
+| `dest_database`  | string  | trigger's own DB | Optional database to write rollups to via `write_sync_to_db`                                                                     |
 
 ### Scheduled trigger parameters
 
@@ -46,9 +47,9 @@ Mode B is drift-based: the trigger's `every:<duration>` spec is the only cadence
 |--------------------|--------|---------|----------------------------------------------------------------------------------|
 | `config_file_path` | string | none    | TOML config file path relative to `PLUGIN_DIR` (required for TOML configuration) |
 
-*To use a TOML configuration file, set the `PLUGIN_DIR` environment variable and specify the `config_file_path` in the trigger arguments.* This is in addition to the `--plugin-dir` flag when starting InfluxDB 3.
+*To use a TOML configuration file, set the `PLUGIN_DIR` environment variable and specify the `config_file_path` in the trigger arguments.* This is in addition to the `--plugin-dir` flag when starting InfluxDB 3. Relative paths are resolved against `PLUGIN_DIR`, then `INFLUXDB3_PLUGIN_DIR`, then the parent of `VIRTUAL_ENV`.
 
-If `config_file_path` is set, no other inline arguments may be set on the trigger. The TOML accepts the same keys as inline arguments; Mode A may use `period = "60s"` in place of `period_seconds = 60`.
+If `config_file_path` is set, no other inline arguments may be set on the trigger. The TOML accepts the same keys as inline arguments.
 
 #### Example TOML configuration
 
@@ -65,7 +66,7 @@ The rollup measurement name is always `<source_table><output_suffix>`. The defau
 ## Software Requirements
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled
-- **Python packages**: none (standard library only)
+- **Python packages**: `influxdata-plugin-utils>=0.3.0`
 
 ## Installation steps
 
@@ -79,7 +80,11 @@ The rollup measurement name is always `<source_table><output_suffix>`. The defau
      --plugin-dir ~/.plugins
    ```
 
-2. No additional Python packages required for this plugin.
+2. Install required Python packages:
+
+   ```bash
+   influxdb3 install package "influxdata-plugin-utils>=0.3.0"
+   ```
 
 ## Trigger setup
 
@@ -207,8 +212,8 @@ The rollup measurement `payment_attempts_valuecounts` is written to the `analyti
 
 - `valuecounter.py`: The main plugin code containing `process_writes` (Mode A) and `process_scheduled_call` (Mode B)
 - `valuecounter_config.toml`: Example TOML configuration with both Mode A and Mode B shapes
-- `test_valuecounter.py`: Pytest suite (82 tests, runs without a live InfluxDB 3 server)
-- `requirements.txt`: Runtime dependencies (empty for this plugin)
+- `test_valuecounter.py`: Pytest suite (79 tests, runs without a live InfluxDB 3 server)
+- `requirements.txt`: Runtime dependencies (`influxdata-plugin-utils>=0.3.0`)
 - `requirements-dev.txt`: Development dependencies (`pytest`)
 
 ### Logging
@@ -251,7 +256,7 @@ Handles Mode B scheduled invocations. On the first fire, only the cadence anchor
 
 #### Issue: Source table tag list changed and rollups are missing tags
 
-**Solution**: The plugin caches tag-column names from `information_schema.columns` for one hour per source table. Schema changes are picked up within an hour. To force a refresh, delete the cache key `vc:tags:<table>`.
+**Solution**: The plugin caches tag-column names from `information_schema.columns` for one hour per source table. Schema changes are picked up within an hour. To force a refresh, delete the cache key `shared:tags:<table>`.
 
 #### Issue: Both modes installed against the same source table
 

@@ -138,8 +138,8 @@
                         "path": "influxdata/notifier/notifier_plugin.py"
                     }
                 ],
-                "required_libraries": ["requests"],
-                "last_update": "2025-06-16",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0", "requests"],
+                "last_update": "2026-08-03",
                 "trigger_types_supported": ["scheduler", "data_writes"]
             },
             {

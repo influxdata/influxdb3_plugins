@@ -64,21 +64,16 @@ field_conditions = [["field1", ">", 0.0, "your_level"]]  # e.g., [["temp", ">", 
 # Optional: Custom HTTP headers (Base64-encoded JSON string)
 #http_headers = "your_http_headers"  # e.g., "eyJhdXRoIjogIkJlYXJlciBZT1VSX1RPS0VOIn0="
 
-# --- SMS (Twilio) ---
-# Twilio Account SID (required for SMS, or via TWILIO_SID env var)
+# --- SMS and WhatsApp (Twilio) ---
+# Both channels use the same four parameters; set them once.
+# Twilio Account SID (required, or via TWILIO_SID env var)
 #twilio_sid = "your_twilio_sid"  # e.g., "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-# Twilio Auth Token (required for SMS, or via TWILIO_TOKEN env var)
+# Twilio Auth Token (required, or via TWILIO_TOKEN env var)
 #twilio_token = "your_twilio_token"  # e.g., "your_auth_token"
-# Twilio sender number (required for SMS, format: +1234567890)
+# Sender number (required, format: +1234567890). For WhatsApp use the approved WhatsApp sender
 #twilio_from_number = "your_twilio_from_number"  # e.g., "+1234567890"
-# Recipient phone number (required for SMS, format: +0987654321)
+# Recipient number (required, format: +0987654321)
 #twilio_to_number = "your_twilio_to_number"  # e.g., "+0987654321"
-
-# --- WhatsApp (via Twilio) ---
-# WhatsApp sender number (required for WhatsApp, format: +1234567890)
-#whatsapp_from_number = "your_whatsapp_from_number"  # e.g., "+1234567890"
-# WhatsApp recipient number (required for WhatsApp, format: +0987654321)
-#whatsapp_to_number = "your_whatsapp_to_number"  # e.g., "+0987654321"
 
 ###### Example: Create Trigger Using This Config ######
 # influxdb3 create trigger \

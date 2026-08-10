@@ -16,7 +16,7 @@ The Synthefy Forecasting Plugin integrates the Synthefy Forecasting API with Inf
 
 ## Configuration
 
-Plugin parameters may be specified as key-value pairs in the `--trigger-arguments` flag (CLI) or in the `trigger_arguments` field (API) when creating a trigger, and/or in the JSON body of each HTTP request. Body values override trigger arguments.
+Plugin parameters may be specified as key-value pairs in the `--trigger-arguments` flag (CLI) or in the `trigger_arguments` field (API) when creating a trigger, and/or in the JSON body of each HTTP request. Body values override trigger arguments. A `null` in the body counts as unset, so the trigger argument applies; send `{}` for `tags` or `[]` for `metadata_fields` to clear them.
 
 ### Plugin metadata
 
@@ -38,11 +38,12 @@ If both are set, the header takes precedence.
 | `measurement`        | string         | required                   | Source measurement (table) containing historical data                                                                                                                                              |
 | `field`              | string         | `"value"`                  | Field name to forecast                                                                                                                                                                             |
 | `tags`               | string \| dict | `""`                       | Tag filters. Trigger args: dot-separated string `key:val1@val2.key2:val3`. Request body: JSON object mapping tag name to a string or list of strings. See [Tag filter format](#tag-filter-format). |
-| `time_range`         | string         | `"30d"`                    | Historical window. Format: `<number><unit>`. Units: `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y` (`m`/`q`/`y` are approximate).                                                                        |
+| `time_range`         | string         | `"30d"`                    | Historical window. Format: `<number><unit>`. Units: `us`, `ms`, `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y` (`m`/`q`/`y` are approximate).                                                            |
 | `forecast_horizon`   | string         | `"7d"`                     | Forecast duration. Format: `<number><unit>` (same units as `time_range`) or `<number> points`.                                                                                                     |
 | `model`              | string         | `"sfm-tabular"`            | Synthefy model identifier (e.g., `sfm-tabular`, `Migas-latest`)                                                                                                                                    |
 | `output_measurement` | string         | `"{measurement}_forecast"` | Destination measurement for forecast results                                                                                                                                                       |
 | `metadata_fields`    | string \| list | `""`                       | Trigger args: space-separated list of field names (`"humidity pressure"`). Request body: JSON list of strings. Used as covariates.                                                                 |
+| `max_forecast_points`| integer        | `10000`                    | Upper bound on the forecast points one request may produce. A time-based `forecast_horizon` is divided by the series' own step, so a dense series with a long horizon builds a very large payload. |
 | `database`           | string         | `""`                       | Optional override database for **writes only**. If unset, forecasts are written to the trigger's database. Reads always go to the trigger's database.                                              |
 
 #### Tag filter format
@@ -54,19 +55,22 @@ The plugin supports multi-value tag filters that are translated to `tag IN ('a',
 - `.` separates `key:value` pairs
 - `:` separates the tag name from its value(s)
 - `@` separates multiple values for the same tag
-- Quote a value with `'...'` or `"..."` if it contains special characters such as `:`, `@`, `.` or `'`
+- Quote a value with `'...'` or `"..."` if it contains `:`, `@` or `.`. A quote inside a value, as in `Bob's`, needs no escaping. An unclosed quote is rejected.
 
 Examples:
 ```
 tags="room:Bedroom"
 tags="room:Bedroom@Kitchen.location:Hall"
 tags="room:'Some other room'@Bedroom.device:sensor1"
+tags="owner:Bob's.room:Bedroom"
 ```
 
 **Request body (JSON form)**:
 ```json
 { "tags": { "room": ["Bedroom", "Kitchen"], "location": "Hall" } }
 ```
+
+The body also accepts the string form above. Send `{}` to clear the tag filters configured on the trigger.
 
 #### Forecast points and tags
 
@@ -76,9 +80,10 @@ When a tag filter has a single value, that value is added as a tag on every fore
 
 ### Dependencies
 
-- Python 3.9 or higher
+- Python 3.11 or higher
 - `pandas` — Data manipulation
 - `requests` — HTTP client for the Synthefy API
+- `influxdata-plugin-utils` — Shared configuration, schema and write helpers
 
 ### Installation steps
 
@@ -87,6 +92,7 @@ Using the InfluxDB 3 package manager:
 ```bash
 influxdb3 install package pandas
 influxdb3 install package requests
+influxdb3 install package influxdata-plugin-utils
 ```
 
 ### Prerequisites
@@ -320,7 +326,7 @@ Check the [Synthefy documentation](https://docs.synthefy.com) for the most up-to
 
 - `process_request(influxdb3_local, query_parameters, request_headers, request_body, args=None)`: handles HTTP requests, merges trigger arguments with request-body overrides, validates input, calls Synthefy, and writes forecast points.
 - `build_history_query(measurement, field, metadata_fields, tag_filters, start_time)`: builds the parameterized SQL query for historical data.
-- `dataframe_to_synthefy_request(df, field, forecast_horizon, metadata_fields, model, task_id)`: converts InfluxDB query rows into the Synthefy forecast request payload.
+- `dataframe_to_synthefy_request(influxdb3_local, df, field, forecast_horizon, metadata_fields, model, max_forecast_points, task_id)`: converts InfluxDB query rows into the Synthefy forecast request payload and enforces the point limit.
 - `forecast_response_to_line_builders(influxdb3_local, forecast_response, output_measurement, tag_filters, model, field_name, task_id)`: converts Synthefy forecast results into InfluxDB line protocol builders.
 
 ## Troubleshooting
@@ -345,7 +351,19 @@ Check the [Synthefy documentation](https://docs.synthefy.com) for the most up-to
 
 ### Invalid interval format
 
-`Invalid interval format: '<value>'. Expected '<number><unit>'.` — `time_range` and `forecast_horizon` must be `<number><unit>` (units: `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y`) or, for `forecast_horizon`, `<number> points`.
+`Invalid interval format: '<value>'. Expected '<number><unit>'.` — `time_range` and `forecast_horizon` must be `<number><unit>` (units: `us`, `ms`, `s`, `min`, `h`, `d`, `w`, `m`, `q`, `y`) or, for `forecast_horizon`, `<number> points`.
+
+### Forecast horizon too large
+
+`forecast_horizon '<value>' resolves to N points … above the max_forecast_points limit` — the horizon is divided by the interval between the last two historical points, so a dense series produces many points. Shorten `forecast_horizon`, use the `<number> points` form, or raise `max_forecast_points`.
+
+### Timestamps collapse onto each other
+
+`N history timestamps differ by less than a microsecond …` or `The series' step of … is finer than a microsecond …` — timestamps are sent to Synthefy with microsecond precision, so a series stepping in nanoseconds cannot be represented. Resample it to a coarser step.
+
+### History holds repeated timestamps
+
+`History holds N repeated timestamps, so the window covers more than one series …` — the query matched several tag series and their values are interleaved in one input sequence. Add a `tags` filter that selects a single series.
 
 ### Synthefy API errors
 
@@ -361,7 +379,7 @@ If writes fail:
 
 - Ensure the database exists (the trigger database, or the override `database` if used)
 - Ensure the plugin has write permissions
-- Check the `[task_id] Error writing forecasts attempt N/M: …` warnings in the InfluxDB logs
+- Check the `[task_id] Failed to write forecasts after N attempts: …` error in the InfluxDB logs
 
 ### Query file limit exceeded (InfluxDB 3 Core)
 
@@ -369,9 +387,10 @@ If you see "Query would scan X Parquet files, exceeding the file limit" errors, 
 
 ## Limitations
 
-- Currently supports a single time series per request (one `field` plus optional covariates).
+- Currently supports a single time series per request (one `field` plus optional covariates). A request whose window matches several tag series is logged as a warning.
 - Forecast horizon calculation assumes regular time intervals.
-- Tag values containing `:`, `@`, `.` or `'` are only fully supported via the JSON request body or quoted values in the trigger-arguments string form.
+- Timestamps are exchanged with microsecond precision; a series whose step is finer is rejected.
+- In the trigger-arguments string form, a tag value containing `:`, `@` or `.` must be quoted; the JSON request body needs no quoting.
 
 ## License
 

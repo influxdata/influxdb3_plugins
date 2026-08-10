@@ -336,8 +336,8 @@
                 "author": "Synthefy",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/synthefy_forecasting/README.md",
                 "required_plugins": [],
-                "required_libraries": ["pandas", "requests"],
-                "last_update": "2026-01-08",
+                "required_libraries": ["pandas", "requests", "influxdata-plugin-utils>=0.3.0"],
+                "last_update": "2026-08-10",
                 "trigger_types_supported": ["http"]
             },
             {

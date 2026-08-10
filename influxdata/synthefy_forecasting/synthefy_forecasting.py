@@ -23,13 +23,13 @@
         {
             "name": "time_range",
             "example": "30d",
-            "description": "Historical data window. Format: '<number><unit>' where unit is one of s, min, h, d, w, m, q, y.",
+            "description": "Historical data window. Format: '<number><unit>' where unit is one of us, ms, s, min, h, d, w, m, q, y.",
             "required": false
         },
         {
             "name": "forecast_horizon",
             "example": "7d",
-            "description": "Forecast duration. Format: '<number><unit>' (units: s, min, h, d, w, m, q, y) or '<number> points'.",
+            "description": "Forecast duration. Format: '<number><unit>' (units: us, ms, s, min, h, d, w, m, q, y) or '<number> points'.",
             "required": false
         },
         {
@@ -51,9 +51,85 @@
             "required": false
         },
         {
+            "name": "max_forecast_points",
+            "example": "10000",
+            "description": "Maximum number of forecast points one request may produce (default: 10000). The horizon is converted to points using the series' own step, so a dense series with a long horizon would otherwise build a very large payload.",
+            "required": false
+        },
+        {
             "name": "database",
             "example": "mydb",
             "description": "Optional override database for writing forecasts. Reads always go to the trigger's database.",
+            "required": false
+        }
+    ],
+    "http_body_config": [
+        {
+            "name": "measurement",
+            "example": "temperature",
+            "description": "InfluxDB measurement name to read from. Required unless set in the trigger arguments.",
+            "required": false
+        },
+        {
+            "name": "field",
+            "example": "value",
+            "description": "Field name containing the time series values",
+            "required": false
+        },
+        {
+            "name": "tags",
+            "example": "{'room': ['Bedroom', 'Kitchen'], 'location': 'Hall'}",
+            "description": "Tag filters as a JSON object mapping tag name to a value or list of values. The dot-separated string form of the trigger arguments is also accepted. Send {} to clear the filters configured on the trigger; null means 'not set', so the trigger argument applies.",
+            "required": false
+        },
+        {
+            "name": "time_range",
+            "example": "30d",
+            "description": "Historical data window. Format: '<number><unit>' where unit is one of us, ms, s, min, h, d, w, m, q, y.",
+            "required": false
+        },
+        {
+            "name": "forecast_horizon",
+            "example": "7d",
+            "description": "Forecast duration. Format: '<number><unit>' (units: us, ms, s, min, h, d, w, m, q, y) or '<number> points'.",
+            "required": false
+        },
+        {
+            "name": "model",
+            "example": "sfm-tabular",
+            "description": "Synthefy model to use (e.g., 'sfm-tabular', 'Migas-latest'). See README for supported models.",
+            "required": false
+        },
+        {
+            "name": "output_measurement",
+            "example": "temperature_forecast",
+            "description": "Output measurement name (default: '{measurement}_forecast')",
+            "required": false
+        },
+        {
+            "name": "metadata_fields",
+            "example": "['humidity', 'pressure']",
+            "description": "JSON list of metadata field names to use as covariates. A space-separated string is also accepted. Send [] to clear the list configured on the trigger; null means 'not set', so the trigger argument applies.",
+            "required": false
+        },
+        {
+            "name": "max_forecast_points",
+            "example": "10000",
+            "description": "Maximum number of forecast points one request may produce (default: 10000). Accepts a JSON number or a string.",
+            "required": false
+        },
+        {
+            "name": "database",
+            "example": "mydb",
+            "description": "Optional override database for writing forecasts. Reads always go to the trigger's database.",
+            "required": false
+        }
+    ],
+    "http_headers_config": [
+        {
+            "name": "X-Synthefy-Api-Key",
+            "example": "<your-synthefy-api-key>",
+            "description": "Synthefy API key. Required unless the SYNTHEFY_API_KEY environment variable is set on the InfluxDB process; the header wins when both are present.",
             "required": false
         }
     ]
@@ -61,17 +137,24 @@
 """
 
 import json
+import math
 import os
-import random
 import re
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
-from typing import Any, Iterable, Optional, Protocol
+from typing import Any
 
 import pandas as pd
 import requests
+from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.introspection import get_field_names, get_tag_names
+from influxdata_plugin_utils.parsing import (
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
+)
+from influxdata_plugin_utils.write import build_line, write_data
 
 # Note: LineBuilder is provided by the InfluxDB 3 plugin framework at runtime.
 
@@ -79,35 +162,34 @@ SYNTHEFY_API_BASE_URL = "https://forecast.synthefy.com"
 API_KEY_HEADER = "X-Synthefy-Api-Key"
 API_KEY_ENV_VAR = "SYNTHEFY_API_KEY"
 
+DEFAULT_MAX_FORECAST_POINTS = 10000
 
-class _LineBuilderInterface(Protocol):
-    def build(self) -> str: ...
+# Calendar units have no fixed length, so they are approximated in days.
+CALENDAR_UNIT_DAYS = {"m": 30.42, "q": 91.25, "y": 365.0}
 
+QUOTE_CHARS = ("'", '"')
+# Separators after which a quoted tag value may start.
+VALUE_START_CHARS = ":@"
 
-class _BatchLines:
-    """
-    Wraps multiple LineBuilder objects into a single object with a build()
-    method that returns a newline-separated string. Allows batched writes
-    through the write_sync / write_sync_to_db APIs.
-    """
+# Synthefy accepts sub-second timestamps.
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
-    def __init__(self, line_builders: Iterable[_LineBuilderInterface]):
-        self._line_builders = list(line_builders)
-        self._built: Optional[str] = None
-
-    def _coerce_builder(self, builder: _LineBuilderInterface) -> str:
-        build_fn = getattr(builder, "build", None)
-        if not callable(build_fn):
-            raise TypeError("line_builder is missing a callable build()")
-        return str(build_fn())
-
-    def build(self) -> str:
-        if self._built is None:
-            lines = [self._coerce_builder(b) for b in self._line_builders]
-            if not lines:
-                raise ValueError("batch_write received no lines to build")
-            self._built = "\n".join(lines)
-        return self._built
+VALIDATORS: list = [
+    Validator("measurement", default="", cast=str),
+    Validator("field", default="value", cast=str),
+    Validator("tags", default=None),
+    Validator("metadata_fields", default=None),
+    Validator("time_range", default="30d", cast=str),
+    Validator("forecast_horizon", default="7d", cast=str),
+    Validator("model", default="sfm-tabular", cast=str),
+    Validator("output_measurement", default="", cast=str),
+    Validator("database", default="", cast=str),
+    Validator(
+        "max_forecast_points",
+        default=DEFAULT_MAX_FORECAST_POINTS,
+        cast=lambda raw: parse_int(raw, minimum=1),
+    ),
+]
 
 
 def quote_identifier(name: str) -> str:
@@ -118,96 +200,95 @@ def escape_string_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _load_config(args: dict | None, body: dict | None) -> dict:
+    """
+    Merge trigger arguments with the request body and validate the result.
+
+    Body values override trigger arguments. An explicit JSON null means "not set",
+    so the validator default applies.
+    """
+    args = args or {}
+    body = body or {}
+    merged = {
+        **args,
+        **{key: value for key, value in body.items() if value is not None},
+    }
+    try:
+        settings = load_plugin_config(merged, validators=VALIDATORS, source="args")
+    except Exception as e:
+        raise Exception(f"Invalid configuration: {e}") from e
+    return {key.lower(): value for key, value in settings.as_dict().items()}
+
+
 def parse_time_interval(raw: str, task_id: str) -> timedelta:
     """
     Parse an interval string ('10min', '2d', '1y', ...) into a timedelta.
 
-    Supported units: s, min, h, d, w, m (≈30.42d), q (≈91.25d), y (365d).
+    Supported units: us, ms, s, min, h, d, w, plus the approximate calendar units
+    m (30.42d), q (91.25d) and y (365d).
     """
-    unit_mapping = {
-        "s": "seconds",
-        "min": "minutes",
-        "h": "hours",
-        "d": "days",
-        "w": "weeks",
-        "m": "days",
-        "q": "days",
-        "y": "days",
-    }
-    day_conversions = {
-        "m": 30.42,
-        "q": 91.25,
-        "y": 365.0,
-    }
-
     if not isinstance(raw, str):
         raise Exception(
             f"[{task_id}] Invalid interval type: expected string like '10min', got {type(raw).__name__}"
         )
 
-    match = re.fullmatch(r"(\d+)([a-zA-Z]+)", raw.strip())
-    if not match:
-        raise Exception(
-            f"[{task_id}] Invalid interval format: '{raw}'. Expected '<number><unit>', e.g. '10min', '2d'."
-        )
-
-    number_part, unit = match.groups()
-    magnitude = int(number_part)
-    unit = unit.lower()
-    if unit not in unit_mapping:
-        raise Exception(f"[{task_id}] Unsupported interval unit '{unit}' in '{raw}'.")
-
-    if unit in day_conversions:
-        days_approx = int(magnitude * day_conversions[unit])
-        if days_approx < 1:
+    match = re.fullmatch(r"\s*(\d+)\s*([a-zA-Z]+)\s*", raw)
+    if match and match.group(2).lower() in CALENDAR_UNIT_DAYS:
+        magnitude = int(match.group(1))
+        unit = match.group(2).lower()
+        days = int(magnitude * CALENDAR_UNIT_DAYS[unit])
+        if days < 1:
             raise Exception(
                 f"[{task_id}] Computed days < 1 for {magnitude}{unit} in '{raw}'."
             )
-        return timedelta(days=days_approx)
+        return timedelta(days=days)
 
-    if unit == "s":
-        return timedelta(seconds=magnitude)
-    if unit == "min":
-        return timedelta(minutes=magnitude)
-    if unit == "h":
-        return timedelta(hours=magnitude)
-    if unit == "d":
-        return timedelta(days=magnitude)
-    if unit == "w":
-        return timedelta(weeks=magnitude)
-    raise Exception(f"[{task_id}] Unsupported interval unit '{unit}' in '{raw}'.")
+    try:
+        return parse_timedelta(raw)
+    except ValueError as e:
+        raise Exception(
+            f"[{task_id}] Invalid interval format: '{raw}' ({e}). "
+            f"Expected '<number><unit>', e.g. '10min', '2d', '1y'."
+        ) from e
 
 
-def get_tag_names(influxdb3_local, measurement: str, task_id: str) -> list[str]:
-    """Return tag column names for `measurement`, or an empty list if none/no schema."""
-    query = """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = $measurement
-        AND data_type = 'Dictionary(Int32, Utf8)'
+def split_unquoted(text: str, separator: str) -> list[str]:
     """
-    res = influxdb3_local.query(query, {"measurement": measurement})
-    if not res:
-        influxdb3_local.info(
-            f"[{task_id}] No tags found for measurement '{measurement}'."
-        )
-        return []
-    return [row["column_name"] for row in res]
+    Split on `separator`, ignoring separators inside '...' or "..." quotes.
 
+    A quote is only special where a value may start: at the beginning of a part
+    or right after ':' or '@'. Elsewhere it is data, so "Bob's" stays intact.
 
-def get_field_names(influxdb3_local, measurement: str, task_id: str) -> list[str]:
-    """Return non-tag, non-time field column names for `measurement`."""
-    query = """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = $measurement
-        AND data_type != 'Dictionary(Int32, Utf8)'
-        AND column_name != 'time'
+    Raises:
+        ValueError: if a quote is never closed.
     """
-    res = influxdb3_local.query(query, {"measurement": measurement})
-    if not res:
-        return []
-    return [row["column_name"] for row in res]
+    parts: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for char in text:
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = ""
+        elif char in QUOTE_CHARS and (not current or current[-1] in VALUE_START_CHARS):
+            quote = char
+            current.append(char)
+        elif char == separator:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if quote:
+        raise ValueError(f"unterminated {quote} quote in '{text}'")
+    parts.append("".join(current))
+    return parts
+
+
+def strip_quotes(value: str) -> str:
+    """Remove one matching pair of surrounding single or double quotes."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in QUOTE_CHARS:
+        return value[1:-1]
+    return value
 
 
 def parse_tags_from_args(
@@ -220,7 +301,9 @@ def parse_tags_from_args(
         - '.' separates pairs
         - ':' separates the tag key from its value(s)
         - '@' separates multiple values for one key
-        - quoted values ('...' or "...") are stripped of their quotes
+        - a value wrapped in '...' or "..." is stripped of its quotes, and any
+          separator inside the quotes is treated as part of the value
+        - a quote inside a value, as in "Bob's", needs no escaping
     """
     if raw is None or raw == "":
         return {}
@@ -230,21 +313,23 @@ def parse_tags_from_args(
         )
 
     result: dict[str, list[str]] = {}
-    for pair in raw.split("."):
+    try:
+        pairs = split_unquoted(raw, ".")
+    except ValueError as e:
+        raise Exception(
+            f"[{task_id}] Invalid 'tags' string in trigger args: {e}."
+        ) from e
+
+    for pair in pairs:
         if not pair:
             continue
-        parts = pair.split(":")
+        parts = split_unquoted(pair, ":")
         if len(parts) != 2:
             raise Exception(
                 f"[{task_id}] Invalid tag-value pair: '{pair}' (must contain exactly one ':'; quote values containing ':')"
             )
         tag_name, value_str = parts
-        values: list[str] = []
-        for v in value_str.split("@"):
-            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
-                values.append(v[1:-1])
-            else:
-                values.append(v)
+        values = [strip_quotes(value) for value in split_unquoted(value_str, "@")]
 
         if tag_name not in tag_names:
             influxdb3_local.warn(
@@ -300,6 +385,23 @@ def parse_tags_from_body(
     return result
 
 
+def parse_tags(
+    influxdb3_local, raw: Any, measurement: str, tag_names: list[str], task_id: str
+) -> dict[str, list[str]]:
+    """Dispatch to the JSON-object form (request body) or the string form (trigger args)."""
+    if isinstance(raw, dict):
+        return parse_tags_from_body(
+            influxdb3_local, raw, measurement, tag_names, task_id
+        )
+    if raw is None or isinstance(raw, str):
+        return parse_tags_from_args(
+            influxdb3_local, raw, measurement, tag_names, task_id
+        )
+    raise Exception(
+        f"[{task_id}] Invalid 'tags' format: expected a string or JSON object, got {type(raw).__name__}."
+    )
+
+
 def parse_metadata_fields(
     influxdb3_local,
     raw: Any,
@@ -313,17 +415,13 @@ def parse_metadata_fields(
     """
     if raw is None or raw == "":
         return []
-    if isinstance(raw, str):
-        items = raw.split()
-    elif isinstance(raw, list):
-        items = [str(x) for x in raw]
-    else:
+    if not isinstance(raw, (str, list)):
         raise Exception(
             f"[{task_id}] Invalid 'metadata_fields' format: expected string or list, got {type(raw).__name__}."
         )
 
     result: list[str] = []
-    for item in items:
+    for item in parse_delimited_list(raw):
         if item not in field_names:
             influxdb3_local.warn(
                 f"[{task_id}] Metadata field '{item}' does not exist in '{measurement}'; ignoring."
@@ -351,7 +449,7 @@ def build_history_query(
         select_columns.append(quote_identifier(mf))
     select_clause = ", ".join(select_columns)
 
-    start_iso = start_time.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    start_iso = start_time.astimezone(timezone.utc).strftime(TIMESTAMP_FORMAT)
     params: dict[str, Any] = {}
     where_parts = [f"time >= '{start_iso}'"]
 
@@ -386,11 +484,13 @@ def build_history_query(
 
 
 def dataframe_to_synthefy_request(
+    influxdb3_local,
     df: pd.DataFrame,
     field: str,
     forecast_horizon: str,
     metadata_fields: list[str],
     model: str,
+    max_forecast_points: int,
     task_id: str,
 ) -> dict[str, Any]:
     """
@@ -405,8 +505,25 @@ def dataframe_to_synthefy_request(
     df["time"] = pd.to_datetime(df["time"])
     df = df.sort_values("time").reset_index(drop=True)
 
-    history_timestamps = df["time"].dt.strftime("%Y-%m-%dT%H:%M:%SZ").tolist()
+    repeated_timestamps = int(df["time"].duplicated().sum())
+    if repeated_timestamps:
+        influxdb3_local.warn(
+            f"[{task_id}] History holds {repeated_timestamps} repeated timestamps, so the "
+            f"window covers more than one series and their values are interleaved. "
+            f"Set 'tags' to select a single series."
+        )
+
+    history_timestamps = df["time"].dt.strftime(TIMESTAMP_FORMAT).tolist()
     history_values = [None if pd.isna(v) else v for v in df[field].tolist()]
+
+    collapsed = (
+        len(history_timestamps) - len(set(history_timestamps)) - repeated_timestamps
+    )
+    if collapsed > 0:
+        raise Exception(
+            f"[{task_id}] {collapsed} history timestamps differ by less than a microsecond "
+            f"and collapse onto each other. Resample the series to a coarser step."
+        )
 
     if len(df) >= 2:
         time_step = df["time"].iloc[-1] - df["time"].iloc[-2]
@@ -418,22 +535,33 @@ def dataframe_to_synthefy_request(
     fh = forecast_horizon.strip()
     if fh.endswith(" points"):
         try:
-            num_points = int(fh.replace(" points", "").strip())
-        except ValueError:
+            num_points = parse_int(fh.removesuffix(" points"), minimum=1)
+        except ValueError as e:
             raise Exception(
-                f"[{task_id}] Invalid forecast_horizon: '{forecast_horizon}'."
-            )
-        if num_points < 1:
-            raise Exception(f"[{task_id}] forecast_horizon must be >= 1 point.")
+                f"[{task_id}] Invalid forecast_horizon: '{forecast_horizon}' ({e})."
+            ) from e
     else:
         forecast_td = parse_time_interval(fh, task_id)
         num_points = max(1, int(forecast_td / time_step))
 
+    if num_points > max_forecast_points:
+        raise Exception(
+            f"[{task_id}] forecast_horizon '{forecast_horizon}' resolves to {num_points} points "
+            f"at the series' step of {time_step}, above the max_forecast_points limit of "
+            f"{max_forecast_points}. Shorten the horizon or raise max_forecast_points."
+        )
+
     target_timestamps: list[str] = []
     current_time = df["time"].iloc[-1] + time_step
     for _ in range(num_points):
-        target_timestamps.append(current_time.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        target_timestamps.append(current_time.strftime(TIMESTAMP_FORMAT))
         current_time += time_step
+
+    if len(set(target_timestamps)) != len(target_timestamps):
+        raise Exception(
+            f"[{task_id}] The series' step of {time_step} is finer than a microsecond, so "
+            f"forecast timestamps collapse onto each other. Resample to a coarser step."
+        )
 
     target_values = [None] * len(target_timestamps)
 
@@ -502,6 +630,19 @@ def call_synthefy_api(
         raise
 
 
+def _timestamp_ns(raw: Any) -> int:
+    """Convert a forecast timestamp to integer nanoseconds; naive values are UTC."""
+    ts = pd.Timestamp(raw)
+    if ts.tz is None:
+        ts = ts.tz_localize("UTC")
+    return int(ts.value)
+
+
+def _is_non_finite(value: Any) -> bool:
+    """True for NaN/inf floats, which would make InfluxDB reject the whole batch."""
+    return isinstance(value, float) and not math.isfinite(value)
+
+
 def forecast_response_to_line_builders(
     influxdb3_local,
     forecast_response: dict[str, Any],
@@ -527,7 +668,7 @@ def forecast_response_to_line_builders(
 
     forecast_row = forecasts[0]
 
-    forecast_payload: Optional[dict] = None
+    forecast_payload: dict | None = None
     for f in forecast_row:
         if isinstance(f, dict) and "timestamps" in f and "values" in f:
             forecast_payload = f
@@ -543,90 +684,86 @@ def forecast_response_to_line_builders(
     quantiles = forecast_payload.get("quantiles") or {}
     output_field_name = field_name or forecast_payload.get("sample_id", "value")
 
+    static_tags = {
+        tag_key: tag_values[0]
+        for tag_key, tag_values in tag_filters.items()
+        if len(tag_values) == 1
+    }
+    static_tags["model"] = model
+
     builders: list[Any] = []
     for i, (ts_str, value) in enumerate(zip(timestamps, values)):
         if value is None:
             continue
+        if _is_non_finite(value):
+            influxdb3_local.warn(
+                f"[{task_id}] Non-finite forecast value at '{ts_str}'; skipping point."
+            )
+            continue
         try:
-            ts = pd.to_datetime(ts_str)
-            ts_ns = int(ts.timestamp() * 1e9)
+            ts_ns = _timestamp_ns(ts_str)
         except Exception:
             influxdb3_local.warn(
                 f"[{task_id}] Could not parse timestamp '{ts_str}'; skipping point."
             )
             continue
 
-        builder = LineBuilder(output_measurement)
-        builder.time_ns(ts_ns)
-
-        for tag_key, tag_values in tag_filters.items():
-            if len(tag_values) == 1:
-                builder.tag(tag_key, tag_values[0])
-        builder.tag("model", model)
-
-        _set_field(builder, output_field_name, value)
+        fields: dict[str, Any] = {output_field_name: value}
         for q_level, q_values in quantiles.items():
-            if i < len(q_values) and q_values[i] is not None:
-                _set_field(builder, f"value_{q_level}", q_values[i])
+            if i >= len(q_values):
+                continue
+            q_value = q_values[i]
+            if q_value is None or _is_non_finite(q_value):
+                continue
+            fields[f"value_{q_level}"] = q_value
 
-        builders.append(builder)
+        builders.append(
+            build_line(
+                LineBuilder,
+                output_measurement,
+                tags=static_tags,
+                fields=fields,
+                time_ns=ts_ns,
+            )
+        )
     return builders
-
-
-def _set_field(builder: Any, name: str, value: Any) -> None:
-    if isinstance(value, bool):
-        builder.string_field(name, str(value))
-    elif isinstance(value, int):
-        builder.int64_field(name, value)
-    elif isinstance(value, float):
-        builder.float64_field(name, value)
-    else:
-        builder.string_field(name, str(value))
 
 
 def write_forecasts_to_influxdb(
     influxdb3_local,
     builders: list[Any],
-    database: Optional[str],
+    database: str | None,
     task_id: str,
     max_retries: int = 3,
 ) -> None:
     """
-    Write forecast points using write_sync (or write_sync_to_db when `database`
-    is set), batched into a single line-protocol payload, with exponential backoff retries.
+    Write forecast points as a single batched, synchronous payload, retrying with
+    exponential backoff. Writes go to `database` when set, otherwise to the
+    trigger's own database.
     """
     if not builders:
         influxdb3_local.warn(f"[{task_id}] No forecast points to write.")
         return
 
+    target = f"database {database}" if database else "trigger database"
     influxdb3_local.info(
-        f"[{task_id}] Writing {len(builders)} forecast points to "
-        f"{'database ' + database if database else 'trigger database'}."
+        f"[{task_id}] Writing {len(builders)} forecast points to {target}."
     )
-
-    batch = _BatchLines(builders)
-    for attempt in range(max_retries):
-        try:
-            if database:
-                influxdb3_local.write_sync_to_db(database, batch, no_sync=True)
-            else:
-                influxdb3_local.write_sync(batch, no_sync=True)
-            influxdb3_local.info(
-                f"[{task_id}] Wrote {len(builders)} forecast points (attempt {attempt + 1})."
-            )
-            return
-        except Exception as e:
-            influxdb3_local.warn(
-                f"[{task_id}] Error writing forecasts attempt {attempt + 1}/{max_retries}: {e}"
-            )
-            if attempt < max_retries - 1:
-                wait_time = (2**attempt) + random.random()
-                time.sleep(wait_time)
-            else:
-                influxdb3_local.error(
-                    f"[{task_id}] Failed to write forecasts after {max_retries} attempts: {e}"
-                )
-                raise
+    try:
+        write_data(
+            influxdb3_local,
+            builders,
+            batch=True,
+            retries=max_retries - 1,
+            no_sync=True,
+            database=database,
+        )
+    except Exception as e:
+        influxdb3_local.error(
+            f"[{task_id}] Failed to write forecasts after {max_retries} attempts: {e}"
+        )
+        raise
+    influxdb3_local.info(f"[{task_id}] Wrote {len(builders)} forecast points.")
 
 
 def _decode_request_body(request_body: Any, task_id: str) -> dict:
@@ -635,18 +772,19 @@ def _decode_request_body(request_body: Any, task_id: str) -> dict:
         return {}
     if isinstance(request_body, dict):
         return request_body
-    if isinstance(request_body, bytes):
-        body_str = request_body.decode("utf-8")
-    elif isinstance(request_body, str):
-        body_str = request_body
-    else:
+    if not isinstance(request_body, (bytes, str)):
         raise Exception(
             f"[{task_id}] Unsupported request_body type: {type(request_body).__name__}"
         )
+    body_str = (
+        request_body.decode("utf-8")
+        if isinstance(request_body, bytes)
+        else request_body
+    )
     return json.loads(body_str)
 
 
-def _get_api_key(request_headers: Optional[dict]) -> Optional[str]:
+def _get_api_key(request_headers: dict | None) -> str | None:
     """Return the API key from the request header or env var, or None."""
     if request_headers:
         for key, value in request_headers.items():
@@ -660,7 +798,7 @@ def process_request(
     query_parameters: dict,
     request_headers: dict,
     request_body: Any,
-    args: Optional[dict] = None,
+    args: dict | None = None,
 ) -> dict:
     """
     HTTP entry point. Reads historical data, calls Synthefy, writes the forecast back.
@@ -696,24 +834,21 @@ def process_request(
         return {"message": "Missing API key"}
 
     try:
-        merged_args = {**args, **body_dict}
+        config = _load_config(args, body_dict)
 
-        measurement = merged_args.get("measurement")
+        measurement = config["measurement"]
         if not measurement:
             influxdb3_local.error(f"[{task_id}] 'measurement' argument is required.")
             return {"message": "'measurement' argument is required"}
 
-        field = merged_args.get("field", "value")
-        time_range_str = merged_args.get("time_range", "30d")
-        forecast_horizon_str = merged_args.get("forecast_horizon", "7d")
-        model = merged_args.get("model", "sfm-tabular")
-        output_measurement = (
-            merged_args.get("output_measurement") or f"{measurement}_forecast"
-        )
-        database = merged_args.get("database") or None
+        field = config["field"]
+        model = config["model"]
+        output_measurement = config["output_measurement"] or f"{measurement}_forecast"
+        database = config["database"] or None
+        max_forecast_points = config["max_forecast_points"]
 
-        field_names = get_field_names(influxdb3_local, measurement, task_id)
-        tag_names = get_tag_names(influxdb3_local, measurement, task_id)
+        field_names = get_field_names(influxdb3_local, measurement, use_cache=False)
+        tag_names = get_tag_names(influxdb3_local, measurement, use_cache=False)
 
         if not field_names and not tag_names:
             influxdb3_local.error(
@@ -727,41 +862,14 @@ def process_request(
             )
             return {"message": f"Field '{field}' does not exist in '{measurement}'"}
 
-        if "tags" in body_dict:
-            tag_filters = parse_tags_from_body(
-                influxdb3_local,
-                body_dict.get("tags"),
-                measurement,
-                tag_names,
-                task_id,
-            )
-        else:
-            tag_filters = parse_tags_from_args(
-                influxdb3_local,
-                args.get("tags"),
-                measurement,
-                tag_names,
-                task_id,
-            )
+        tag_filters = parse_tags(
+            influxdb3_local, config["tags"], measurement, tag_names, task_id
+        )
+        metadata_fields = parse_metadata_fields(
+            influxdb3_local, config["metadata_fields"], measurement, field_names, task_id
+        )
 
-        if "metadata_fields" in body_dict:
-            metadata_fields = parse_metadata_fields(
-                influxdb3_local,
-                body_dict.get("metadata_fields"),
-                measurement,
-                field_names,
-                task_id,
-            )
-        else:
-            metadata_fields = parse_metadata_fields(
-                influxdb3_local,
-                args.get("metadata_fields"),
-                measurement,
-                field_names,
-                task_id,
-            )
-
-        time_range_td = parse_time_interval(time_range_str, task_id)
+        time_range_td = parse_time_interval(config["time_range"], task_id)
         start_time = datetime.now(timezone.utc) - time_range_td
 
         query, params = build_history_query(
@@ -781,7 +889,14 @@ def process_request(
             return {"message": "No data found"}
 
         synthefy_request = dataframe_to_synthefy_request(
-            df, field, forecast_horizon_str, metadata_fields, model, task_id
+            influxdb3_local,
+            df,
+            field,
+            config["forecast_horizon"],
+            metadata_fields,
+            model,
+            max_forecast_points,
+            task_id,
         )
         forecast_response = call_synthefy_api(
             influxdb3_local, synthefy_request, api_key, task_id

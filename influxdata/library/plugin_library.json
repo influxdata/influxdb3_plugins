@@ -380,8 +380,8 @@
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/stock_plugin/README.md",
                 "required_plugins": [],
-                "required_libraries": ["yfinance", "pandas_market_calendars"],
-                "last_update": "2026-06-10",
+                "required_libraries": ["yfinance", "pandas_market_calendars", "influxdata-plugin-utils>=0.3.0"],
+                "last_update": "2026-08-12",
                 "trigger_types_supported": ["scheduler"]
             },
             {

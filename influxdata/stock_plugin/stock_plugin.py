@@ -23,7 +23,31 @@
         {
             "name": "config_path",
             "example": "stock_plugin.toml",
-            "description": "Path to TOML configuration file. Supports absolute paths or relative paths resolved from INFLUXDB3_PLUGIN_DIR, PLUGIN_DIR, VIRTUAL_ENV parent, or the plugin directory.",
+            "description": "Path to TOML configuration file. Absolute paths are used as-is; relative paths resolve against the plugin directory (PLUGIN_DIR, INFLUXDB3_PLUGIN_DIR, or the VIRTUAL_ENV parent). Defaults to stock_plugin.toml, loaded when present.",
+            "required": false
+        },
+        {
+            "name": "write_during_closed_hours",
+            "example": "true",
+            "description": "Write rows even when the configured market is closed. When false, stocks and ETFs are skipped outside the exchange session. Defaults to true.",
+            "required": false
+        },
+        {
+            "name": "mutual_fund_check_time",
+            "example": "18:00",
+            "description": "Time of day in market_timezone, as HH:MM, after which mutual fund NAV is fetched. Defaults to 18:00.",
+            "required": false
+        },
+        {
+            "name": "market_calendar",
+            "example": "NYSE",
+            "description": "Exchange calendar governing the market-open check. Any name accepted by pandas_market_calendars. Defaults to NYSE.",
+            "required": false
+        },
+        {
+            "name": "market_timezone",
+            "example": "America/New_York",
+            "description": "IANA timezone of the exchange, used for mutual_fund_check_time and for the local market day. Defaults to America/New_York.",
             "required": false
         }
     ]
@@ -32,14 +56,34 @@
 
 from __future__ import annotations
 
-import os
-import tomllib
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+from influxdata_plugin_utils.config import Validator, load_plugin_config, resolve_path
+from influxdata_plugin_utils.parsing import (
+    parse_bool,
+    parse_delimited_list,
+    parse_timestamp_ns,
+)
+from influxdata_plugin_utils.write import build_line, write_data
+
+
+# Default holdings
+DEFAULT_PORTFOLIO = "AAPL:1|MSFT:1|GOOG:1"
+
+DEFAULT_DATABASE = "stocks"
+
+# TOML config loaded when `config_path` is not set and the file exists
+DEFAULT_CONFIG_FILE = "stock_plugin.toml"
+
+# Holdings and categories are spelled differently per medium, so each spelling is read only from its own medium.
+INLINE_ARG_KEYS = ("portfolio", "categories")
+TOML_TABLE_KEYS = ("holdings", "portfolio_categories")
 
 
 def _parse_hhmm(s: str) -> tuple[int, int]:
@@ -55,6 +99,80 @@ def _parse_hhmm(s: str) -> tuple[int, int]:
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise ValueError(f"invalid HH:MM time {s!r}: out of range")
     return hour, minute
+
+
+def _parse_quantity(raw, where: str) -> float:
+    """Parse a holding quantity, rejecting non-finite values.
+
+    `inf` and `nan` are valid TOML floats and valid input to float(), but they
+    cannot be written as a field, so they are rejected as configuration errors.
+    """
+    try:
+        quantity = float(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"invalid quantity {raw!r} {where}") from e
+    if not math.isfinite(quantity):
+        raise ValueError(f"invalid quantity {raw!r} {where}: must be a finite number")
+    return quantity
+
+
+def _validated_hhmm(raw) -> str:
+    """Config cast: accept a HH:MM string, rejecting anything unparseable."""
+    text = str(raw).strip()
+    _parse_hhmm(text)
+    return text
+
+
+def _validated_market_calendar(raw) -> str:
+    """Config cast: accept an exchange name known to pandas_market_calendars."""
+    name = str(raw).strip()
+    if not name:
+        raise ValueError("market_calendar must be a non-empty exchange name")
+    try:
+        import pandas_market_calendars as mcal
+    except ImportError as e:
+        raise ValueError(
+            "pandas_market_calendars is required to validate market_calendar; "
+            "install it in the plugin environment"
+        ) from e
+    try:
+        mcal.get_calendar(name)
+    except Exception as e:
+        raise ValueError(
+            f"market_calendar {name!r} is not accepted by "
+            f"pandas_market_calendars: {e}"
+        ) from e
+    return name
+
+
+def _validated_market_timezone(raw) -> str:
+    """Config cast: accept an IANA timezone name."""
+    name = str(raw).strip()
+    if not name:
+        raise ValueError("market_timezone must be a non-empty IANA timezone")
+    try:
+        ZoneInfo(name)
+    except Exception as e:
+        raise ValueError(
+            f"market_timezone {name!r} is not a valid IANA timezone: {e}"
+        ) from e
+    return name
+
+
+VALIDATORS: list = [
+    Validator(
+        "database", default=DEFAULT_DATABASE,
+        cast=lambda raw: str(raw).strip() or DEFAULT_DATABASE,
+    ),
+    Validator("portfolio", default="", cast=str),
+    Validator("categories", default="", cast=str),
+    Validator("write_during_closed_hours", default=True, cast=parse_bool),
+    Validator("mutual_fund_check_time", default="18:00", cast=_validated_hhmm),
+    Validator("market_calendar", default="NYSE", cast=_validated_market_calendar),
+    Validator(
+        "market_timezone", default="America/New_York", cast=_validated_market_timezone
+    ),
+]
 
 
 def _normalize_quote_type(qt: Optional[str]) -> str:
@@ -182,10 +300,6 @@ class ResolvedConfig:
     market_timezone: str = "America/New_York"
 
 
-# Default holdings
-DEFAULT_PORTFOLIO = "AAPL:1|MSFT:1|GOOG:1"
-
-
 def parse_inline_portfolio(value: str) -> dict[str, list[Holding]]:
     """Parse the inline `portfolio=` trigger argument.
 
@@ -200,16 +314,11 @@ def parse_inline_portfolio(value: str) -> dict[str, list[Holding]]:
 
     Raises ValueError on any malformed input.
     """
-    if not value or not value.strip():
+    entries = parse_delimited_list(value, sep="|")
+    if not entries:
         raise ValueError("portfolio argument is empty")
     result: dict[str, list[Holding]] = {}
-    for raw in value.split("|"):
-        raw = raw.strip()
-        if not raw:
-            raise ValueError(
-                f"invalid portfolio argument {value!r}: empty token "
-                f"(check for leading, trailing, or doubled '|')"
-            )
+    for raw in entries:
         parts = raw.split(":")
         if len(parts) not in (2, 3):
             raise ValueError(
@@ -218,12 +327,7 @@ def parse_inline_portfolio(value: str) -> dict[str, list[Holding]]:
         symbol = parts[0].strip().upper()
         if not symbol:
             raise ValueError(f"invalid holding spec {raw!r}: empty symbol")
-        try:
-            quantity = float(parts[1])
-        except ValueError as e:
-            raise ValueError(
-                f"invalid quantity {parts[1]!r} in {raw!r}"
-            ) from e
+        quantity = _parse_quantity(parts[1], f"in {raw!r}")
         if len(parts) == 3 and parts[2].strip():
             portfolio = parts[2].strip()
         else:
@@ -242,23 +346,17 @@ def parse_inline_categories(value: str) -> dict[str, str]:
 
     Raises ValueError on any malformed input.
     """
-    if not value or not value.strip():
+    entries = parse_delimited_list(value, sep="|")
+    if not entries:
         raise ValueError("categories argument is empty")
     result: dict[str, str] = {}
-    for raw in value.split("|"):
-        raw = raw.strip()
-        if not raw:
-            raise ValueError(
-                f"invalid categories argument {value!r}: empty token "
-                f"(check for leading, trailing, or doubled '|')"
-            )
+    for raw in entries:
         parts = raw.split(":")
         if len(parts) != 2:
             raise ValueError(
                 f"invalid category spec {raw!r}: expected PORTFOLIO:CATEGORY"
             )
-        portfolio_name = parts[0].strip()
-        category_name = parts[1].strip()
+        portfolio_name, category_name = parts[0].strip(), parts[1].strip()
         if not portfolio_name or not category_name:
             raise ValueError(
                 f"invalid category spec {raw!r}: empty portfolio or category name"
@@ -294,37 +392,10 @@ def _aggregate_duplicate_holdings(
     return result
 
 
-def _validate_market_calendar(calendar_name: str) -> None:
-    """Fail fast if pandas_market_calendars does not know this calendar."""
-    try:
-        import pandas_market_calendars as mcal
-    except ImportError as e:
-        raise ValueError(
-            "pandas_market_calendars is required to validate market_calendar; "
-            "install it in the plugin environment"
-        ) from e
+def parse_toml_holdings(holdings_section) -> dict[str, list[Holding]]:
+    """Parse the `[holdings.<portfolio>]` tables of the TOML config.
 
-    try:
-        mcal.get_calendar(calendar_name)
-    except Exception as e:
-        raise ValueError(
-            f"market_calendar {calendar_name!r} is not accepted by "
-            f"pandas_market_calendars: {e}"
-        ) from e
-
-
-def load_toml_config(path: Path) -> tuple[dict, dict[str, list[Holding]]]:
-    """Load TOML config from `path`.
-
-    Returns (top_level_data_dict, holdings_by_portfolio). The full raw
-    TOML top-level dict is returned so resolve_config can pick out
-    optional scalar keys (database, market_calendar, etc).
-
-    Expected TOML shape:
-        database = "stocks"
-        write_during_closed_hours = true
-        mutual_fund_check_time = "18:00"
-
+    Expected shape:
         [holdings.401k]
         AAPL = 10
         MSFT = 5
@@ -332,19 +403,12 @@ def load_toml_config(path: Path) -> tuple[dict, dict[str, list[Holding]]]:
         [holdings.brokerage]
         GOOG = 2.5
 
-    Holdings may be empty (no [holdings.*] sections); the caller decides
-    how to handle that (e.g. fall back to a default portfolio).
+    Holdings may be empty (no [holdings.*] sections); the caller decides how to
+    handle that (e.g. fall back to a default portfolio).
 
-    Raises:
-        FileNotFoundError: path does not exist
-        tomllib.TOMLDecodeError: file is not valid TOML
-        ValueError: holdings is not a table, or a holding has an invalid quantity
+    Raises ValueError if holdings is not a table, or a holding has an invalid
+    quantity.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"TOML config not found: {path}")
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-    holdings_section = data.get("holdings", {})
     if not isinstance(holdings_section, dict):
         raise ValueError(
             f"[holdings] must be a table of portfolios; "
@@ -365,13 +429,10 @@ def load_toml_config(path: Path) -> tuple[dict, dict[str, list[Holding]]]:
                     f"ticker symbol, quote it in TOML, for example "
                     f'"{dotted_hint}" = 1'
                 )
-            try:
-                qty = float(quantity)
-            except (TypeError, ValueError) as e:
-                raise ValueError(
-                    f"invalid quantity {quantity!r} for symbol {symbol!r} "
-                    f"in [holdings.{portfolio_name}]"
-                ) from e
+            qty = _parse_quantity(
+                quantity,
+                f"for symbol {symbol!r} in [holdings.{portfolio_name}]",
+            )
             result.setdefault(portfolio_name, []).append(
                 Holding(
                     symbol=symbol.upper(),
@@ -379,74 +440,81 @@ def load_toml_config(path: Path) -> tuple[dict, dict[str, list[Holding]]]:
                     portfolio=portfolio_name,
                 )
             )
-    return data, result
+    return result
 
 
-def resolve_config_path(path: str, default_toml_path: Path) -> Path:
-    """Resolve TOML config path using the plugin-dir fallbacks used by plugins.
+def resolve_toml_path(local, args: dict[str, str], task_id: str) -> Optional[Path]:
+    """Locate the TOML config file, or return None when there is none to load.
 
-    Absolute paths are used as-is. Relative paths are resolved from
-    INFLUXDB3_PLUGIN_DIR or PLUGIN_DIR when available, then VIRTUAL_ENV's
-    parent directory, and finally the supplied default TOML directory.
+    An explicit `config_path` must exist; the default file is loaded only when
+    present, so the plugin runs without any TOML config.
     """
-    raw_path = Path(path)
-    if raw_path.is_absolute():
-        return raw_path
-
-    candidates: list[Path] = []
-    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-        candidates.append(Path(influxdb3_plugin_dir))
-    if plugin_dir := os.environ.get("PLUGIN_DIR"):
-        candidates.append(Path(plugin_dir))
-    if virtual_env := os.environ.get("VIRTUAL_ENV"):
-        candidates.append(Path(virtual_env).parent)
-    candidates.append(default_toml_path.parent)
-
-    for base in candidates:
-        candidate = base / raw_path
-        if candidate.exists():
-            return candidate
-    return candidates[0] / raw_path
+    explicit = args.get("config_path")
+    try:
+        path = resolve_path(explicit or DEFAULT_CONFIG_FILE)
+    except ValueError as e:
+        if explicit:
+            raise ValueError(f"cannot resolve config_path {explicit!r}: {e}") from e
+        local.warn(
+            f"[{task_id}] stock_plugin: cannot resolve the plugin directory ({e}), "
+            f"so any {DEFAULT_CONFIG_FILE} is ignored; continuing with trigger arguments"
+        )
+        return None
+    if path.exists():
+        return path
+    if explicit:
+        raise ValueError(f"config_path was set but no TOML config found at {path}.")
+    return None
 
 
-def resolve_config(
-    args: dict[str, str], default_toml_path: Path
-) -> ResolvedConfig:
+def resolve_config(local, args: dict[str, str], task_id: str) -> ResolvedConfig:
     """Resolve final config from trigger args + TOML.
 
-    Precedence:
-      Holdings: inline `portfolio=` arg > TOML [holdings.*] > DEFAULT_PORTFOLIO
-      Database: `database=` arg > TOML `database` > default "stocks"
-      Config path: `config_path=` arg > default_toml_path. Relative paths
-      resolve from INFLUXDB3_PLUGIN_DIR, PLUGIN_DIR, VIRTUAL_ENV's parent,
-      or default_toml_path.parent.
+    Trigger arguments override TOML keys of the same name. Holdings come from the
+    inline `portfolio=` argument, else from the TOML `[holdings.*]` tables, else
+    from DEFAULT_PORTFOLIO, so the plugin runs without configuration; categories
+    follow the same order with `categories=` and `[portfolio_categories]`.
 
-    Other TOML scalars (write_during_closed_hours, mutual_fund_check_time,
-    market_calendar, market_timezone) come only from TOML — there is no
-    inline-arg override for them. Defaults apply when the key is absent.
-
-    When no inline holdings and no TOML file are found, falls back to
-    DEFAULT_PORTFOLIO so the plugin runs without configuration.
-
-    Raises ValueError if config_path is set but the file is missing, or if
-    any TOML scalar has an invalid value.
+    Raises ValueError if config_path is set but the file is missing, or if any
+    configuration value is invalid.
     """
-    inline_portfolio = args.get("portfolio")
-    explicit_config_path = bool(args.get("config_path"))
-    config_path = resolve_config_path(
-        args.get("config_path") or str(default_toml_path),
-        default_toml_path,
-    )
+    args = {key: value for key, value in (args or {}).items() if value not in (None, "")}
 
     toml_data: dict = {}
-    holdings: dict[str, list[Holding]] = {}
-    if inline_portfolio:
-        holdings = parse_inline_portfolio(inline_portfolio)
-    elif config_path.exists():
-        toml_data, holdings = load_toml_config(config_path)
-    elif explicit_config_path:
-        raise ValueError("config_path was set but no TOML config found.")
+    toml_path = resolve_toml_path(local, args, task_id)
+    if toml_path:
+        loaded = load_plugin_config(
+            {"config_path": str(toml_path)},
+            config_file_path_arg="config_path",
+            source="toml",
+        )
+        toml_data = {key.lower(): value for key, value in loaded.as_dict().items()}
 
+    holdings_table = toml_data.get("holdings")
+    categories_table = toml_data.get("portfolio_categories")
+    settings = load_plugin_config(
+        {
+            **{
+                key: value
+                for key, value in toml_data.items()
+                if key not in TOML_TABLE_KEYS + INLINE_ARG_KEYS
+            },
+            **{
+                key: value
+                for key, value in args.items()
+                if key not in TOML_TABLE_KEYS
+            },
+        },
+        validators=VALIDATORS,
+        config_file_path_arg="config_path",
+        source="args",
+    )
+    config = {key.lower(): value for key, value in settings.as_dict().items()}
+
+    if config["portfolio"]:
+        holdings = parse_inline_portfolio(config["portfolio"])
+    else:
+        holdings = parse_toml_holdings({} if holdings_table is None else holdings_table)
     if not holdings:
         holdings = parse_inline_portfolio(DEFAULT_PORTFOLIO)
 
@@ -457,66 +525,25 @@ def resolve_config(
         )
     holdings = _aggregate_duplicate_holdings(holdings)
 
-    if args.get("database"):
-        database = args["database"]
-    elif toml_data.get("database"):
-        database = toml_data["database"]
+    if config["categories"]:
+        categories = parse_inline_categories(config["categories"])
     else:
-        database = "stocks"
-
-    write_closed = toml_data.get("write_during_closed_hours", True)
-    if not isinstance(write_closed, bool):
-        raise ValueError(
-            f"write_during_closed_hours must be true or false; got {write_closed!r}"
-        )
-
-    mf_check = toml_data.get("mutual_fund_check_time", "18:00")
-    if not isinstance(mf_check, str):
-        raise ValueError(
-            f"mutual_fund_check_time must be a HH:MM string; got {mf_check!r}"
-        )
-    _parse_hhmm(mf_check)  # validate format, raises ValueError on bad input
-
-    market_calendar = toml_data.get("market_calendar", "NYSE")
-    if not isinstance(market_calendar, str) or not market_calendar.strip():
-        raise ValueError(
-            f"market_calendar must be a non-empty exchange name string; got {market_calendar!r}"
-        )
-    market_calendar = market_calendar.strip()
-    _validate_market_calendar(market_calendar)
-
-    market_timezone = toml_data.get("market_timezone", "America/New_York")
-    if not isinstance(market_timezone, str) or not market_timezone.strip():
-        raise ValueError(
-            f"market_timezone must be a non-empty IANA timezone string; got {market_timezone!r}"
-        )
-    try:
-        ZoneInfo(market_timezone)
-    except Exception as e:
-        raise ValueError(
-            f"market_timezone {market_timezone!r} is not a valid IANA timezone: {e}"
-        ) from e
-
-    # Resolve categories: trigger arg > TOML > {}
-    inline_categories = args.get("categories")
-    if inline_categories:
-        categories = parse_inline_categories(inline_categories)
-    else:
-        toml_cats = toml_data.get("portfolio_categories", {})
-        if not isinstance(toml_cats, dict):
+        toml_categories = {} if categories_table is None else categories_table
+        if not isinstance(toml_categories, dict):
             raise ValueError(
-                f"[portfolio_categories] must be a TOML table; got {type(toml_cats).__name__}"
+                f"[portfolio_categories] must be a TOML table; "
+                f"got {type(toml_categories).__name__}"
             )
-        categories = {str(k): str(v) for k, v in toml_cats.items()}
+        categories = {str(k): str(v) for k, v in toml_categories.items()}
 
     return ResolvedConfig(
-        database=database,
+        database=config["database"],
         holdings_by_portfolio=holdings,
         categories=categories,
-        write_during_closed_hours=write_closed,
-        mutual_fund_check_time=mf_check,
-        market_calendar=market_calendar,
-        market_timezone=market_timezone,
+        write_during_closed_hours=config["write_during_closed_hours"],
+        mutual_fund_check_time=config["mutual_fund_check_time"],
+        market_calendar=config["market_calendar"],
+        market_timezone=config["market_timezone"],
     )
 
 
@@ -627,15 +654,26 @@ def compute_category_totals(
     return rows
 
 
+def _finite(value) -> Optional[float]:
+    """Coerce to float, treating None and non-finite values (NaN, inf) as missing."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def fetch_quote(symbol: str) -> Quote:
     """Fetch current price + day OHL + previous close + currency for `symbol`.
 
     Uses yfinance.Ticker(symbol).fast_info — a single HTTP call that returns
     all the fields the plugin needs. Optional fields default to None when
-    yfinance returns None for them; the caller decides how to handle missing
-    fields when building line protocol.
+    yfinance returns None or a non-finite number for them; the caller decides
+    how to handle missing fields when building line protocol.
 
-    Raises ValueError if no last_price is returned. Raises whatever
+    Raises ValueError if no usable last_price is returned. Raises whatever
     yfinance raises on network/other failures (e.g. requests exceptions).
 
     yfinance is imported lazily so this module is importable / AST-parseable
@@ -644,12 +682,15 @@ def fetch_quote(symbol: str) -> Quote:
     import yfinance as yf
     ticker = yf.Ticker(symbol)
     fi = ticker.fast_info
-    if fi.last_price is None:
-        raise ValueError(f"no last_price returned for {symbol}")
+    price = _finite(fi.last_price)
+    if price is None:
+        raise ValueError(f"no usable last_price returned for {symbol}")
 
     def _opt(attr: str) -> Optional[float]:
-        v = getattr(fi, attr, None)
-        return float(v) if v is not None else None
+        try:
+            return _finite(getattr(fi, attr, None))
+        except (KeyError, AttributeError):
+            return None
 
     try:
         raw_currency = fi.currency
@@ -663,7 +704,7 @@ def fetch_quote(symbol: str) -> Quote:
 
     return Quote(
         symbol=symbol,
-        price=float(fi.last_price),
+        price=price,
         currency=str(raw_currency) if raw_currency else "USD",
         asset_type=_normalize_quote_type(raw_quote_type),
         previous_close=_opt("previous_close"),
@@ -678,7 +719,6 @@ def _main(
     args: dict[str, str],
     fetcher,
     line_builder_cls,
-    plugin_dir: Path,
     now_ns: int,
     task_id: str,
 ) -> None:
@@ -697,10 +737,9 @@ def _main(
     Per-symbol asset_type is auto-detected via yfinance.fast_info.quote_type
     on first fetch and cached (no TTL) so we don't re-query for type.
     """
-    default_toml = plugin_dir / "stock_plugin.toml"
     try:
-        config = resolve_config(args, default_toml)
-    except (ValueError, OSError, tomllib.TOMLDecodeError) as e:
+        config = resolve_config(local, args, task_id)
+    except Exception as e:
         local.error(f"[{task_id}] stock_plugin: configuration error: {e}")
         return
 
@@ -861,52 +900,57 @@ def _main(
     )
     category_totals = compute_category_totals(totals, now_ns)
 
-    for r in successful:
-        lb = line_builder_cls("stock_holdings")
-        lb.tag("symbol", r.symbol)
-        lb.tag("portfolio", r.portfolio)
-        lb.tag("asset_type", r.asset_type)
-        if r.category:
-            lb.tag("category", r.category)
-        lb.float64_field("price", r.price)
-        lb.float64_field("quantity", r.quantity)
-        lb.float64_field("value", r.value)
-        lb.string_field("currency", r.currency)
-        if r.previous_close is not None:
-            lb.float64_field("previous_close", r.previous_close)
-        if r.day_open is not None:
-            lb.float64_field("day_open", r.day_open)
-        if r.day_high is not None:
-            lb.float64_field("day_high", r.day_high)
-        if r.day_low is not None:
-            lb.float64_field("day_low", r.day_low)
-        lb.time_ns(r.timestamp_ns)
-        local.write_to_db(config.database, lb)
-
-    for t in totals:
-        lb = line_builder_cls("portfolio_totals")
-        lb.tag("portfolio", t.portfolio)
-        if t.category:
-            lb.tag("category", t.category)
-        lb.float64_field("value", t.value)
-        lb.int64_field("symbol_count", t.symbol_count)
-        lb.int64_field("missing_symbols", t.missing_symbols)
-        lb.int64_field("skipped_symbols", t.skipped_symbols)
-        lb.int64_field("carried_symbols", t.carried_symbols)
-        lb.time_ns(t.timestamp_ns)
-        local.write_to_db(config.database, lb)
-
-    for c in category_totals:
-        lb = line_builder_cls("category_totals")
-        lb.tag("category", c.category)
-        lb.float64_field("value", c.value)
-        lb.int64_field("symbol_count", c.symbol_count)
-        lb.int64_field("portfolio_count", c.portfolio_count)
-        lb.int64_field("missing_symbols", c.missing_symbols)
-        lb.int64_field("skipped_symbols", c.skipped_symbols)
-        lb.int64_field("carried_symbols", c.carried_symbols)
-        lb.time_ns(c.timestamp_ns)
-        local.write_to_db(config.database, lb)
+    # Field types are inferred from the row values: prices are floats, counts ints.
+    # A None tag or field is omitted, as is an empty category.
+    lines: list = []
+    try:
+        lines += [
+            build_line(
+                line_builder_cls,
+                "stock_holdings",
+                tags={"symbol": r.symbol, "portfolio": r.portfolio,
+                      "asset_type": r.asset_type, "category": r.category or None},
+                fields={"price": r.price, "quantity": r.quantity, "value": r.value,
+                        "currency": r.currency, "previous_close": r.previous_close,
+                        "day_open": r.day_open, "day_high": r.day_high,
+                        "day_low": r.day_low},
+                time_ns=r.timestamp_ns,
+            )
+            for r in successful
+        ]
+        lines += [
+            build_line(
+                line_builder_cls,
+                "portfolio_totals",
+                tags={"portfolio": t.portfolio, "category": t.category or None},
+                fields={"value": t.value, "symbol_count": t.symbol_count,
+                        "missing_symbols": t.missing_symbols,
+                        "skipped_symbols": t.skipped_symbols,
+                        "carried_symbols": t.carried_symbols},
+                time_ns=t.timestamp_ns,
+            )
+            for t in totals
+        ]
+        lines += [
+            build_line(
+                line_builder_cls,
+                "category_totals",
+                tags={"category": c.category},
+                fields={"value": c.value, "symbol_count": c.symbol_count,
+                        "portfolio_count": c.portfolio_count,
+                        "missing_symbols": c.missing_symbols,
+                        "skipped_symbols": c.skipped_symbols,
+                        "carried_symbols": c.carried_symbols},
+                time_ns=c.timestamp_ns,
+            )
+            for c in category_totals
+        ]
+        write_data(local, lines, batch=True, retries=0, database=config.database)
+    except Exception as e:
+        local.error(
+            f"[{task_id}] stock_plugin: failed to write to {config.database}: {e}"
+        )
+        return
 
     skipped_total = sum(skipped_by_portfolio.values())
     parts = [f"fetched {len(successful)}/{total_symbols} symbols"]
@@ -955,20 +999,14 @@ def process_scheduled_call(influxdb3_local, call_time, args):
     is unambiguous regardless of host timezone; the few-seconds offset
     from the scheduled tick boundary is negligible for a 15-minute
     polling cadence.
-
-    The InfluxDB runtime executes plugins via exec(), so __file__ is not
-    defined. INFLUXDB3_PLUGIN_DIR is the env var the server itself uses
-    to locate the plugin directory.
     """
-    plugin_dir = Path(os.environ.get("INFLUXDB3_PLUGIN_DIR", "."))
-    now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+    now_ns = parse_timestamp_ns(datetime.now(timezone.utc), "datetime")
     task_id = uuid.uuid4().hex[:8]
     _main(
         local=influxdb3_local,
         args=args or {},
         fetcher=fetch_quote,
         line_builder_cls=LineBuilder,  # runtime-injected global
-        plugin_dir=plugin_dir,
         now_ns=now_ns,
         task_id=task_id,
     )

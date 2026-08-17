@@ -14,8 +14,9 @@ measurement = "your_measurement"  # e.g., "cpu", "temperature", "home"
 # Format: [[field, value, count_or_duration], ...]
 #   - field: field name (string)
 #   - value: threshold value (number or boolean)
-#   - count_or_duration: integer (count-based) or duration string (e.g., "10s") for duration-based triggering
-# Supported units for duration: s (seconds), min (minutes), h (hours), d (days), w (weeks)
+#   - count_or_duration: integer >= 1 (count-based) or duration string (e.g., "10s") for duration-based triggering
+# Supported units for duration: us (microseconds), ms (milliseconds), s (seconds),
+# min (minutes), h (hours), d (days), w (weeks)
 field_thresholds = [["field1", 0.0, "your_count_or_duration"]]  # e.g., [["temp", 30, 1], ["temp", 15, "10s"]]
 
 # Notification channels
@@ -29,10 +30,10 @@ senders = ["your_channel"]  # e.g., ["slack"], ["sms", "http"]
 
 # Stability check parameters
 # Number of recent values to assess stability
-# Specify an integer ≥ 1; default is 1
+# The check applies only when this is 2 or greater; default is 1
 #state_change_window = 1  # e.g., 5
 
-# Maximum allowed changes in that window
+# Number of changes in that window at which notifications start being suppressed
 # Specify an integer ≥ 1; default is 1
 #state_change_count = 1  # e.g., 2
 

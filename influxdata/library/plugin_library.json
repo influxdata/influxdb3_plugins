@@ -149,8 +149,8 @@
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/system_metrics/README.md",
                 "required_plugins": [],
-                "required_libraries": ["psutil"],
-                "last_update": "2025-07-23",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0", "psutil"],
+                "last_update": "2026-08-06",
                 "trigger_types_supported": ["scheduler"]
             },
             {

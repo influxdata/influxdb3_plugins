@@ -17,31 +17,37 @@
         {
             "name": "detectors",
             "example": "QuantileAD.LevelShiftAD",
-            "description": "Dot-separated list of ADTK detectors. Supported: GeneralizedESDTestAD, InterQuartileRangeAD, ThresholdAD, QuantileAD, LevelShiftAD, VolatilityShiftAD, PersistAD, SeasonalAD.",
+            "description": "Dot-separated list of ADTK detectors (a TOML config may use a list instead). Supported: GeneralizedESDTestAD, InterQuartileRangeAD, ThresholdAD, QuantileAD, LevelShiftAD, VolatilityShiftAD, PersistAD, SeasonalAD.",
             "required": true
         },
         {
             "name": "detector_params",
             "example": "eyJRdWFudGlsZUFKIjogeyJsb3dfcXVhbnRpbGUiOiA...",
-            "description": "Base64-encoded JSON string specifying parameters for each detector.",
+            "description": "Base64-encoded JSON string specifying parameters for each detector (a TOML config may use a [detector_params] table instead).",
             "required": true
         },
         {
             "name": "min_consensus",
             "example": "2",
-            "description": "Minimum number of detectors that must agree to flag a point as anomalous. Default: 1.",
+            "description": "Minimum number of detectors that must agree to flag a point as anomalous. Must be 1 or greater. Default: 1.",
+            "required": false
+        },
+        {
+            "name": "group_by_tags",
+            "example": "true",
+            "description": "Analyze every tag combination as its own time series. When disabled (default), all rows of the window form a single series and rows sharing a timestamp are collapsed to the first one. Default: false.",
             "required": false
         },
         {
             "name": "window",
             "example": "1h",
-            "description": "Time window for data analysis (e.g., `1h` for 1 hour). Units: `s`, `min`, `h`, `d`, `w`.",
+            "description": "Time window for data analysis (e.g., `1h` for 1 hour). Must be a positive duration. Units: `us`, `ms`, `s`, `min`, `h`, `d`, `w`.",
             "required": true
         },
         {
             "name": "senders",
             "example": "slack.discord",
-            "description": "Dot-separated list of notification channels. Supported channels: slack, discord, http, sms, whatsapp.",
+            "description": "Dot-separated list of notification channels (a TOML config may use a list instead). Supported channels: slack, discord, http, sms, whatsapp.",
             "required": true
         },
         {
@@ -52,14 +58,20 @@
         },
         {
             "name": "min_condition_duration",
-            "example": "5m",
-            "description": "Minimum duration for an anomaly condition to persist before triggering a notification (e.g., `5m`). Units: `s`, `min`, `h`, `d`, `w`. Default: `0s`.",
+            "example": "5min",
+            "description": "Minimum duration for an anomaly condition to persist before triggering a notification (e.g., `5min`). Units: `us`, `ms`, `s`, `min`, `h`, `d`, `w`. Default: `0s`.",
+            "required": false
+        },
+        {
+            "name": "max_notifications_per_run",
+            "example": "20",
+            "description": "Maximum number of notifications sent by a single run. Anomalies beyond the limit are counted in a warning and not resent later. Default: 20.",
             "required": false
         },
         {
             "name": "notification_text",
             "example": "Anomaly detected in $table.$field with value $value by $detectors. Tags: $tags",
-            "description": "Template for notification message with variables `$table`, `$field`, `$value`, `$detectors`, `$tags`.",
+            "description": "Template for notification message with variables `$table`, `$field`, `$value`, `$detectors`, `$tags`, `$timestamp`.",
             "required": false
         },
         {
@@ -149,11 +161,9 @@ import json
 import os
 import random
 import time
-import tomllib
 import uuid
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta
 from string import Template
 from urllib.parse import urlparse
 
@@ -169,6 +179,18 @@ from adtk.detector import (
     SeasonalAD,
     ThresholdAD,
     VolatilityShiftAD,
+)
+from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.introspection import (
+    get_table_names,
+    get_tag_names,
+    query_window,
+)
+from influxdata_plugin_utils.parsing import (
+    parse_bool,
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
 )
 
 # Supported sender types with their required arguments
@@ -200,51 +222,105 @@ AVAILABLE_DETECTORS = {
     "SeasonalAD": SeasonalAD,
 }
 
+# Detectors that cannot be constructed without these parameters
+REQUIRED_DETECTOR_PARAMS = {
+    "LevelShiftAD": ["window"],
+    "VolatilityShiftAD": ["window"],
+}
 
-def get_all_measurements(influxdb3_local) -> list[str]:
+# Detectors that classify points on their own and must not be fitted
+UNFITTED_DETECTORS = ("ThresholdAD",)
+
+_DEFAULT_NOTIFICATION_TEXT = (
+    "Anomaly detected in $table.$field with value $value by $detectors. Tags: $tags"
+)
+
+
+def parse_window(raw) -> timedelta:
+    """Parse the analysis window, rejecting non-positive durations."""
+    window: timedelta = parse_timedelta(raw)
+    if window <= timedelta(0):
+        raise ValueError(f"Invalid window: {raw!r} (must be a positive duration)")
+    return window
+
+
+_VALIDATORS = [
+    Validator("measurement", required=True, cast=str),
+    Validator("field", required=True, cast=str),
+    Validator(
+        "detectors",
+        required=True,
+        cast=lambda raw: parse_delimited_list(raw, sep="."),
+    ),
+    Validator("detector_params", required=True),
+    Validator("senders", required=True),
+    Validator("window", required=True, cast=parse_window),
+    Validator("min_consensus", default=1, cast=lambda raw: parse_int(raw, minimum=1)),
+    Validator("group_by_tags", default=False, cast=parse_bool),
+    Validator("min_condition_duration", default="0s", cast=parse_timedelta),
+    Validator(
+        "max_notifications_per_run",
+        default=20,
+        cast=lambda raw: parse_int(raw, minimum=1),
+    ),
+    Validator("notification_text", default=_DEFAULT_NOTIFICATION_TEXT, cast=str),
+    Validator("notification_path", default="notify", cast=str),
+    Validator(
+        "port_override",
+        default=8181,
+        cast=lambda raw: parse_int(raw, minimum=1, maximum=65535),
+    ),
+]
+
+
+def _load_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
     """
-    Retrieves a list of all tables of type 'BASE TABLE' from the current InfluxDB database.
+    Load the plugin configuration, applying defaults and type casts.
+
+    A TOML file referenced by 'config_file_path' replaces the inline arguments;
+    INFLUXDB3_AUTH_TOKEN from the environment is used when the token is not
+    configured explicitly.
 
     Args:
         influxdb3_local: InfluxDB client instance.
+        args (dict): Runtime arguments of the trigger.
+        task_id (str): Unique task identifier.
 
     Returns:
-        list[str]: List of table names (e.g., ["cpu", "memory", "disk"]).
+        dict | None: Config values keyed by lower-case name, or None if loading failed.
     """
-    result: list = influxdb3_local.query("SHOW TABLES")
-    return [
-        row["table_name"] for row in result if row.get("table_type") == "BASE TABLE"
-    ]
+    config_file_path = (args or {}).get("config_file_path")
+    if config_file_path and not str(config_file_path).endswith(".toml"):
+        influxdb3_local.error(
+            f"[{task_id}] Invalid config file format: expected a .toml file"
+        )
+        return None
+
+    try:
+        loaded = load_plugin_config(
+            args,
+            validators=_VALIDATORS,
+            env_keys=["INFLUXDB3_AUTH_TOKEN"],
+            source="toml" if config_file_path else "args",
+        )
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Failed to load configuration: {e}")
+        return None
+
+    return {key.lower(): value for key, value in loaded.as_dict().items()}
 
 
-def get_tag_names(influxdb3_local, measurement: str, task_id: str) -> list[str]:
-    """
-    Retrieves the list of tag names for a measurement.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        measurement (str): Name of the measurement to query.
-        task_id (str): The task ID.
-
-    Returns:
-        list[str]: List of tag names with 'Dictionary(Int32, Utf8)' data type.
-    """
-    query: str = """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = $measurement
-        AND data_type = 'Dictionary(Int32, Utf8)'
-    """
-    res: list[dict] = influxdb3_local.query(query, {"measurement": measurement})
-
-    if not res:
+def get_measurement_tags(influxdb3_local, measurement: str, task_id: str) -> list[str]:
+    """Return the cached tag names of a measurement, logging when it has none."""
+    tags: list[str] = get_tag_names(influxdb3_local, measurement)
+    if not tags:
+        # an empty list stays cached for an hour and would hide tags added later
+        tags = get_tag_names(influxdb3_local, measurement, use_cache=False)
+    if not tags:
         influxdb3_local.info(
             f"[{task_id}] No tags found for measurement '{measurement}'."
         )
-        return []
-
-    tag_names: list[str] = [tag["column_name"] for tag in res]
-    return tag_names
+    return tags
 
 
 def generate_cache_key(
@@ -269,15 +345,14 @@ def generate_cache_key(
     return base
 
 
-def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
+def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
     """
-    Parse and validate sender configurations from input arguments.
+    Parse and validate sender configurations from the loaded config.
 
     Args:
         influxdb3_local: InfluxDB client instance.
-        args (dict): Input arguments containing:
-            - "senders": dot-separated list of sender types (e.g., "slack.http").
-            - For each sender, its own required keys (see AVAILABLE_SENDERS).
+        config (dict): Loaded config containing "senders" and the sender-specific
+            keys listed in AVAILABLE_SENDERS.
         task_id (str): Unique task identifier used for logging context.
 
     Returns:
@@ -295,45 +370,37 @@ def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
         Exception: If no valid senders are found after parsing.
     """
     senders_config: defaultdict = defaultdict(dict)
-
-    senders: str | list = args.get("senders")
-    if args["use_config_file"]:
-        if not isinstance(senders, list):
-            raise Exception(
-                f"[{task_id}] 'senders' must be a list when using config file"
-            )
-    else:
-        senders = senders.split(".")
+    senders: list = parse_delimited_list(config["senders"], sep=".")
 
     for sender in senders:
         if sender not in AVAILABLE_SENDERS:
             influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
             continue
         for key in AVAILABLE_SENDERS[sender]:
-            if key not in args and not any(ex in key for ex in EXCLUDED_KEYWORDS):
+            if key not in config and not any(ex in key for ex in EXCLUDED_KEYWORDS):
                 influxdb3_local.warn(
                     f"[{task_id}] Required key '{key}' missing for sender '{sender}'"
                 )
                 senders_config.pop(sender, None)
                 break
             if "url" in key and not validate_webhook_url(
-                influxdb3_local, sender, args[key], task_id
+                influxdb3_local, sender, config[key], task_id
             ):
                 senders_config.pop(sender, None)
                 break
 
-            if key not in args:
+            if key not in config:
                 continue
-            senders_config[sender][key] = args[key]
+            senders_config[sender][key] = config[key]
 
     if not senders_config:
-        raise Exception(f"[{task_id}] No valid senders configured")
+        raise Exception("No valid senders configured")
     return senders_config
 
 
 def send_notification(
     influxdb3_local, port: int, path: str, token: str, payload: dict, task_id: str
-) -> None:
+) -> bool:
     """
     Send a JSON POST to the given InfluxDB 3 webhook endpoint, with up to
     3 retry attempts and randomized backoff delays between attempts.
@@ -346,8 +413,8 @@ def send_notification(
         payload (dict): Dict to serialize as JSON in the POST body.
         task_id (str): Unique task identifier.
 
-    Raises:
-        requests.RequestException: If all retries fail or a non-2xx response is received.
+    Returns:
+        bool: True when the alert was accepted, False when every attempt failed.
     """
     url: str = f"http://localhost:{port}/api/v3/engine/{path}"
     headers: dict = {
@@ -366,7 +433,7 @@ def send_notification(
             influxdb3_local.info(
                 f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
-            break
+            return True
         except requests.RequestException as e:
             influxdb3_local.warn(
                 f"[{task_id}] [Attempt {attempt}/{max_retries}] Error sending alert to notification plugin: {e}"
@@ -382,35 +449,7 @@ def send_notification(
                     f"[{task_id}] Failed to send alert to notification plugin after {max_retries} attempts: {e}"
                 )
 
-
-def parse_port_override(args: dict, task_id: str) -> int:
-    """
-    Parse and validate the 'port_override' argument, converting it from string to int.
-
-    Args:
-        args (dict): Runtime arguments containing 'port_override'.
-        task_id (str): Unique task identifier for logging context.
-
-    Returns:
-        int: Parsed port number (1–65535), or 8181 if not provided.
-
-    Raises:
-        Exception: If 'port_override' is provided but is not a valid integer in the range 1–65535.
-    """
-    raw: str | int = args.get("port_override", 8181)
-
-    try:
-        port = int(raw)
-    except (TypeError, ValueError):
-        raise Exception(f"[{task_id}] Invalid port_override, not an integer: {raw!r}")
-
-    # Validate port range
-    if not (1 <= port <= 65535):
-        raise Exception(
-            f"[{task_id}] Invalid port_override, must be between 1 and 65535: {port}"
-        )
-
-    return port
+    return False
 
 
 def validate_webhook_url(influxdb3_local, service: str, url: str, task_id: str) -> bool:
@@ -455,130 +494,137 @@ def interpolate_notification_text(text: str, row_data: dict) -> str:
     return Template(text).safe_substitute(row_data)
 
 
-def parse_time_duration(raw: str, task_id: str) -> timedelta:
+def decode_detector_params(raw: str | dict) -> dict:
     """
-    Parse a time duration string into a timedelta.
-
-    Args:
-        raw (str): Duration string (e.g., "5m", "1h").
-        task_id (str): Unique task identifier for logging.
-
-    Returns:
-        timedelta: Parsed duration.
-
-    Raises:
-        Exception: If the duration format is invalid.
-    """
-    valid_units: dict = {
-        "s": "seconds",
-        "min": "minutes",
-        "h": "hours",
-        "d": "days",
-        "w": "weeks",
-    }
-    num_part, unit_part = "", ""
-    for unit in sorted(valid_units.keys(), key=len, reverse=True):
-        if raw.endswith(unit):
-            num_part = raw[: -len(unit)]
-            unit_part = unit
-            break
-    if not num_part or unit_part not in valid_units:
-        raise Exception(f"[{task_id}] Invalid duration format: {raw}")
-    try:
-        num = int(num_part)
-    except ValueError:
-        raise Exception(f"[{task_id}] Invalid number in duration: {raw}")
-    return timedelta(**{valid_units[unit_part]: num})
-
-
-def parse_detector_params(
-    influxdb3_local, args: dict, detectors: list, task_id: str
-) -> dict:
-    """
-    Parse and validate detector parameters from args, expecting detector_params as a base64-encoded JSON string or use values from config file.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        args (dict): Must include "detector_params" as a base64-encoded JSON string.
-        detectors (list): List of detector names.
-        task_id (str): Unique task identifier.
+    Decode 'detector_params' from a mapping or a base64-encoded JSON string.
 
     Returns:
         dict: Mapping of detector names to their parameter dictionaries.
 
     Raises:
-        Exception: If detector_params is not valid base64, contains invalid JSON, or is missing required parameters.
+        Exception: If the value is not valid base64 or not a JSON object.
     """
-    input_params: str | dict = args["detector_params"]
+    if isinstance(raw, dict):
+        return raw
 
-    if args["use_config_file"]:
-        if isinstance(input_params, dict):
-            params: dict = input_params
-        else:
-            raise Exception(
-                f"[{task_id}] detector_params must be a dict when using config file"
-            )
-    else:
-        try:
-            # Decode base64-encoded string
-            decoded_bytes: bytes = base64.b64decode(input_params)
-            decoded_str: str = decoded_bytes.decode("utf-8")
-        except Exception:
-            raise Exception(
-                f"[{task_id}] Invalid base64 encoding in detector_params: {input_params}"
-            )
+    try:
+        decoded: str = base64.b64decode(raw).decode("utf-8")
+    except Exception:
+        raise Exception("Invalid base64 encoding in detector_params")
 
-        try:
-            # Parse JSON from decoded string
-            params: dict = json.loads(decoded_str)
-        except json.JSONDecodeError:
-            raise Exception(
-                f"[{task_id}] Invalid JSON in decoded detector_params: {decoded_str}"
-            )
+    try:
+        params = json.loads(decoded)
+    except json.JSONDecodeError:
+        raise Exception(f"Invalid JSON in decoded detector_params: {decoded}")
 
-    valid_params: dict = {}
-    for detector in detectors[:]:
+    if not isinstance(params, dict):
+        raise Exception("detector_params must decode to a JSON object")
+    return params
+
+
+def parse_detectors(influxdb3_local, config: dict, task_id: str) -> tuple[list, dict]:
+    """
+    Resolve the detectors to apply together with their parameters.
+
+    Returns:
+        tuple[list, dict]: Applicable detector names and their parameters.
+
+    Raises:
+        Exception: If no detector is applicable.
+    """
+    params: dict = decode_detector_params(config["detector_params"])
+
+    detectors: list = []
+    detector_params: dict = {}
+    for detector in config["detectors"]:
+        if detector not in AVAILABLE_DETECTORS:
+            influxdb3_local.warn(f"[{task_id}] Unknown detector: {detector}")
+            continue
         if detector not in params:
             influxdb3_local.warn(
                 f"[{task_id}] Missing parameters for detector: {detector}"
             )
             continue
-        valid_params[detector] = params[detector]
+        if not isinstance(params[detector], dict):
+            influxdb3_local.warn(
+                f"[{task_id}] Parameters for detector {detector} must be a mapping"
+            )
+            continue
 
-        # Validate required parameters
-        if detector == "LevelShiftAD":
-            if "window" not in valid_params[detector]:
-                influxdb3_local.warn(
-                    f"[{task_id}] LevelShiftAD requires 'window' parameter"
-                )
-                del valid_params[detector]
-                detectors.remove(detector)
-                continue
-        elif detector == "VolatilityShiftAD":
-            if "window" not in valid_params[detector]:
-                influxdb3_local.warn(
-                    f"[{task_id}] VolatilityShiftAD requires 'window' parameter"
-                )
-                del valid_params[detector]
-                detectors.remove(detector)
-                continue
+        missing: list = [
+            name
+            for name in REQUIRED_DETECTOR_PARAMS.get(detector, [])
+            if name not in params[detector]
+        ]
+        if missing:
+            influxdb3_local.warn(
+                f"[{task_id}] {detector} requires the '{', '.join(missing)}' parameter"
+            )
+            continue
 
-    if not valid_params:
-        raise Exception(
-            f"[{task_id}] No valid detector parameters found in detector_params: {params}"
-        )
+        detectors.append(detector)
+        detector_params[detector] = params[detector]
 
-    return valid_params
+    if not detectors:
+        raise Exception(f"No applicable detectors in {config['detectors']}")
+
+    return detectors, detector_params
 
 
-def parse_min_consensus(min_consensus: str | int, task_id: str) -> int:
-    """Validate and convert min_consensus to an integer."""
-    try:
-        return int(min_consensus)
-    except (TypeError, ValueError):
-        raise Exception(
-            f"[{task_id}] Invalid min_consensus, not an integer: {min_consensus!r}"
-        )
+def format_tags(row: pd.Series, tags: list) -> str:
+    """Render the tag values of a row as 'tag=value' pairs."""
+    return ", ".join(f"{tag}={row.get(tag, 'None')}" for tag in tags)
+
+
+def split_by_tags(df: pd.DataFrame, tags: list, group_by_tags: bool) -> list:
+    """
+    Split query results into one frame per tag combination.
+    """
+    if not group_by_tags or not tags:
+        return [df]
+    return [group for _, group in df.groupby(tags, dropna=False, sort=False)]
+
+
+def detect_anomalies(
+    influxdb3_local,
+    series: pd.Series,
+    detectors: list,
+    detector_params: dict,
+    min_consensus: int,
+    task_id: str,
+) -> pd.Series | None:
+    """
+    Apply every detector to the series and combine their verdicts by consensus.
+
+    Returns:
+        pd.Series | None: True for every point flagged by at least 'min_consensus'
+            detectors, or None if no detector could be applied.
+    """
+    anomaly_results: list = []
+    for detector_name in detectors:
+        try:
+            params: dict = detector_params[detector_name]
+            influxdb3_local.info(
+                f"[{task_id}] Applying detector {detector_name} with params {params}"
+            )
+            detector = AVAILABLE_DETECTORS[detector_name](**params)
+            if detector_name not in UNFITTED_DETECTORS:
+                detector.fit(series)
+            anomalies: pd.Series = detector.detect(series)
+            anomaly_results.append(anomalies)
+            influxdb3_local.info(
+                f"[{task_id}] Detector {detector_name} found {anomalies.sum()} anomalies"
+            )
+        except Exception as e:
+            influxdb3_local.warn(
+                f"[{task_id}] Failed to apply detector {detector_name}: {e}"
+            )
+
+    if not anomaly_results:
+        return None
+
+    anomaly_df = pd.concat(anomaly_results, axis=1).fillna(False)
+    return (anomaly_df.sum(axis=1) >= min_consensus).astype(bool)
 
 
 def process_scheduled_call(
@@ -589,23 +635,24 @@ def process_scheduled_call(
 
     Queries a specified measurement and field within a time window, applies one or more
     ADTK detectors, and sends notifications for anomalies. Supports consensus-based detection
-    (all detectors must agree) and optional debounce logic.
+    (a configurable number of detectors must agree) and optional debounce logic.
 
     Args:
         influxdb3_local: InfluxDB client for querying, caching, and logging.
         call_time (datetime): UTC timestamp at which the scheduler triggers this function.
         args (dict):
             Required:
-                - table (str): Measurement name to query.
+                - measurement (str): Measurement name to query.
                 - field (str): Numeric field to evaluate.
                 - detectors (str): Dot-separated list of ADTK detectors.
-                - detector_params (str): JSON string of detector parameters.
-                - min_consensus (int): Minimum number of detectors required to flag anomaly.
+                - detector_params (str): Base64-encoded JSON of detector parameters.
                 - window (str): Time window for data query (e.g., "1h").
                 - senders (str): Dot-separated notification channels.
             Optional:
                 - config_file_path (str): path to config file to override args.
-                - min_condition_duration (str): Minimum anomaly duration (e.g., "5m").
+                - min_consensus (int): Detectors required to flag an anomaly (default: 1).
+                - min_condition_duration (str): Minimum anomaly duration (e.g., "5min").
+                - max_notifications_per_run (int): Notification cap per run (default: 20).
                 - notification_text (str): Message template.
                 - notification_path (str): Path for notification plugin (default: "notify").
                 - port_override (int): HTTP port (default: 8181).
@@ -615,135 +662,79 @@ def process_scheduled_call(
         All exceptions are caught and logged via influxdb3_local.error.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting anomaly detection scheduled call at {call_time} with args: {args}")
+    influxdb3_local.info(
+        f"[{task_id}] Starting anomaly detection scheduled call at {call_time}"
+    )
 
-    # Override args with config file if specified
-    if args:
-        if path := args.get("config_file_path", None):
-            if not path.endswith(".toml"):
-                influxdb3_local.error(
-                    f"[{task_id}] Invalid config file format: expected a .toml file"
-                )
-                return
-            try:
-                plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if plugin_dir_var:
-                    file_path = Path(plugin_dir_var) / path
-                else:
-                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-                    candidates: list[str] = []
-                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                        candidates.append(influxdb3_plugin_dir)
-                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                        candidates.append(str(Path(virtual_env).parent))
-
-                    resolved = None
-                    for base in candidates:
-                        candidate = Path(base) / path
-                        if candidate.exists():
-                            resolved = candidate
-                            break
-
-                    if resolved is None:
-                        candidates_str = ", ".join(candidates) if candidates else "none available"
-                        influxdb3_local.error(
-                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
-                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
-                        )
-                        return
-                    file_path = resolved
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
-                with open(file_path, "rb") as f:
-                    args = tomllib.load(f)
-                    args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
-            except Exception:
-                influxdb3_local.error(f"[{task_id}] Failed to read config file")
-                return
-        else:
-            args["use_config_file"] = False
-
-    if (
-        not args
-        or "measurement" not in args
-        or "field" not in args
-        or "detectors" not in args
-        or "detector_params" not in args
-        or "window" not in args
-        or "senders" not in args
-    ):
-        influxdb3_local.error(
-            f"[{task_id}] Missing required arguments: measurement, field, detectors, detector_params, window, or senders"
-        )
+    config: dict | None = _load_config(influxdb3_local, args, task_id)
+    if config is None:
         return
 
     try:
-        # Parse configuration
-        influxdb3_local.info(f"[{task_id}] Starting configuration parsing")
-        measurement: str = args["measurement"]
-        # Validate measurement
-        all_measurements: list = get_all_measurements(influxdb3_local)
-        if measurement not in all_measurements:
+        measurement: str = config["measurement"]
+        if measurement not in get_table_names(influxdb3_local):
             influxdb3_local.error(f"[{task_id}] Measurement '{measurement}' not found")
             return
-        influxdb3_local.info(f"[{task_id}] Validated measurement: {measurement}")
 
-        field: str = args["field"]
-        detectors: list = (
-            args["detectors"].split(".")
-            if not args.get("use_config_file")
-            else args["detectors"]
+        field: str = config["field"]
+        detectors, detector_params = parse_detectors(influxdb3_local, config, task_id)
+        influxdb3_local.info(
+            f"[{task_id}] Retrieved detector_params: {detector_params}"
         )
-        detector_params: dict = parse_detector_params(
-            influxdb3_local, args, detectors, task_id
-        )
-        influxdb3_local.info(f"[{task_id}] Retrieved detector_params: {detector_params}")
 
-        min_consensus: int = parse_min_consensus(args.get("min_consensus", 1), task_id)
-        window: timedelta = parse_time_duration(args["window"], task_id)
-        senders_config: dict = parse_senders(influxdb3_local, args, task_id)
-        port_override: int = parse_port_override(args, task_id)
-        min_condition_duration: timedelta = parse_time_duration(
-            args.get("min_condition_duration", "0s"), task_id
-        )
-        notification_path: str = args.get("notification_path", "notify")
-        notification_text: str = args.get(
-            "notification_text",
-            "Anomaly detected in $table.$field with value $value by $detectors. Tags: $tags",
-        )
-        influxdb3_auth_token: str = args.get("influxdb3_auth_token") or os.getenv(
-            "INFLUXDB3_AUTH_TOKEN"
+        min_consensus: int = config["min_consensus"]
+        if min_consensus > len(detectors):
+            influxdb3_local.warn(
+                f"[{task_id}] min_consensus={min_consensus} exceeds the {len(detectors)} applicable detectors, no point can reach consensus"
+            )
+
+        group_by_tags: bool = config["group_by_tags"]
+        max_notifications_per_run: int = config["max_notifications_per_run"]
+        window: timedelta = config["window"]
+        senders_config: dict = parse_senders(influxdb3_local, config, task_id)
+        port_override: int = config["port_override"]
+        min_condition_duration: timedelta = config["min_condition_duration"]
+        if min_condition_duration >= window:
+            influxdb3_local.warn(
+                f"[{task_id}] min_condition_duration={min_condition_duration} is not shorter than window={window}, an anomaly can never persist long enough to alert"
+            )
+        notification_path: str = config["notification_path"]
+        notification_text: str = config["notification_text"]
+        influxdb3_auth_token: str = (
+            config.get("influxdb3_auth_token")
+            or os.getenv("INFLUXDB3_AUTH_TOKEN")
+            or ""
         )
         if not influxdb3_auth_token:
             influxdb3_local.error(f"[{task_id}] Missing influxdb3_auth_token")
             return
 
-        influxdb3_local.info(f"[{task_id}] Configuration completed: field={field}, detectors={len(detectors)}, min_consensus={min_consensus}, window={window}")
+        influxdb3_local.info(
+            f"[{task_id}] Configuration completed: field={field}, detectors={len(detectors)}, min_consensus={min_consensus}, window={window}"
+        )
 
         # Query data
-        tags: list = get_tag_names(influxdb3_local, measurement, task_id)
-        tags_clause: str = ", ".join([f'"{tag}"' for tag in tags])
+        tags: list = get_measurement_tags(influxdb3_local, measurement, task_id)
         end_time: datetime = call_time
         start_time: datetime = end_time - window
-        influxdb3_local.info(f"[{task_id}] Querying {measurement}.{field} from {start_time} to {end_time}")
-        query: str = f"""
-                SELECT "{field}", "time", {tags_clause}
-                FROM "{measurement}"
-                WHERE time >= $start_time AND time < $end_time
-                ORDER BY time
-            """
-        result: list = influxdb3_local.query(
-            query,
-            {"start_time": start_time.isoformat(), "end_time": end_time.isoformat()},
+        influxdb3_local.info(
+            f"[{task_id}] Querying {measurement}.{field} from {start_time} to {end_time}"
+        )
+        result: list = query_window(
+            influxdb3_local,
+            measurement,
+            start=start_time.isoformat(),
+            end=end_time.isoformat(),
+            columns=[field, "time", *tags],
         )
         if not result:
             influxdb3_local.info(
                 f"[{task_id}] No data found for {measurement}.{field} from {start_time} to {end_time}"
             )
             return
-        influxdb3_local.info(f"[{task_id}] Retrieved {len(result)} records from {measurement}")
+        influxdb3_local.info(
+            f"[{task_id}] Retrieved {len(result)} records from {measurement}"
+        )
 
         # Convert to pandas Series
         df: pd.DataFrame = pd.DataFrame(result)
@@ -752,72 +743,114 @@ def process_scheduled_call(
                 f"[{task_id}] Field '{field}' or 'time' not found in query results"
             )
             return
-        series: pd.Series = pd.Series(
-            df[field].values, index=pd.to_datetime(df["time"], unit="ns")
-        )
-        series = validate_series(series)  # Ensure regular sampling and time order
-        influxdb3_local.info(f"[{task_id}] Prepared time series data with {len(series)} points")
+        groups: list = split_by_tags(df, tags, group_by_tags)
 
         # Apply detectors
-        influxdb3_local.info(f"[{task_id}] Starting anomaly detection with {len(detectors)} detectors")
-        anomaly_results: list = []
-        for detector_name in detectors:
-            try:
-                params: dict = detector_params[detector_name]
-                influxdb3_local.info(
-                    f"[{task_id}] Applying detector {detector_name} with params {params}"
-                )
-                detector_class = AVAILABLE_DETECTORS[detector_name]
-                detector = detector_class(**params)
-                if detector_name not in ("ThresholdAD",):
-                    detector.fit(series)
-                anomalies: pd.Series = detector.detect(series)
-                anomaly_results.append(anomalies)
-                anomaly_count = anomalies.sum()
-                influxdb3_local.info(f"[{task_id}] Detector {detector_name} found {anomaly_count} anomalies")
-            except Exception as e:
-                influxdb3_local.warn(
-                    f"[{task_id}] Failed to apply detector {detector_name}: {e}"
-                )
-
-        if not anomaly_results:
-            influxdb3_local.error(
-                f"[{task_id}] No valid detectors applied to {measurement}.{field}"
-            )
-            return
-
-        # Consensus: point is anomaly if >= min_consensus detectors agree
-        anomaly_df = pd.concat(anomaly_results, axis=1).fillna(False)
-        anomaly_count = anomaly_df.sum(axis=1)
-        consensus_anomalies = anomaly_count >= min_consensus
-        consensus_anomalies = consensus_anomalies.astype(bool)
-        total_consensus_anomalies = consensus_anomalies.sum()
-        influxdb3_local.info(f"[{task_id}] Consensus analysis: {total_consensus_anomalies} anomalies detected with min_consensus={min_consensus}")
-
+        influxdb3_local.info(
+            f"[{task_id}] Starting anomaly detection with {len(detectors)} detectors on {len(groups)} series"
+        )
         # Process anomalies with debounce logic
-        influxdb3_local.info(f"[{task_id}] Processing anomalies with debounce logic (min_condition_duration={min_condition_duration})")
+        influxdb3_local.info(
+            f"[{task_id}] Processing anomalies with debounce logic (min_condition_duration={min_condition_duration})"
+        )
         processed_anomalies = 0
         sent_notifications = 0
-        for idx, is_anomaly in consensus_anomalies.items():
-            row: pd.Series = df[df["time"] == pd.Timestamp(idx.isoformat()).value].iloc[
-                0
-            ]
-            time_datetime: datetime = pd.to_datetime(row["time"], unit="ns")
-            cache_key: str = generate_cache_key(measurement, field, tags, row)
-            tag_str: str = ", ".join(f"{t}={row.get(t, 'None')}" for t in tags)
-            start_time_str: str = influxdb3_local.cache.get(cache_key, default="")
+        failed_notifications = 0
+        suppressed_notifications = 0
+        for group in groups:
+            series_label: str = (
+                f" (tags: {format_tags(group.iloc[0], tags)})"
+                if group_by_tags and tags
+                else ""
+            )
+            # a time index keeps the per-point row lookup below out of a full scan
+            rows: pd.DataFrame = group.drop_duplicates(subset="time")
+            rows.index = pd.to_datetime(rows["time"], unit="ns")
 
-            if is_anomaly:
-                if not start_time_str:
-                    if min_condition_duration > timedelta(0):
-                        # Start of a new anomaly
-                        influxdb3_local.cache.put(cache_key, time_datetime.isoformat())
-                        influxdb3_local.info(
-                            f"[{task_id}] Anomaly started for {measurement}.{field} (tags: {tag_str}), waiting for duration {min_condition_duration}"
-                        )
-                        continue
+            series: pd.Series = rows[field].dropna()
+            missing_values: int = len(rows) - len(series)
+            if missing_values:
+                # detectors raise on NaN, which would drop the whole series
+                influxdb3_local.info(
+                    f"[{task_id}] Skipped {missing_values} points without a '{field}' value{series_label}"
+                )
+            if series.empty:
+                influxdb3_local.info(
+                    f"[{task_id}] No values to analyze for {measurement}.{field}{series_label}"
+                )
+                continue
 
-                    # Send notification
+            series = validate_series(series)  # Ensure regular sampling and time order
+            influxdb3_local.info(
+                f"[{task_id}] Prepared time series data with {len(series)} points{series_label}"
+            )
+
+            consensus_anomalies = detect_anomalies(
+                influxdb3_local,
+                series,
+                detectors,
+                detector_params,
+                min_consensus,
+                task_id,
+            )
+            if consensus_anomalies is None:
+                influxdb3_local.error(
+                    f"[{task_id}] No valid detectors applied to {measurement}.{field}{series_label}"
+                )
+                continue
+            influxdb3_local.info(
+                f"[{task_id}] Consensus analysis: {consensus_anomalies.sum()} anomalies detected with min_consensus={min_consensus}{series_label}"
+            )
+
+            for timestamp, is_anomaly in consensus_anomalies.items():
+                row: pd.Series = rows.loc[timestamp]
+                cache_key: str = generate_cache_key(measurement, field, tags, row)
+                alert_key: str = f"{cache_key}:last_alert"
+                tag_str: str = format_tags(row, tags)
+
+                last_alert_str: str = influxdb3_local.cache.get(alert_key, default="")
+                if last_alert_str and timestamp <= pd.Timestamp(last_alert_str):
+                    continue
+
+                processed_anomalies += 1
+                start_time_str: str = influxdb3_local.cache.get(cache_key, default="")
+                alert_reason: str | None = None
+
+                if is_anomaly:
+                    if not start_time_str:
+                        if min_condition_duration > timedelta(0):
+                            # Start of a new anomaly
+                            influxdb3_local.cache.put(cache_key, timestamp.isoformat())
+                            influxdb3_local.info(
+                                f"[{task_id}] Anomaly started for {measurement}.{field} (tags: {tag_str}), waiting for duration {min_condition_duration}"
+                            )
+                            continue
+                        alert_reason = f"Anomaly detected for {measurement}.{field} (tags: {tag_str}), sending alert"
+                    else:
+                        # Check duration
+                        elapsed: timedelta = timestamp - pd.Timestamp(start_time_str)
+                        if elapsed < min_condition_duration:
+                            influxdb3_local.info(
+                                f"[{task_id}] Anomaly ongoing for {elapsed} < {min_condition_duration} for {measurement}.{field} (tags: {tag_str})"
+                            )
+                            continue
+                        alert_reason = f"Anomaly persisted for {elapsed} for {measurement}.{field} (tags: {tag_str}), sending alert"
+                elif start_time_str:
+                    # Reset cache if anomaly stops
+                    influxdb3_local.cache.delete(cache_key)
+                    influxdb3_local.info(
+                        f"[{task_id}] Anomaly cleared for {measurement}.{field} (tags: {tag_str})"
+                    )
+
+                if alert_reason is None:
+                    continue
+
+                if (
+                    sent_notifications + failed_notifications
+                    >= max_notifications_per_run
+                ):
+                    suppressed_notifications += 1
+                else:
                     payload: dict = {
                         "notification_text": interpolate_notification_text(
                             notification_text,
@@ -827,14 +860,13 @@ def process_scheduled_call(
                                 "value": row[field],
                                 "detectors": ".".join(detectors),
                                 "tags": tag_str,
+                                "timestamp": timestamp.isoformat(),
                             },
                         ),
                         "senders_config": senders_config,
                     }
-                    influxdb3_local.error(
-                        f"[{task_id}] Anomaly detected for {measurement}.{field} (tags: {tag_str}), sending alert"
-                    )
-                    send_notification(
+                    influxdb3_local.error(f"[{task_id}] {alert_reason}")
+                    delivered: bool = send_notification(
                         influxdb3_local,
                         port_override,
                         notification_path,
@@ -842,57 +874,26 @@ def process_scheduled_call(
                         payload,
                         task_id,
                     )
+                    if not delivered:
+                        # leave the state untouched so a later run can alert again
+                        failed_notifications += 1
+                        continue
                     sent_notifications += 1
-                else:
-                    # Check duration
-                    duration_start_time: datetime = datetime.fromisoformat(
-                        start_time_str
-                    )
-                    elapsed: timedelta = time_datetime - duration_start_time
-                    if elapsed >= min_condition_duration:
-                        # Send notification
-                        payload: dict = {
-                            "notification_text": interpolate_notification_text(
-                                notification_text,
-                                {
-                                    "table": measurement,
-                                    "field": field,
-                                    "value": row[field],
-                                    "detectors": ".".join(detectors),
-                                    "tags": tag_str,
-                                },
-                            ),
-                            "senders_config": senders_config,
-                        }
-                        influxdb3_local.error(
-                            f"[{task_id}] Anomaly persisted for {elapsed} for {measurement}.{field} (tags: {tag_str}), sending alert"
-                        )
-                        send_notification(
-                            influxdb3_local,
-                            port_override,
-                            notification_path,
-                            influxdb3_auth_token,
-                            payload,
-                            task_id,
-                        )
-                        influxdb3_local.cache.put(
-                            cache_key, ""
-                        )  # Reset cache after sending
-                        sent_notifications += 1
-                    else:
-                        influxdb3_local.info(
-                            f"[{task_id}] Anomaly ongoing for {elapsed} < {min_condition_duration} for {measurement}.{field} (tags: {tag_str})"
-                        )
-            else:
-                # Reset cache if anomaly stops
-                if start_time_str:
-                    influxdb3_local.cache.put(cache_key, "")
-                    influxdb3_local.info(
-                        f"[{task_id}] Anomaly cleared for {measurement}.{field} (tags: {tag_str})"
-                    )
-            processed_anomalies += 1
 
-        influxdb3_local.info(f"[{task_id}] Anomaly processing completed: {processed_anomalies} points processed, {sent_notifications} notifications sent")
+                influxdb3_local.cache.delete(cache_key)
+                influxdb3_local.cache.put(alert_key, timestamp.isoformat())
+
+        if failed_notifications:
+            influxdb3_local.warn(
+                f"[{task_id}] {failed_notifications} notifications could not be delivered, the next run will alert on them again"
+            )
+        if suppressed_notifications:
+            influxdb3_local.warn(
+                f"[{task_id}] Suppressed {suppressed_notifications} notifications after reaching max_notifications_per_run={max_notifications_per_run}"
+            )
+        influxdb3_local.info(
+            f"[{task_id}] Anomaly processing completed: {processed_anomalies} points processed, {sent_notifications} notifications sent"
+        )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Error: {e}")

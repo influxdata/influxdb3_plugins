@@ -57,8 +57,8 @@
                         "path": "influxdata/notifier/notifier_plugin.py"
                     }
                 ],
-                "required_libraries": ["requests"],
-                "last_update": "2025-06-16",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0", "requests"],
+                "last_update": "2026-08-18",
                 "trigger_types_supported": ["data_writes"]
             },
             {
@@ -106,8 +106,8 @@
                         "path": "influxdata/notifier/notifier_plugin.py"
                     }
                 ],
-                "required_libraries": ["requests"],
-                "last_update": "2025-06-16",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0", "requests"],
+                "last_update": "2026-08-17",
                 "trigger_types_supported": ["scheduler", "data_writes"]
             },
             {
@@ -122,8 +122,8 @@
                         "path": "influxdata/notifier/notifier_plugin.py"
                     }
                 ],
-                "required_libraries": ["requests", "adtk", "pandas"],
-                "last_update": "2025-06-16",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0", "requests", "adtk", "pandas<3"],
+                "last_update": "2026-08-16",
                 "trigger_types_supported": ["scheduler"]
             },
             {
@@ -336,8 +336,8 @@
                 "author": "Synthefy",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/synthefy_forecasting/README.md",
                 "required_plugins": [],
-                "required_libraries": ["pandas", "requests"],
-                "last_update": "2026-01-08",
+                "required_libraries": ["pandas", "requests", "influxdata-plugin-utils>=0.3.0"],
+                "last_update": "2026-08-10",
                 "trigger_types_supported": ["http"]
             },
             {
@@ -380,8 +380,8 @@
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/stock_plugin/README.md",
                 "required_plugins": [],
-                "required_libraries": ["yfinance", "pandas_market_calendars"],
-                "last_update": "2026-06-10",
+                "required_libraries": ["yfinance", "pandas_market_calendars", "influxdata-plugin-utils>=0.3.0"],
+                "last_update": "2026-08-12",
                 "trigger_types_supported": ["scheduler"]
             },
             {

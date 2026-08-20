@@ -10,8 +10,8 @@
         },
         {
             "name": "mad_thresholds",
-            "example": "temp:'2.5':20:5@load:3:10:2m",
-            "description": "Threshold conditions for MAD-based anomaly detection (e.g., field:k:window_count:threshold). Multiple conditions separated by '@'.",
+            "example": "temp:2.5:20:5@load:3:10:2min",
+            "description": "Threshold conditions for MAD-based anomaly detection in the form 'field:k:window_count:threshold', separated by '@'. window_count is between 2 and 10000. The threshold is either a count of consecutive outliers or a duration such as 30s, 5min, 2h, 1d.",
             "required": true
         },
         {
@@ -29,7 +29,7 @@
         {
             "name": "state_change_count",
             "example": "2",
-            "description": "Maximum allowed flips (changes) in recent values before suppressing notifications. If 0, suppression is disabled. Default: 0.",
+            "description": "Number of transitions between normal and outlier state, within the MAD window, at which notifications are suppressed. Use 2 or greater; 1 would suppress every alert and is treated as 0. Default: 0 (suppression disabled).",
             "required": false
         },
         {
@@ -119,7 +119,7 @@
         {
             "name": "config_file_path",
             "example": "config.toml",
-            "description": "Path to config file to override args. Format: 'config.toml'.",
+            "description": "Path to a TOML config file that replaces the trigger arguments entirely. Format: 'config.toml'.",
             "required": false
         }
     ]
@@ -128,19 +128,22 @@
 
 import json
 import os
-import random
 import re
-import time
-import tomllib
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from statistics import median
 from string import Template
 from urllib.parse import urlparse
 
 import requests
+from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.introspection import get_table_names, get_tag_names
+from influxdata_plugin_utils.parsing import (
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
+)
 
 # Supported sender types with their required arguments
 AVAILABLE_SENDERS = {
@@ -159,112 +162,131 @@ AVAILABLE_SENDERS = {
 # List of keywords to exclude from argument validation in AVAILABLE_SENDERS
 EXCLUDED_KEYWORDS = ["headers", "token", "sid"]
 
+_DEFAULT_COUNT_TEXT = (
+    "MAD count alert: Field $field in $table outlier for $threshold_count "
+    "consecutive points. Tags: $tags"
+)
+_DEFAULT_TIME_TEXT = (
+    "MAD duration alert: Field $field in $table outlier for $threshold_time. "
+    "Tags: $tags"
+)
 
-def get_all_measurements(influxdb3_local) -> list[str]:
+
+_WRITES_VALIDATORS = [
+    Validator("measurement", required=True, cast=str),
+    Validator("mad_thresholds", required=True),
+    Validator("senders", required=True),
+    Validator(
+        "port_override",
+        default=8181,
+        cast=lambda raw: parse_int(raw, minimum=1, maximum=65535),
+    ),
+    Validator("notification_path", default="notify", cast=str),
+    Validator(
+        "state_change_count", default=0, cast=lambda raw: parse_int(raw, minimum=0)
+    ),
+    Validator("notification_count_text", default=_DEFAULT_COUNT_TEXT, cast=str),
+    Validator("notification_time_text", default=_DEFAULT_TIME_TEXT, cast=str),
+]
+
+_WRITES_CONFIG_CACHE_KEY = "mad_check:writes_config"
+_WRITES_CONFIG_TTL_SECONDS = 10 * 60
+
+# window_count bounds: below two points the MAD is always zero, and one deque of
+# _MAX_WINDOW_COUNT values is kept per series
+_MIN_WINDOW_COUNT = 2
+_MAX_WINDOW_COUNT = 10_000
+
+
+def _load_config(
+    influxdb3_local, args: dict | None, validators: list, task_id: str
+) -> dict | None:
     """
-    Retrieves a list of all tables of type 'BASE TABLE' from cache or the current InfluxDB database.
+    Load the plugin configuration, applying defaults and type casts.
 
     Args:
         influxdb3_local: InfluxDB client instance.
+        args (dict | None): Runtime arguments of the trigger.
+        validators (list): Validators providing defaults and casts.
+        task_id (str): Unique task identifier.
 
     Returns:
-        list[str]: List of table names (e.g., ["cpu", "memory", "disk"]).
+        dict | None: Config values keyed by lower-case name, or None if loading failed.
     """
-    # check cache first
-    measurements: list = influxdb3_local.cache.get("measurements")
-    if measurements:
-        return measurements
-
-    # if not in cache, query the database
-    result: list = influxdb3_local.query("SHOW TABLES")
-    measurements = [
-        row["table_name"] for row in result if row.get("table_type") == "BASE TABLE"
-    ]
-
-    # cache the result for 1 hour
-    influxdb3_local.cache.put(f"measurements", measurements, 60 * 60)
-
-    return measurements
-
-
-def get_tag_names(influxdb3_local, measurement: str, task_id: str) -> list[str]:
-    """
-    Retrieves the list of tag names for a measurement from cache or the database.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        measurement (str): Name of the measurement to query.
-        task_id (str): The task ID.
-
-    Returns:
-        list[str]: List of tag names with 'Dictionary(Int32, Utf8)' data type.
-    """
-    # check cache first
-    tags: list = influxdb3_local.cache.get(f"{measurement}_tags")
-    if tags:
-        return tags
-
-    # if not in cache, query the database
-    query = """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = $measurement
-        AND data_type = 'Dictionary(Int32, Utf8)'
-    """
-    res: list[dict] = influxdb3_local.query(query, {"measurement": measurement})
-
-    if not res:
-        influxdb3_local.info(
-            f"[{task_id}] No tags found for measurement '{measurement}'."
+    args = args or {}
+    config_file_path = args.get("config_file_path")
+    if config_file_path and not str(config_file_path).endswith(".toml"):
+        influxdb3_local.error(
+            f"[{task_id}] Invalid config file format: expected a .toml file"
         )
-        return []
+        return None
 
-    tag_names: list[str] = [tag["column_name"] for tag in res]
+    try:
+        loaded = load_plugin_config(
+            args,
+            validators=validators,
+            env_keys=["INFLUXDB3_AUTH_TOKEN"],
+            source="toml" if config_file_path else "args",
+        )
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Failed to load configuration: {e}")
+        return None
 
-    # cache the result for 1 hour
-    influxdb3_local.cache.put(f"{measurement}_tags", tag_names, 60 * 60)
-
-    return tag_names
+    return {key.lower(): value for key, value in loaded.as_dict().items()}
 
 
 def generate_cache_key(
     measurement: str,
     field: str,
-    k: float | int | str,
+    discriminator: float | int | str,
     suffix: str,
     tags: list[str],
     row: dict,
 ) -> str:
     """
-    Generate a consistent cache key string combining measurement, field, k, suffix, and tag values.
+    Generate a consistent cache key from the measurement, field, suffix, and tag values.
 
     Args:
         measurement (str): Measurement (table) name.
         field (str): Field name being checked.
-        k (float|int|str): Multiplier or identifier used in key.
-        suffix (str): Identifier (e.g., "count-time", "time-time", "deque", "values").
+        discriminator (float|int|str): Value separating keys of different thresholds.
+        suffix (str): Identifier (e.g., "count-count", "time-time", "deque", "flips").
         tags (list[str]): List of tag column names to include.
         row (dict): Current row data; used to extract tag values.
 
     Returns:
-        str: Formatted key, e.g. "cpu:temp:2.0:count-time:host=server1:region=us-west".
+        str: Formatted key, e.g. "cpu:temp:2.0-20:count-count:host=server1:region=us-west".
     """
-    base = f"{measurement}:{field}:{k}:{suffix}"
+    base = f"{measurement}:{field}:{discriminator}:{suffix}"
     for tag in sorted(tags):
         tag_val = row.get(tag, "None")
         base += f":{tag}={tag_val}"
     return base
 
 
-def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
+def read_counter(influxdb3_local, cache_key: str) -> int:
+    """Read an outlier counter, treating a missing or non-numeric entry as zero."""
+    try:
+        return int(influxdb3_local.cache.get(cache_key))
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_window(influxdb3_local, cache_key: str, window_count: int) -> deque:
+    """Read a cached deque, replacing it when it is missing or sized differently."""
+    window = influxdb3_local.cache.get(cache_key, default=deque(maxlen=window_count))
+    if not isinstance(window, deque) or window.maxlen != window_count:
+        window = deque(maxlen=window_count)
+    return window
+
+
+def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
     """
-    Parse and validate sender configurations from input arguments.
+    Parse and validate sender configurations from the loaded config.
 
     Args:
         influxdb3_local: InfluxDB client instance.
-        args (dict): Input arguments containing:
-            - "senders": dot-separated list of sender types (e.g., "slack.http").
-            - For each sender, its own required keys (see AVAILABLE_SENDERS).
+        config (dict): Loaded config containing "senders" and related settings.
         task_id (str): Unique task identifier used for logging context.
 
     Returns:
@@ -282,39 +304,31 @@ def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
         Exception: If no valid senders are found after parsing.
     """
     senders_config: defaultdict = defaultdict(dict)
-
-    senders: str | list = args.get("senders")
-    if args["use_config_file"]:
-        if not isinstance(senders, list):
-            raise Exception(
-                f"[{task_id}] 'senders' must be a list when using config file"
-            )
-    else:
-        senders = senders.split(".")
+    senders: list = parse_delimited_list(config["senders"], sep=".")
 
     for sender in senders:
         if sender not in AVAILABLE_SENDERS:
             influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
             continue
         for key in AVAILABLE_SENDERS[sender]:
-            if key not in args and not any(ex in key for ex in EXCLUDED_KEYWORDS):
+            if key not in config and not any(ex in key for ex in EXCLUDED_KEYWORDS):
                 influxdb3_local.warn(
                     f"[{task_id}] Required key '{key}' missing for sender '{sender}'"
                 )
                 senders_config.pop(sender, None)
                 break
             if "url" in key and not validate_webhook_url(
-                influxdb3_local, sender, args[key], task_id
+                influxdb3_local, sender, config[key], task_id
             ):
                 senders_config.pop(sender, None)
                 break
 
-            if key not in args:
+            if key not in config:
                 continue
-            senders_config[sender][key] = args[key]
+            senders_config[sender][key] = config[key]
 
     if not senders_config:
-        raise Exception(f"[{task_id}] No valid senders configured")
+        raise Exception("No valid senders configured")
     return senders_config
 
 
@@ -322,8 +336,7 @@ def send_notification(
     influxdb3_local, port: int, path: str, token: str, payload: dict, task_id: str
 ) -> None:
     """
-    Send a JSON POST to the given InfluxDB 3 webhook endpoint, with up to
-    3 retry attempts and randomized backoff delays between attempts.
+    Send a JSON POST to the given InfluxDB 3 webhook endpoint.
 
     Args:
         influxdb3_local: InfluxDB client instance.
@@ -332,72 +345,25 @@ def send_notification(
         token (str): API v3 token string (without the "Bearer " prefix).
         payload (dict): Dict to serialize as JSON in the POST body.
         task_id (str): Unique task identifier.
-
-    Raises:
-        requests.RequestException: If all retries fail or a non-2xx response is received.
     """
     url: str = f"http://localhost:{port}/api/v3/engine/{path}"
     headers: dict = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
     }
-    data: str = json.dumps(payload)
-
-    max_retries: int = 3
-    timeout: float = 5.0
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            resp = requests.post(url, headers=headers, data=data, timeout=timeout)
-            resp.raise_for_status()  # raises on 4xx/5xx
-            influxdb3_local.info(
-                f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
-            )
-            break
-        except requests.RequestException as e:
-            influxdb3_local.warn(
-                f"[{task_id}] [Attempt {attempt}/{max_retries}] Error sending alert to notification plugin: {e}"
-            )
-            if attempt < max_retries:
-                wait = random.uniform(1, 4)
-                influxdb3_local.info(
-                    f"[{task_id}] Retrying sending alert to notification plugin in {wait:.1f} seconds."
-                )
-                time.sleep(wait)
-            else:
-                influxdb3_local.error(
-                    f"[{task_id}] Failed to send alert to notification plugin after {max_retries} attempts: {e}"
-                )
-
-
-def parse_port_override(args: dict, task_id: str) -> int:
-    """
-    Parse and validate the 'port_override' argument, converting it from string to int.
-
-    Args:
-        args (dict): Runtime arguments containing 'port_override'.
-        task_id (str): Unique task identifier for logging context.
-
-    Returns:
-        int: Parsed port number (1–65535), or 8181 if not provided.
-
-    Raises:
-        Exception: If 'port_override' is provided but is not a valid integer in the range 1–65535.
-    """
-    raw: str | int = args.get("port_override", 8181)
 
     try:
-        port = int(raw)
-    except (TypeError, ValueError):
-        raise Exception(f"[{task_id}] Invalid port_override, not an integer: {raw!r}")
-
-    # Validate port range
-    if not (1 <= port <= 65535):
-        raise Exception(
-            f"[{task_id}] Invalid port_override, must be between 1 and 65535: {port}"
+        resp = requests.post(
+            url, headers=headers, data=json.dumps(payload), timeout=5.0
         )
-
-    return port
+        resp.raise_for_status()  # raises on 4xx/5xx
+        influxdb3_local.info(
+            f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
+        )
+    except requests.RequestException as e:
+        influxdb3_local.error(
+            f"[{task_id}] Failed to send alert to notification plugin: {e}"
+        )
 
 
 def validate_webhook_url(influxdb3_local, service: str, url: str, task_id: str) -> bool:
@@ -442,357 +408,367 @@ def interpolate_notification_text(text: str, row_data: dict) -> str:
     return Template(text).safe_substitute(row_data)
 
 
-def _coerce_value(raw: str) -> str | int | float | bool:
+def _strip_quotes(raw) -> str:
+    """Remove one pair of surrounding quotes from a value."""
+    text: str = str(raw).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    return text
+
+
+def _parse_threshold_param(
+    influxdb3_local, raw, task_id: str
+) -> int | timedelta | None:
     """
-    Convert a raw string value into int, float, bool, or str.
-    """
-    raw = raw.strip()
-    # Quoted string
-    if (raw.startswith('"') and raw.endswith('"')) or (
-        raw.startswith("'") and raw.endswith("'")
-    ):
-        raw = raw[1:-1]
-    # Boolean
-    if raw.lower() in ("true", "false"):
-        return raw.lower() == "true"
-    # Integer
-    if re.fullmatch(r"-?\d+", raw):
-        return int(raw)
-    # Float
-    if re.fullmatch(r"-?\d+\.\d*", raw):
-        return float(raw)
-    # Plain string
-    return raw
+    Parse the fourth part of a threshold into a consecutive count or a duration.
 
-
-def parse_mad_thresholds(influxdb3_local, args: dict, task_id: str) -> list[tuple]:
-    """
-    Parse MAD-based threshold definitions from args into structured tuples or use values from config file.
-
-    Args:
-        influxdb3_local: InfluxDB client for logging.
-        args (dict): Must include "mad_thresholds" key, a string of '@'-separated segments.
-        task_id (str): Unique identifier for logging.
-
-    Each segment has the form:
-        field_name:k:window_count:threshold
-    where:
-        - field_name (str): Name of the numeric field.
-        - k (float): Multiplier for MAD.
-        - window_count (int): Number of recent points to compute median/MAD.
-        - threshold:
-            • If integer → count-based: trigger after this many consecutive outliers.
-            • If duration string (e.g., "2m", "30s") → duration-based.
+    A bare integer is a count of consecutive outliers; anything else is a duration
+    such as '30s' or '2h'.
 
     Returns:
-        list[list[str, float, int, int|timedelta]]:
-            Each list: [field_name, k, window_count, threshold_param].
-
-    Raises:
-        Exception: If no valid segments are parsed.
+        int | timedelta | None: The parsed threshold, or None when it is invalid.
     """
-    valid_units: dict = {
-        "s": "seconds",
-        "min": "minutes",
-        "h": "hours",
-        "d": "days",
-        "w": "weeks",
-    }
-    raw_input: str | list = args.get("mad_thresholds")
-    results: list = []
+    if isinstance(raw, bool):
+        influxdb3_local.warn(f"[{task_id}] Invalid threshold parameter: {raw!r}")
+        return None
 
-    if args["use_config_file"]:
-        if not isinstance(raw_input, list):
-            raise Exception(
-                f"[{task_id}] 'mad_thresholds' must be a list when using config file"
+    if isinstance(raw, int) or re.fullmatch(r"-?\d+", str(raw).strip()):
+        count = int(raw)
+        if count < 1:
+            influxdb3_local.warn(
+                f"[{task_id}] Invalid threshold count {count}, must be 1 or greater"
             )
-        for threshold in raw_input:
-            try:
-                field_name: str = str(threshold[0])
-                k: float = float(threshold[1])
-                window_count: int = int(threshold[2])
-                threshold_input: int | str = threshold[3]
-                if isinstance(threshold_input, str):
-                    num_part, unit_part = "", ""
-                    for unit in sorted(valid_units.keys(), key=len, reverse=True):
-                        if threshold_input.endswith(unit):
-                            num_part = threshold_input[: -len(unit)]
-                            unit_part = unit
-                            break
-                    if not num_part or unit_part not in valid_units:
-                        influxdb3_local.warn(
-                            f"[{task_id}] Invalid threshold format '{threshold_input}'"
-                        )
-                        continue
-                    try:
-                        num = int(num_part)
-                    except ValueError:
-                        influxdb3_local.warn(
-                            f"[{task_id}] Invalid number in threshold '{threshold_input}'"
-                        )
-                        continue
-                    threshold_param = timedelta(**{valid_units[unit_part]: num})
-                elif isinstance(threshold_input, int):
-                    threshold_param = threshold_input
-                else:
-                    influxdb3_local.warn(
-                        f"[{task_id}] Invalid threshold format '{threshold_input}'"
-                    )
-                    continue
-                results.append([field_name, k, window_count, threshold_param])
-            except Exception:
-                influxdb3_local.warn(
-                    f"[{task_id}] Invalid threshold definition: {threshold}, skipping"
-                )
-        return results
+            return None
+        return count
 
-    segments: list = [seg.strip() for seg in raw_input.split("@") if seg.strip()]
-    for seg in segments:
-        parts = seg.split(":")
+    try:
+        duration: timedelta = parse_timedelta(raw)
+    except ValueError as e:
+        influxdb3_local.warn(f"[{task_id}] Invalid threshold duration {raw!r}: {e}")
+        return None
+
+    if duration <= timedelta(0):
+        influxdb3_local.warn(
+            f"[{task_id}] Invalid threshold duration {raw!r}, must be positive"
+        )
+        return None
+    return duration
+
+
+def _parse_mad_entry(influxdb3_local, entry, task_id: str) -> tuple | None:
+    """
+    Validate one [field, k, window_count, threshold] definition.
+
+    Returns:
+        tuple | None: (field_name, k, window_count, threshold_param), or None when any
+        part is invalid.
+    """
+    field_name: str = str(entry[0]).strip()
+    if not field_name:
+        influxdb3_local.warn(f"[{task_id}] Invalid threshold {entry}: empty field name")
+        return None
+
+    try:
+        k: float = float(_strip_quotes(entry[1]))
+    except (TypeError, ValueError):
+        influxdb3_local.warn(f"[{task_id}] Invalid k in threshold {entry}")
+        return None
+    if k < 0:
+        influxdb3_local.warn(
+            f"[{task_id}] Invalid k {k} in threshold {entry}, must not be negative"
+        )
+        return None
+
+    try:
+        window_count: int = parse_int(
+            entry[2], minimum=_MIN_WINDOW_COUNT, maximum=_MAX_WINDOW_COUNT
+        )
+    except ValueError as e:
+        influxdb3_local.warn(
+            f"[{task_id}] Invalid window_count in threshold {entry}: {e}"
+        )
+        return None
+
+    threshold_param = _parse_threshold_param(influxdb3_local, entry[3], task_id)
+    if threshold_param is None:
+        return None
+
+    return field_name, k, window_count, threshold_param
+
+
+def _mad_thresholds_from_entries(influxdb3_local, entries: list, task_id: str) -> list:
+    """Parse thresholds given as [field, k, window_count, threshold] entries."""
+    thresholds: list = []
+
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 4:
+            influxdb3_local.warn(
+                f"[{task_id}] Invalid threshold '{entry}', expected "
+                f"[field, k, window_count, threshold]"
+            )
+            continue
+        parsed = _parse_mad_entry(influxdb3_local, entry, task_id)
+        if parsed is not None:
+            thresholds.append(parsed)
+
+    return thresholds
+
+
+def _mad_thresholds_from_string(influxdb3_local, raw: str, task_id: str) -> list:
+    """Parse thresholds given as '<field>:<k>:<window_count>:<threshold>' joined by '@'."""
+    thresholds: list = []
+
+    for segment in parse_delimited_list(raw, sep="@"):
+        parts: list[str] = segment.split(":")
         if len(parts) != 4:
             influxdb3_local.warn(
-                f"[{task_id}] Invalid segment '{seg}'; expected 4 parts delimited by ':'"
+                f"[{task_id}] Skipping invalid threshold '{segment}' – expected 4 parts "
+                f"delimited by ':'"
             )
             continue
+        parsed = _parse_mad_entry(influxdb3_local, parts, task_id)
+        if parsed is not None:
+            thresholds.append(parsed)
 
-        field_name = parts[0].strip()
-        try:
-            k: str | float = parts[1].strip()
-            if k[0] == k[-1] and k[0] in ("'", '"'):
-                k = k[1:-1]
-            k = float(k)
-        except ValueError:
-            influxdb3_local.warn(f"[{task_id}] Invalid k in segment '{seg}'")
-            continue
-
-        try:
-            window_count: int = int(parts[2].strip())
-        except ValueError:
-            influxdb3_local.warn(f"[{task_id}] Invalid window_count in '{seg}'")
-            continue
-
-        raw_thresh = parts[3].strip()
-        if re.fullmatch(r"-?\d+", raw_thresh):
-            threshold_param: int | timedelta = int(raw_thresh)
-        else:
-            num_part, unit_part = "", ""
-            for unit in sorted(valid_units.keys(), key=len, reverse=True):
-                if raw_thresh.endswith(unit):
-                    num_part = raw_thresh[: -len(unit)]
-                    unit_part = unit
-                    break
-            if not num_part or unit_part not in valid_units:
-                influxdb3_local.warn(
-                    f"[{task_id}] Invalid threshold format '{raw_thresh}'"
-                )
-                continue
-            try:
-                num = int(num_part)
-            except ValueError:
-                influxdb3_local.warn(
-                    f"[{task_id}] Invalid number in threshold '{raw_thresh}'"
-                )
-                continue
-            threshold_param = timedelta(**{valid_units[unit_part]: num})
-
-        results.append([field_name, k, window_count, threshold_param])
-
-    if not results:
-        raise Exception(f"[{task_id}] No valid MAD threshold segments in '{raw_input}'")
-    return results
+    return thresholds
 
 
-def check_state_changes(cached_values: deque, max_flips: int) -> bool:
+def parse_mad_thresholds(influxdb3_local, config: dict, task_id: str) -> list:
     """
-    Count how many times the value changes in a deque; suppress if flips exceed max_flips.
+    Parse MAD threshold definitions into structured tuples.
+
+    Thresholds come either as entries of [field, k, window_count, threshold] (TOML) or
+    as a string of '<field>:<k>:<window_count>:<threshold>' expressions separated by '@'.
 
     Args:
-        cached_values (deque): Recent field values (size = state_change_window).
-        max_flips (int): Maximum allowed flips in that window.
+        influxdb3_local: InfluxDB client instance.
+        config (dict): Loaded config containing "mad_thresholds".
+        task_id (str): Unique task identifier.
 
     Returns:
-        bool: True if actual flips ≤ max_flips; False otherwise.
+        list[tuple]: Tuples of (field_name, k, window_count, count_or_duration).
+
+    Example:
+        'temp:2.5:20:5@load:3:10:2min'
+        [
+            ("temp", 2.5, 20, 5),
+            ("load", 3.0, 10, datetime.timedelta(minutes=2)),
+        ]
+
+    Raises:
+        Exception: If no valid thresholds are parsed.
     """
-    if len(cached_values) < 2 or max_flips == 0:
+    raw: str | list = config["mad_thresholds"]
+
+    if isinstance(raw, (list, tuple)):
+        thresholds = _mad_thresholds_from_entries(influxdb3_local, raw, task_id)
+    elif isinstance(raw, str):
+        thresholds = _mad_thresholds_from_string(influxdb3_local, raw, task_id)
+    else:
+        raise Exception(
+            "'mad_thresholds' must be a list of entries or a string, "
+            f"got {type(raw).__name__}"
+        )
+
+    # Repeated definitions share one cache key, so each one would advance the same
+    # counter and reach the threshold ahead of time
+    unique_thresholds: list = []
+    for threshold in thresholds:
+        if threshold in unique_thresholds:
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping duplicate threshold {threshold}"
+            )
+            continue
+        unique_thresholds.append(threshold)
+
+    if not unique_thresholds:
+        raise Exception("No valid MAD thresholds provided.")
+    return unique_thresholds
+
+
+def check_state_changes(outlier_flags: deque, state_change_count: int) -> bool:
+    """
+    Count transitions between normal and outlier state in the window.
+
+    Args:
+        outlier_flags (deque): Recent outlier flags of one field.
+        state_change_count (int): Number of transitions at which notifications are
+            suppressed. 0 disables suppression.
+
+    Returns:
+        bool: True while the number of transitions stays below state_change_count.
+    """
+    if len(outlier_flags) < 2 or state_change_count == 0:
         return True
 
     flips: int = 0
-    prev = None
-    first = True
-    for v in cached_values:
-        if first:
-            prev = v
-            first = False
-            continue
-        if v != prev:
+    previous = outlier_flags[0]
+    for flag in list(outlier_flags)[1:]:
+        if flag != previous:
             flips += 1
-            if flips >= max_flips:
+            if flips >= state_change_count:
                 return False
-        prev = v
+        previous = flag
     return True
+
+
+def normalize_state_change_count(
+    influxdb3_local, state_change_count: int, task_id: str
+) -> int:
+    """Treat 1 as disabled: an alert after normal data always records one transition."""
+    if state_change_count != 1:
+        return state_change_count
+
+    influxdb3_local.warn(
+        f"[{task_id}] state_change_count=1 would suppress every alert, treating it as 0 "
+        f"(disabled); use 2 or greater to suppress flapping"
+    )
+    return 0
+
+
+def warn_on_inert_suppression(
+    influxdb3_local, mad_thresholds: list, state_change_count: int, task_id: str
+) -> None:
+    """Warn about count thresholds whose window leaves no room for enough transitions."""
+    if state_change_count == 0:
+        return
+
+    for field_name, _k, window_count, threshold_param in mad_thresholds:
+        if isinstance(threshold_param, timedelta):
+            continue
+        if state_change_count > window_count - threshold_param:
+            influxdb3_local.warn(
+                f"[{task_id}] Flip suppression never triggers for '{field_name}' with "
+                f"count threshold {threshold_param}: set window_count to "
+                f"{threshold_param + state_change_count} or more"
+            )
 
 
 def process_writes(influxdb3_local, table_batches: list, args: dict | None = None):
     """
     WAL-Flush trigger applying MAD-based anomaly detection on fields without querying data repeatedly.
 
-    Uses in-memory deques in cache to maintain the last N values per field+series, computing median/MAD
-    incrementally. Supports both count- and duration-based triggers, plus flip-detection suppression.
+    Uses in-memory deques in cache to maintain the last N values per field and series,
+    computing median/MAD incrementally. Supports both count- and duration-based
+    thresholds, plus suppression of alerts on data that flips in and out of the
+    outlier state.
 
     Args:
         influxdb3_local: InfluxDB client for logging, cache, and minimal queries.
         table_batches (list): Each element is {"table_name": str, "rows": [dict, ...]}.
-        args (dict):
-            Required:
-              - measurement (str): Measurement name to monitor.
-              - mad_thresholds (str): '@'-separated segments "field:k:window:threshold".
-              - senders (str): Dot-separated notification channels.
-            Optional:
-              - config_file_path (str): path to config file to override args.
-              - state_change_count (int): Max flips allowed before suppressing.
-              - port_override (int): HTTP port for notification plugin (default 8181).
-              - influxdb3_auth_token (str): API v3 token (or via ENV var).
-              - notification_path (str): Path on engine (default "notify").
-              - notification_count_text (str): Template for count-based messages.
-              - notification_time_text (str): Template for duration-based messages.
+        args (dict): Runtime arguments of the trigger.
 
     Exceptions:
         All exceptions are caught and logged via influxdb3_local.error.
     """
+    if not table_batches:
+        return
+
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting writes processing with args: {args}")
+    config: dict | None = influxdb3_local.cache.get(_WRITES_CONFIG_CACHE_KEY)
+    if config is None:
+        config = _load_config(influxdb3_local, args, _WRITES_VALIDATORS, task_id)
+        if config is None:
+            return
+        influxdb3_local.cache.put(
+            _WRITES_CONFIG_CACHE_KEY, config, _WRITES_CONFIG_TTL_SECONDS
+        )
 
-    # Override args with config file if specified
-    if args:
-        if path := args.get("config_file_path", None):
-            if not path.endswith(".toml"):
-                influxdb3_local.error(
-                    f"[{task_id}] Invalid config file format: expected a .toml file"
-                )
-                return
-            try:
-                plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if plugin_dir_var:
-                    file_path = Path(plugin_dir_var) / path
-                else:
-                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-                    candidates: list[str] = []
-                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                        candidates.append(influxdb3_plugin_dir)
-                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                        candidates.append(str(Path(virtual_env).parent))
-
-                    resolved = None
-                    for base in candidates:
-                        candidate = Path(base) / path
-                        if candidate.exists():
-                            resolved = candidate
-                            break
-
-                    if resolved is None:
-                        candidates_str = ", ".join(candidates) if candidates else "none available"
-                        influxdb3_local.error(
-                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
-                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
-                        )
-                        return
-                    file_path = resolved
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
-                with open(file_path, "rb") as f:
-                    args = tomllib.load(f)
-                    args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
-            except Exception:
-                influxdb3_local.error(f"[{task_id}] Failed to read config file")
-                return
-        else:
-            args["use_config_file"] = False
-
-    if (
-        not args
-        or "measurement" not in args
-        or "mad_thresholds" not in args
-        or "senders" not in args
-    ):
+    measurement: str = config["measurement"]
+    if measurement not in get_table_names(influxdb3_local):
         influxdb3_local.error(
-            f"[{task_id}] Missing required arguments: measurement, mad_thresholds, or senders"
+            f"[{task_id}] Measurement '{measurement}' not found in database"
         )
         return
 
-    measurement: str = args["measurement"]
-    all_measurements: list = get_all_measurements(influxdb3_local)
-    if measurement not in all_measurements:
-        influxdb3_local.error(f"[{task_id}] Measurement '{measurement}' not found")
+    monitored_batches: list = [
+        table_batch
+        for table_batch in table_batches
+        if table_batch.get("table_name") == measurement
+    ]
+    if not monitored_batches:
         return
+
+    influxdb3_local.info(f"[{task_id}] Starting writes process")
 
     try:
-        # Parse configuration
-        mad_thresholds: list = parse_mad_thresholds(influxdb3_local, args, task_id)
-        senders_config: dict = parse_senders(influxdb3_local, args, task_id)
-        tags: list = get_tag_names(influxdb3_local, measurement, task_id)
-        port_override: int = parse_port_override(args, task_id)
-        state_change_count: int = int(args.get("state_change_count", 0))
-        notification_path: str = args.get("notification_path", "notify")
-        influxdb3_auth_token: str = args.get("influxdb3_auth_token") or os.getenv(
-            "INFLUXDB3_AUTH_TOKEN"
+        mad_thresholds: list = parse_mad_thresholds(influxdb3_local, config, task_id)
+        influxdb3_local.info(f"[{task_id}] MAD thresholds: {mad_thresholds}")
+
+        senders_config: dict = parse_senders(influxdb3_local, config, task_id)
+        port_override: int = config["port_override"]
+        state_change_count: int = normalize_state_change_count(
+            influxdb3_local, config["state_change_count"], task_id
+        )
+        notification_path: str = config["notification_path"]
+        influxdb3_auth_token: str = (
+            config.get("influxdb3_auth_token")
+            or os.getenv("INFLUXDB3_AUTH_TOKEN")
+            or ""
         )
         if not influxdb3_auth_token:
-            influxdb3_local.error(f"[{task_id}] Missing influxdb3_auth_token")
+            influxdb3_local.error(
+                f"[{task_id}] Missing required argument: influxdb3_auth_token"
+            )
             return
 
-        notification_count_tpl: str = args.get(
-            "notification_count_text",
-            "MAD count alert: Field $field in $table outlier for $threshold_count consecutive points. Tags: $tags",
-        )
-        notification_time_tpl: str = args.get(
-            "notification_time_text",
-            "MAD duration alert: Field $field in $table outlier for $threshold_time. Tags: $tags",
+        notification_count_tpl: str = config["notification_count_text"]
+        notification_time_tpl: str = config["notification_time_text"]
+
+        warn_on_inert_suppression(
+            influxdb3_local, mad_thresholds, state_change_count, task_id
         )
 
-        # Process each batch of newly written rows
-        for batch in table_batches:
-            if batch.get("table_name") != measurement:
-                continue
+        tags: list = get_tag_names(influxdb3_local, measurement)
 
-            for row in batch.get("rows", []):
+        for batch in monitored_batches:
+            for row in batch["rows"]:
                 tag_str: str = ", ".join(f"{t}={row.get(t, 'None')}" for t in tags)
+                # A MAD window depends only on the field and its size, so thresholds
+                # sharing one window update it once per row.
+                row_windows: dict = {}
+
                 for field_name, k, window_count, threshold_param in mad_thresholds:
-                    # Extract current field value
+                    is_duration: bool = isinstance(threshold_param, timedelta)
+                    state_suffix: str = "time-time" if is_duration else "count-count"
+                    reset_value: str = "" if is_duration else "0"
+                    threshold_label: str = (
+                        f"{threshold_param.total_seconds()}s"
+                        if is_duration
+                        else str(threshold_param)
+                    )
+                    threshold_id: str = f"{k}-{window_count}-{threshold_label}"
+                    state_key: str = generate_cache_key(
+                        measurement, field_name, threshold_id, state_suffix, tags, row
+                    )
+
                     current_val = row.get(field_name)
                     if current_val is None or not isinstance(current_val, (int, float)):
-                        influxdb3_local.info(
-                            f"[{task_id}] Field '{field_name}' missing or non-numeric → reset"
-                        )
-                        # Reset any running state
-                        count_key = generate_cache_key(
-                            measurement, field_name, k, "count-count", tags, row
-                        )
-                        time_key = generate_cache_key(
-                            measurement, field_name, k, "time-time", tags, row
-                        )
-                        influxdb3_local.cache.put(count_key, "0")
-                        influxdb3_local.cache.put(time_key, "")
+                        if (
+                            influxdb3_local.cache.get(state_key, default=reset_value)
+                            != reset_value
+                        ):
+                            influxdb3_local.info(
+                                f"[{task_id}] Field '{field_name}' missing or non-numeric, resetting state for tags: {tag_str}"
+                            )
+                        influxdb3_local.cache.put(state_key, reset_value)
                         continue
 
                     now: datetime = datetime.now(timezone.utc)
 
-                    # Manage deque of size window_count for median/MAD
-                    deque_key: str = generate_cache_key(
-                        measurement, field_name, k, "deque", tags, row
-                    )
-                    window_deque = influxdb3_local.cache.get(
-                        deque_key, default=deque(maxlen=window_count)
-                    )
-                    if (
-                        not isinstance(window_deque, deque)
-                        or window_deque.maxlen != window_count
-                    ):
-                        window_deque = deque(maxlen=window_count)
-
-                    window_deque.append(current_val)
-                    influxdb3_local.cache.put(deque_key, window_deque)
+                    # Deque of the last window_count values, used for median/MAD
+                    window_id: tuple = (field_name, window_count)
+                    if window_id not in row_windows:
+                        deque_key: str = generate_cache_key(
+                            measurement, field_name, window_count, "deque", tags, row
+                        )
+                        window_deque = read_window(
+                            influxdb3_local, deque_key, window_count
+                        )
+                        window_deque.append(current_val)
+                        influxdb3_local.cache.put(deque_key, window_deque)
+                        row_windows[window_id] = window_deque
+                    window_deque = row_windows[window_id]
 
                     # Wait until deque is full before computing MAD
                     if len(window_deque) < window_count:
@@ -810,28 +786,32 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
                     is_outlier: bool = (current_val < lower) or (current_val > upper)
 
-                    influxdb3_local.info(
-                        f"[{task_id}] MAD calculation for {field_name}: median={med:.3f}, mad={mad:.3f}, "
-                        f"thresholds=({lower:.3f}, {upper:.3f}), current={current_val:.3f}, outlier={is_outlier}, tags: {tag_str}"
-                    )
+                    if is_outlier:
+                        influxdb3_local.info(
+                            f"[{task_id}] MAD calculation for {field_name}: median={med:.3f}, mad={mad:.3f}, "
+                            f"thresholds=({lower:.3f}, {upper:.3f}), current={current_val:.3f}, outlier=True, tags: {tag_str}"
+                        )
 
-                    # Flip-detection deque (size = state_change_window)
+                    # Suppress alerts when the outlier state flips too often
+                    flips_key: str = generate_cache_key(
+                        measurement, field_name, threshold_id, "flips", tags, row
+                    )
+                    outlier_flags = read_window(
+                        influxdb3_local, flips_key, window_count
+                    )
+                    outlier_flags.append(is_outlier)
+                    influxdb3_local.cache.put(flips_key, outlier_flags)
                     can_send: bool = check_state_changes(
-                        window_deque, state_change_count
+                        outlier_flags, state_change_count
                     )
 
                     # Count-based mode
-                    if not isinstance(threshold_param, timedelta):
-                        count_key: str = generate_cache_key(
-                            measurement, field_name, k, "count-count", tags, row
-                        )
-                        count_so_far: int = int(
-                            influxdb3_local.cache.get(count_key, default="0")
-                        )
+                    if not is_duration:
+                        count_so_far: int = read_counter(influxdb3_local, state_key)
 
                         if is_outlier:
                             count_so_far += 1
-                            influxdb3_local.cache.put(count_key, str(count_so_far))
+                            influxdb3_local.cache.put(state_key, str(count_so_far))
                             influxdb3_local.info(
                                 f"[{task_id}] Count-based outlier {count_so_far}/{threshold_param} for {field_name}, tags: {tag_str}"
                             )
@@ -862,26 +842,15 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                     )
                                 else:
                                     influxdb3_local.warn(
-                                        f"[{task_id}] Suppressed count alert due to flips > {state_change_count}"
+                                        f"[{task_id}] Suppressed count alert for {field_name}: outlier state flipped at least {state_change_count} times in the last {window_count} points"
                                     )
-                                influxdb3_local.cache.put(count_key, "0")
-
-                            else:
-                                influxdb3_local.warn(
-                                    f"[{task_id}] MAD count threshold reached for {measurement}.{field_name} (k={k}) for the {count_so_far}/{threshold_param} time. tags: {tag_str}"
-                                )
+                                influxdb3_local.cache.put(state_key, "0")
                         else:
-                            influxdb3_local.info(
-                                f"[{task_id}] Count-based outlier cleared for {field_name}, tags: {tag_str}"
-                            )
-                            influxdb3_local.cache.put(count_key, "0")
+                            influxdb3_local.cache.put(state_key, "0")
 
                     # Duration-based mode
                     else:
-                        time_key: str = generate_cache_key(
-                            measurement, field_name, k, "time-time", tags, row
-                        )
-                        start_iso = influxdb3_local.cache.get(time_key, default="")
+                        start_iso = influxdb3_local.cache.get(state_key, default="")
 
                         if start_iso:
                             try:
@@ -893,7 +862,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
                         if is_outlier:
                             if not start_dt:
-                                influxdb3_local.cache.put(time_key, now.isoformat())
+                                influxdb3_local.cache.put(state_key, now.isoformat())
                                 influxdb3_local.warn(
                                     f"[{task_id}] Duration-based outlier started for {field_name} at {now.isoformat()} (k={k}), tags: {tag_str}"
                                 )
@@ -926,9 +895,9 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                         )
                                     else:
                                         influxdb3_local.warn(
-                                            f"[{task_id}] Suppressed time alert due to flips > {state_change_count}"
+                                            f"[{task_id}] Suppressed duration alert for {field_name}: outlier state flipped at least {state_change_count} times in the last {window_count} points"
                                         )
-                                    influxdb3_local.cache.put(time_key, "")
+                                    influxdb3_local.cache.put(state_key, "")
                                 else:
                                     influxdb3_local.info(
                                         f"[{task_id}] MAD outlier ongoing for {field_name}, elapsed {elapsed}, threshold {threshold_param}, tags: {tag_str}"
@@ -938,7 +907,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
                                 influxdb3_local.info(
                                     f"[{task_id}] MAD outlier cleared for {field_name}, tags: {tag_str}; resetting"
                                 )
-                            influxdb3_local.cache.put(time_key, "")
+                            influxdb3_local.cache.put(state_key, "")
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")

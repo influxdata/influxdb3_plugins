@@ -1,8 +1,10 @@
 # Example stock_plugin configuration.
 # Copy to stock_plugin.toml in your InfluxDB plugin directory.
+# The scalar keys below can also be passed as trigger arguments, which win over
+# the values set here. The [holdings.*] and [portfolio_categories] tables have no
+# trigger-argument spelling: pass portfolio=... and categories=... instead.
 
 # Target database for writes. Optional — defaults to "stocks".
-# Overridden by --trigger-arguments database=... if set.
 database = "stocks"
 
 # Write rows even when US markets are closed? When false, stocks/ETFs

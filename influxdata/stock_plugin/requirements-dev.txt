@@ -1,3 +1,4 @@
+pytest
 yfinance>=0.2.40
 pandas_market_calendars>=4.4
 influxdata-plugin-utils>=0.3.0

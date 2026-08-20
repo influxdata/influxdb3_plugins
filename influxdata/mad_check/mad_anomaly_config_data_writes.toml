@@ -12,14 +12,15 @@ measurement = "your_measurement"  # e.g., "cpu", "temperature", "home"
 # MAD threshold conditions for anomaly detection
 # Format: [[field, k, window_count, threshold], ...]
 #   - field: numeric field name (string)
-#   - k: multiplier of MAD for cutoff (float)
-#   - window_count: number of recent points to compute median and MAD (integer)
-#   - threshold: integer (count-based) or duration string (e.g., "2m") for duration-based triggering
-# Supported units for duration: s (seconds), min (minutes), h (hours), d (days), w (weeks)
-mad_thresholds = [["field1", 2.0, 5, "your_threshold"]]  # e.g., [["temp", 2.0, 5, 1], ["load", 3.5, 10, "2m"]]
+#   - k: multiplier of MAD for cutoff (float >= 0)
+#   - window_count: number of recent points to compute median and MAD (integer, 2-10000)
+#   - threshold: integer >= 1 (consecutive outliers) or duration string (e.g., "2min")
+# Supported units for duration: us (microseconds), ms (milliseconds), s (seconds),
+# min (minutes), h (hours), d (days), w (weeks)
+mad_thresholds = [["field1", 2.0, 5, "your_threshold"]]  # e.g., [["temp", 2.0, 5, 1], ["load", 3.5, 10, "2min"]]
 
 # Notification channels
-# Specify a dot-separated list of notification channels (strings)
+# Specify a list of notification channels (strings)
 senders = ["your_channel"]  # e.g., ["slack"], ["http", "sms"]
 
 ########## Optional Parameters ##########
@@ -27,8 +28,10 @@ senders = ["your_channel"]  # e.g., ["slack"], ["http", "sms"]
 # Specify the token (string); can also be provided via INFLUXDB3_AUTH_TOKEN environment variable
 #influxdb3_auth_token = "your_api_token"  # e.g., "apiv3_AuHk_8LYFHTa1QMccT..."
 
-# Maximum allowed flips in recent values before suppressing notifications
-# Specify an integer ≥ 0; default is 0 (disabled)
+# Number of transitions between normal and outlier state, within the MAD window,
+# at which notifications are suppressed
+# Specify an integer ≥ 2; default is 0 (suppression disabled), and 1 is treated as 0
+# Requires window_count >= threshold + state_change_count for count-based thresholds
 #state_change_count = 2  # e.g., 2
 
 # Template for count-based notifications

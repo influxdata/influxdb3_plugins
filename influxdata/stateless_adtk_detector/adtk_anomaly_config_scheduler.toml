@@ -16,15 +16,16 @@ field = "your_field"  # e.g., "usage", "value", "temp"
 
 # ADTK detectors to use
 # Supported detectors: GeneralizedESDTestAD, InterQuartileRangeAD, ThresholdAD, QuantileAD, LevelShiftAD, VolatilityShiftAD, PersistAD, SeasonalAD
-# Specify a list of detector names (strings)
+# Specify a list of detector names (strings), or a dot-separated string
 detectors = ["your_detector"]  # e.g., ["QuantileAD"], ["GeneralizedESDTestAD", "InterQuartileRangeAD"]
 
 # Time window for analysis
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
-window = "your_window"  # e.g., "15m", "24h"
+# Format: <number><unit>, where unit is us, ms, s (seconds), min (minutes), h (hours), d (days), w (weeks)
+# Must be a positive duration
+window = "your_window"  # e.g., "15min", "24h"
 
 # Notification channels
-# Specify a list of notification channels (strings)
+# Specify a list of notification channels (strings), or a dot-separated string
 senders = ["your_channel"]  # e.g., ["slack"], ["http", "sms"]
 
 ########## Optional Parameters ##########
@@ -32,9 +33,17 @@ senders = ["your_channel"]  # e.g., ["slack"], ["http", "sms"]
 # Specify an integer ≥ 1; default is 1
 #min_consensus = 1  # e.g., 2
 
+# Analyze every tag combination as its own time series
+# Without it the whole window is one series and rows sharing a timestamp are collapsed
+#group_by_tags = true  # default is false
+
+# Maximum number of notifications a single run may send
+# Anomalies beyond the limit are reported in a warning and not resent later
+#max_notifications_per_run = 20  # e.g., 50
+
 # Minimum duration an anomaly condition must persist before notifying
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
-#min_condition_duration = "your_duration"  # e.g., "1m", "10m"
+# Format: <number><unit>, where unit is us, ms, s (seconds), min (minutes), h (hours), d (days), w (weeks)
+#min_condition_duration = "your_duration"  # e.g., "1min", "10min"
 
 # InfluxDB 3 API token
 # Specify the token (string); can also be provided via INFLUXDB3_AUTH_TOKEN environment variable
@@ -84,14 +93,12 @@ senders = ["your_channel"]  # e.g., ["slack"], ["http", "sms"]
 #twilio_to_number = "your_twilio_to_number"  # e.g., "+0987654321"
 
 # --- WhatsApp (via Twilio) ---
-# WhatsApp sender number (required for WhatsApp, format: +1234567890)
-#whatsapp_from_number = "your_whatsapp_from_number"  # e.g., "+1234567890"
-# WhatsApp recipient number (required for WhatsApp, format: +0987654321)
-#whatsapp_to_number = "your_whatsapp_to_number"  # e.g., "+0987654321"
+# WhatsApp uses the same twilio_* settings as SMS above
 
 # Detector parameters (Required)
 # Format: {"DetectorName": {param1: value, ...}, ...}
 # Specify parameters for each detector listed in detectors
+# A base64-encoded JSON string is also accepted: detector_params = "eyJRdWFudGlsZUFEIjogey4uLn19"
 [detector_params]
 your_detector = { param1 = "value1", param2 = "value2" }  # e.g., QuantileAD = { low = 0.05, high = 0.95 }
 

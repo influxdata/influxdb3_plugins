@@ -1,3 +1,4 @@
-requests
+pytest
 pandas
+requests
 influxdata-plugin-utils>=0.3.0

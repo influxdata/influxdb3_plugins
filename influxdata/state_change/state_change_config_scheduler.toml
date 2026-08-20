@@ -12,16 +12,17 @@ measurement = "your_measurement"  # e.g., "cpu", "temperature", "home"
 # Field change thresholds per field
 # Format: {field = count, ...}
 #   - field: field name (string)
-#   - count: number of changes to trigger notification (integer)
-field_change_count = {field1 = 0}  # e.g., {temp = 3, hum = 2}
+#   - count: number of changes to trigger notification (integer >= 1)
+field_change_count = {field1 = 1}  # e.g., {temp = 3, hum = 2, "disk.used" = 1}
 
 # Notification channels
 # Specify a list of notification channels (strings)
 senders = ["your_channel"]  # e.g., ["slack"], ["slack", "http"]
 
 # Analysis window duration
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
-window = "your_window"  # e.g., "10m", "24h"
+# Format: <number><unit>, where unit is us (microseconds), ms (milliseconds), s (seconds),
+# min (minutes), h (hours), d (days), w (weeks). Must be a positive duration.
+window = "your_window"  # e.g., "10min", "24h"
 
 ########## Optional Parameters ##########
 # InfluxDB 3 API token for notifications

@@ -2,7 +2,7 @@ manifest_schema_version = "1.3"
 
 [plugin]
 name = "stateless_adtk_detector"
-version = "1.2.0"
+version = "1.3.0"
 description = "Provides anomaly detection capabilities for time series data using the ADTK library. Supports multiple stateless detectors with consensus-based detection and customizable notification messages."
 triggers = ["process_scheduled_call"]
 homepage = "https://www.influxdata.com/"
@@ -16,7 +16,7 @@ exclude = [
 
 [dependencies]
 database_version = ">=3.0.0"
-python = ["requests", "adtk", "pandas"]
+python = ["influxdata-plugin-utils>=0.3.0", "requests", "adtk", "pandas<3"]
 
 [[dependencies.plugins]]
 index_url = "https://github.com/influxdata/influxdb3_plugins/releases/download/registry/index.json"

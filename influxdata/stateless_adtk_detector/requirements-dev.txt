@@ -1,3 +1,4 @@
+pytest
 influxdata-plugin-utils>=0.3.0
 requests
 adtk

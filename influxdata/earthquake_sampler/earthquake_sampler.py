@@ -41,7 +41,7 @@
         {
             "name": "lookback_minutes",
             "example": "15",
-            "description": "Lookback window for `source_type=influxdb_table` when `source_query` is not provided. Defaults to 15.",
+            "description": "Initial lookback window in minutes for `source_type=influxdb_table` when `source_query` is not provided. Later runs page forward from the cached fetch watermark while `skip_unchanged=true`. Defaults to 15.",
             "required": false
         },
         {
@@ -288,22 +288,39 @@ def _fetch_payload(url: str, user_agent: str) -> Dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def _ns_to_rfc3339(ns: int) -> str:
+    seconds, remainder = divmod(int(ns), 1_000_000_000)
+    dt = datetime.fromtimestamp(seconds, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{remainder:09d}Z"
+
+
+def _table_watermark_key(measurement: str, source_table: str) -> str:
+    return f"earthquake_sampler:table_watermark:{measurement}:{source_table}"
+
+
 def _fetch_table_rows(
     influxdb3_local,
     source_table: str,
     max_events: int,
     lookback_minutes: int,
     source_query: str,
+    watermark_ns: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     if source_query.strip():
         query = source_query
     else:
-        safe_lookback = max(1, int(lookback_minutes))
         safe_table = source_table.replace('"', '""')
+        # Page oldest-first from the fetch watermark: DESC + LIMIT starved
+        # rows between the watermark and the newest LIMIT rows under load.
+        if watermark_ns is not None:
+            time_filter = f"time > '{_ns_to_rfc3339(watermark_ns)}'"
+        else:
+            safe_lookback = max(1, int(lookback_minutes))
+            time_filter = f"time >= now() - INTERVAL '{safe_lookback} minutes'"
         query = (
             f'SELECT * FROM "{safe_table}" '
-            f"WHERE time >= now() - INTERVAL '{safe_lookback} minutes' "
-            f"ORDER BY time DESC "
+            f"WHERE {time_filter} "
+            f"ORDER BY time ASC "
             f"LIMIT {max_events}"
         )
     rows = influxdb3_local.query(query)
@@ -619,6 +636,9 @@ def process_scheduled_call(
 
     items: List[Dict[str, Any]] = []
     if source_type == "influxdb_table":
+        watermark_key = _table_watermark_key(measurement, source_table)
+        use_watermark = skip_unchanged and not source_query.strip()
+        watermark_ns = _get_cached_int(influxdb3_local, watermark_key) if use_watermark else None
         try:
             items = _fetch_table_rows(
                 influxdb3_local=influxdb3_local,
@@ -626,11 +646,21 @@ def process_scheduled_call(
                 max_events=max_events,
                 lookback_minutes=lookback_minutes,
                 source_query=source_query,
+                watermark_ns=watermark_ns,
             )
             source_format = "flat_json"
         except Exception as e:
             influxdb3_local.error(f"[{task_id}] Query error while reading source table '{source_table}': {_exc(e)}")
             return
+        if use_watermark and items:
+            # Fetch progress, not write progress: dedup is the per-event
+            # cache's job; this only keeps paging moving forward.
+            max_time_ns = max(
+                (t for t in (_coerce_time_ns(r.get("time")) for r in items) if t is not None),
+                default=None,
+            )
+            if max_time_ns is not None:
+                influxdb3_local.cache.put(watermark_key, max_time_ns, ttl=EVENT_MARKER_TTL_SECONDS)
     else:
         url = source_url if source_url else FEED_URLS[feed]
         scheme = urlparse(url).scheme.lower()

@@ -627,7 +627,7 @@ def process_scheduled_call(
     normalized.sort(key=_to_update_marker_ms, reverse=True)
 
     for event in normalized:
-        if fetched >= max_events:
+        if written >= max_events:
             break
         fetched += 1
 

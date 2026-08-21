@@ -147,30 +147,65 @@ def _exc(e: BaseException) -> str:
     return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
-def _parse_bool(value: Any, default: bool) -> bool:
+class ConfigError(ValueError):
+    """Raised when a trigger argument has an invalid value."""
+
+
+_TRUE_STRINGS = {"1", "true", "yes", "y", "on"}
+_FALSE_STRINGS = {"0", "false", "no", "n", "off"}
+
+
+def _parse_bool_arg(name: str, value: Any, default: bool) -> bool:
     if value is None:
         return default
     if isinstance(value, bool):
         return value
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+    text = str(value).strip().lower()
+    if text in _TRUE_STRINGS:
+        return True
+    if text in _FALSE_STRINGS:
+        return False
+    raise ConfigError(f"{name} must be a boolean (true/false), got '{value}'")
 
 
-def _parse_float(value: Any, default: Optional[float]) -> Optional[float]:
+def _parse_float_arg(name: str, value: Any, default: Optional[float]) -> Optional[float]:
     if value is None:
         return default
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
-        return default
+        raise ConfigError(f"{name} must be a number, got '{value}'")
+    if not math.isfinite(parsed):
+        raise ConfigError(f"{name} must be finite, got '{value}'")
+    return parsed
 
 
-def _parse_int(value: Any, default: int) -> int:
+def _parse_int_arg(name: str, value: Any, default: int, minimum: int) -> int:
     if value is None:
         return default
     try:
-        return int(value)
+        parsed = int(str(value).strip())
     except (TypeError, ValueError):
-        return default
+        raise ConfigError(f"{name} must be an integer, got '{value}'")
+    if parsed < minimum:
+        raise ConfigError(f"{name} must be >= {minimum}, got {parsed}")
+    return parsed
+
+
+def _redact_url(url: str) -> str:
+    """Drop userinfo and query string, which may carry credentials or tokens."""
+    parts = urlparse(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return f"{parts.scheme}://{host}{parts.path}"
+
+
+def _truncate(text: str, limit: int = 80) -> str:
+    text = " ".join(str(text).split())
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
 
 
 def _safe_tag(value: Any, fallback: str = "unknown") -> str:
@@ -590,37 +625,41 @@ def process_scheduled_call(
     args: Optional[Dict[str, Any]] = None,
 ) -> None:
     task_id = str(uuid.uuid4())
+    args = args or {}
 
     global _ENABLE_FULL_LOGGING
-    _ENABLE_FULL_LOGGING = _parse_bool((args or {}).get("enable_full_logging"), False)
+    try:
+        _ENABLE_FULL_LOGGING = _parse_bool_arg(
+            "enable_full_logging", args.get("enable_full_logging"), False
+        )
 
-    args = args or {}
-    source_type = _safe_string(args.get("source_type", "http")).lower() or "http"
-    if source_type not in {"http", "influxdb_table"}:
-        source_type = "http"
+        source_type = _safe_string(args.get("source_type", "http")).lower() or "http"
+        if source_type not in {"http", "influxdb_table"}:
+            raise ConfigError(f"source_type must be 'http' or 'influxdb_table', got '{source_type}'")
 
-    source_url = _safe_string(args.get("source_url"))
-    source_format = _safe_string(args.get("source_format", "usgs_geojson")).lower() or "usgs_geojson"
-    if source_format not in {"usgs_geojson", "flat_json"}:
-        source_format = "usgs_geojson"
+        source_url = _safe_string(args.get("source_url"))
+        source_format = _safe_string(args.get("source_format", "usgs_geojson")).lower() or "usgs_geojson"
+        if source_format not in {"usgs_geojson", "flat_json"}:
+            raise ConfigError(f"source_format must be 'usgs_geojson' or 'flat_json', got '{source_format}'")
 
-    feed = _safe_string(args.get("feed", "all_hour"))
-    if feed not in FEED_URLS:
-        feed = "all_hour"
+        feed = _safe_string(args.get("feed", "all_hour"))
+        if feed not in FEED_URLS:
+            raise ConfigError(f"unknown feed '{feed}'; valid keys: {', '.join(sorted(FEED_URLS))}")
 
-    source_table = _safe_string(args.get("source_table", "quake")) or "quake"
-    source_query = _safe_string(args.get("source_query"))
-    lookback_minutes = max(1, _parse_int(args.get("lookback_minutes"), 15))
+        source_table = _safe_string(args.get("source_table", "quake")) or "quake"
+        source_query = _safe_string(args.get("source_query"))
+        lookback_minutes = _parse_int_arg("lookback_minutes", args.get("lookback_minutes"), 15, minimum=1)
 
-    source = source_url if source_url else feed
-    if source_type == "influxdb_table":
-        source = source_query if source_query else source_table
+        measurement = _safe_string(args.get("measurement", "earthquakes")) or "earthquakes"
+        write_quake_schema = _parse_bool_arg("write_quake_schema", args.get("write_quake_schema"), False)
+        min_magnitude = _parse_float_arg("min_magnitude", args.get("min_magnitude"), None)
+        max_events = _parse_int_arg("max_events", args.get("max_events"), 250, minimum=1)
+        use_event_timestamp = _parse_bool_arg("use_event_timestamp", args.get("use_event_timestamp"), True)
+        skip_unchanged = _parse_bool_arg("skip_unchanged", args.get("skip_unchanged"), True)
+    except ConfigError as e:
+        influxdb3_local.error(f"[{task_id}] Invalid configuration: {e}")
+        return
 
-    measurement = _safe_string(args.get("measurement", "earthquakes")) or "earthquakes"
-    write_quake_schema = _parse_bool(args.get("write_quake_schema"), False)
-    min_magnitude = _parse_float(args.get("min_magnitude"), None)
-    max_events = max(1, _parse_int(args.get("max_events"), 250))
-    use_event_timestamp = _parse_bool(args.get("use_event_timestamp"), True)
     if write_quake_schema and not use_event_timestamp:
         # Quake-schema rows have no tags, so a shared trigger timestamp would
         # collapse every event in a run into a single surviving row.
@@ -629,8 +668,14 @@ def process_scheduled_call(
             f"using event timestamps to keep events distinct"
         )
         use_event_timestamp = True
-    skip_unchanged = _parse_bool(args.get("skip_unchanged"), True)
     user_agent = _safe_string(args.get("user_agent", "InfluxDB3-Earthquake-Plugin/1.0")) or "InfluxDB3-Earthquake-Plugin/1.0"
+
+    # Display name for logs: URLs are stripped of userinfo/query string and
+    # custom SQL is truncated so credentials or literals stay out of the logs.
+    if source_type == "influxdb_table":
+        source = f"query:{_truncate(source_query)}" if source_query else source_table
+    else:
+        source = _redact_url(source_url) if source_url else feed
 
     now_ns = int(call_time.replace(tzinfo=timezone.utc).timestamp() * 1_000_000_000)
 

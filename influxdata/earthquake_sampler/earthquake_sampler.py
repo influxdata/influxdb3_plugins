@@ -418,6 +418,7 @@ def _write_event(
         "gap_degrees",
         "distance_km",
         "rms",
+        "mmi",
         "depth_error",
         "horizontal_error",
         "mag_error",
@@ -436,7 +437,6 @@ def _write_event(
         "significance",
         "felt_reports",
         "tsunami",
-        "mmi",
         "nst",
         "mag_nst",
     ):

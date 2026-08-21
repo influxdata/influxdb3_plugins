@@ -108,4 +108,5 @@ influxdb3 query --database usgs "SELECT id, mag, place, latitude, longitude, dep
 - No extra Python dependencies are required in plugin code (stdlib only).
 - The plugin does not create or write an `earthquake_plugin_stats` table.
 - `write_quake_schema=true` is intended for an existing `quake` table with the documented schema; it never writes tags or normalized-only columns such as `event_id` or `magnitude`.
+- In `write_quake_schema=true` mode, all numeric columns (including `nst` and `magNst`) are written as float64. This matches quake tables created by CSV import, where numeric columns containing blanks are inferred as doubles. If your existing table stores these columns as int64, the writes will be rejected with a type conflict.
 - Because quake-schema rows carry no tags, point identity rests entirely on the timestamp. USGS supplies millisecond-precision times, so the plugin fills the unused sub-millisecond bits with a stable per-event offset to keep two earthquakes in the same millisecond from overwriting each other; millisecond-level time is unchanged. For the same reason, `use_event_timestamp=false` is ignored in this mode.

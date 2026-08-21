@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2026-08-20T00:00:00+00:00",
+        "last_updated": "2026-08-21T00:00:00+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -403,7 +403,7 @@
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/earthquake_sampler/README.md",
                 "required_plugins": [],
                 "required_libraries": [],
-                "last_update": "2026-08-20",
+                "last_update": "2026-08-21",
                 "trigger_types_supported": ["scheduler"]
             }
         ]

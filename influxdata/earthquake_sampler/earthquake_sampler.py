@@ -53,7 +53,7 @@
         {
             "name": "write_quake_schema",
             "example": "true",
-            "description": "Write USGS events using the existing quake table's column names and types. Use with measurement=quake; no tags or extra columns are written.",
+            "description": "Write USGS events using the existing quake table's column names. All numeric columns are written as float64 (matching CSV-imported quake tables); no tags or extra columns are written. Use with measurement=quake.",
             "required": false
         },
 

@@ -60,7 +60,7 @@
         {
             "name": "min_magnitude",
             "example": "2.5",
-            "description": "Minimum earthquake magnitude to ingest from the selected feed. Defaults to 0.",
+            "description": "Optional minimum earthquake magnitude to ingest. When omitted, no magnitude filtering is applied (USGS feeds include negative-magnitude microseisms and events with no magnitude).",
             "required": false
         },
         {
@@ -154,7 +154,7 @@ def _parse_bool(value: Any, default: bool) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def _parse_float(value: Any, default: float) -> float:
+def _parse_float(value: Any, default: Optional[float]) -> Optional[float]:
     if value is None:
         return default
     try:
@@ -565,7 +565,7 @@ def process_scheduled_call(
 
     measurement = _safe_string(args.get("measurement", "earthquakes")) or "earthquakes"
     write_quake_schema = _parse_bool(args.get("write_quake_schema"), False)
-    min_magnitude = _parse_float(args.get("min_magnitude"), 0.0)
+    min_magnitude = _parse_float(args.get("min_magnitude"), None)
     max_events = max(1, _parse_int(args.get("max_events"), 250))
     use_event_timestamp = _parse_bool(args.get("use_event_timestamp"), True)
     skip_unchanged = _parse_bool(args.get("skip_unchanged"), True)
@@ -637,7 +637,7 @@ def process_scheduled_call(
         except (TypeError, ValueError):
             magnitude = None
 
-        if magnitude is None or magnitude < min_magnitude:
+        if min_magnitude is not None and (magnitude is None or magnitude < min_magnitude):
             skipped += 1
             continue
 

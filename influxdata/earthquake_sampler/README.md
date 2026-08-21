@@ -35,7 +35,7 @@ On each scheduled run, the plugin:
 - `measurement`: destination measurement (default `earthquakes`)
 - `write_quake_schema`: write only the canonical `quake` columns (`depth`, `depthError`, `dmin`, `gap`, `horizontalError`, `id`, `latitude`, `locationSource`, `longitude`, `mag`, `magError`, `magNst`, `magSource`, `magType`, `net`, `nst`, `place`, `rms`, `status`, `time`, and `type`). Use with `measurement=quake`.
 
-- `min_magnitude`: minimum magnitude filter
+- `min_magnitude`: optional minimum magnitude filter; when omitted, nothing is filtered (USGS feeds include negative-magnitude microseisms)
 - `max_events`: max events processed per run
 - `skip_unchanged`: skip unchanged events based on cached marker
 - `use_event_timestamp`: write event timestamp vs trigger time
@@ -56,7 +56,7 @@ influxdb3 create trigger \
   --path ./earthquake_sampler.py \
   --upload \
   --trigger-spec "every:2m" \
-  --trigger-arguments "source_type=http,feed=all_hour,measurement=quake,write_quake_schema=true,max_events=500,min_magnitude=0.0,skip_unchanged=true,use_event_timestamp=true" \
+  --trigger-arguments "source_type=http,feed=all_hour,measurement=quake,write_quake_schema=true,max_events=500,skip_unchanged=true,use_event_timestamp=true" \
   usgs_to_quake
 ```
 
@@ -84,7 +84,7 @@ influxdb3 create trigger \
   --path /tmp/earthquake_sampler.py \
   --upload \
   --trigger-spec 'every:2m' \
-  --trigger-arguments 'source_type=http,feed=all_hour,measurement=quake,write_quake_schema=true,max_events=500,min_magnitude=0.0,skip_unchanged=true,use_event_timestamp=true' \
+  --trigger-arguments 'source_type=http,feed=all_hour,measurement=quake,write_quake_schema=true,max_events=500,skip_unchanged=true,use_event_timestamp=true' \
   usgs_to_quake
 "
 ```

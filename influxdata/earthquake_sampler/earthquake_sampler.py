@@ -108,13 +108,12 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
-def _line_builder(measurement: str):
-    import builtins
-
-    builder_cls = getattr(builtins, "LineBuilder", None)
-    if builder_cls is None:
-        raise RuntimeError("LineBuilder is not available in plugin runtime")
-    return builder_cls(measurement)
+# At server runtime LineBuilder is injected as a builtin. In test environments
+# pytest patches this module-level name to a vendored copy.
+try:
+    LineBuilder  # type: ignore  # noqa: F821
+except NameError:
+    LineBuilder = None  # placeholder for test patching
 
 
 _ENABLE_FULL_LOGGING: bool = True
@@ -425,7 +424,7 @@ def _write_event(
 ) -> bool:
     timestamp_ns = _event_timestamp_ns(event, fallback_ts_ns, use_event_timestamp)
 
-    line = _line_builder(measurement).time_ns(timestamp_ns)
+    line = LineBuilder(measurement).time_ns(timestamp_ns)
     line.tag("event_type", _safe_tag(event.get("event_type"), "earthquake"))
     line.tag("status", _safe_tag(event.get("status"), "unknown"))
     line.tag("alert", _safe_tag(event.get("alert"), "none"))
@@ -529,7 +528,7 @@ def _write_quake_event(
     """Write a normalized USGS event to a table using only the canonical quake schema."""
     timestamp_ns = _event_timestamp_ns(event, fallback_ts_ns, use_event_timestamp)
 
-    line = _line_builder(measurement).time_ns(timestamp_ns)
+    line = LineBuilder(measurement).time_ns(timestamp_ns)
     for column, event_key in QUAKE_FLOAT_COLUMN_MAP.items():
         value = event.get(event_key)
         if value is None:

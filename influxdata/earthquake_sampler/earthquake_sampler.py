@@ -214,6 +214,38 @@ def _to_ns_from_iso(ts: Any) -> Optional[int]:
 
 
 
+def _coerce_time_ns(value: Any) -> Optional[int]:
+    """Coerce a timestamp of unknown shape to epoch nanoseconds.
+
+    InfluxDB queries return the time column as an integer (nanoseconds), while
+    flat JSON feeds may use ISO strings or epoch seconds/milliseconds, so the
+    unit of a bare number is inferred from its magnitude.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        ns = _to_ns_from_iso(value)
+        if ns is not None:
+            return ns
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric) or numeric <= 0:
+        return None
+    if numeric > 1e17:  # nanoseconds
+        return int(numeric)
+    if numeric > 1e14:  # microseconds
+        return int(numeric * 1_000)
+    if numeric > 1e11:  # milliseconds
+        return int(numeric * 1_000_000)
+    return int(numeric * 1_000_000_000)  # seconds
+
+
 def _to_update_marker_ms(event: Dict[str, Any]) -> int:
     raw = event.get("updated_ms")
     if raw is not None:
@@ -320,7 +352,7 @@ def _normalize_flat_event(item: Dict[str, Any]) -> Dict[str, Any]:
         "distance_km": item.get("dmin"),
         "rms": item.get("rms"),
         "updated_ms": item.get("updated") or item.get("updatedMs"),
-        "event_time_ns": _to_ns_from_iso(item.get("time")) or _to_ns_from_ms(item.get("timeMs")),
+        "event_time_ns": _coerce_time_ns(item.get("time")) or _to_ns_from_ms(item.get("timeMs")),
         "place": item.get("place"),
         "title": item.get("title") or item.get("place"),
         "url": item.get("url"),

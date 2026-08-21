@@ -11,7 +11,7 @@
         {
             "name": "source_url",
             "example": "https://example.com/earthquakes.json",
-            "description": "Optional custom source URL. When provided, it overrides `feed` and uses `source_format` parsing.",
+            "description": "Optional custom source URL (http or https only). When provided, it overrides `feed` and uses `source_format` parsing.",
             "required": false
         },
         {
@@ -104,6 +104,7 @@ import zlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -616,6 +617,13 @@ def process_scheduled_call(
             return
     else:
         url = source_url if source_url else FEED_URLS[feed]
+        scheme = urlparse(url).scheme.lower()
+        if scheme not in ("http", "https"):
+            # urlopen would happily fetch file:// or ftp:// URLs.
+            influxdb3_local.error(
+                f"[{task_id}] Unsupported source_url scheme '{scheme or 'none'}': only http and https are allowed"
+            )
+            return
         try:
             payload = _fetch_payload(url, user_agent)
         except HTTPError as e:

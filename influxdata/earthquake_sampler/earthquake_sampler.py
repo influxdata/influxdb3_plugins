@@ -78,7 +78,7 @@
         {
             "name": "skip_unchanged",
             "example": "true",
-            "description": "Skip events whose update marker is not newer than the last processed run. Defaults to true.",
+            "description": "Skip events whose update marker is not newer than the last written copy of the same event (per-event cache). Events without an id are always written. Defaults to true.",
             "required": false
         },
         {
@@ -245,6 +245,23 @@ def _coerce_time_ns(value: Any) -> Optional[int]:
     if numeric > 1e11:  # milliseconds
         return int(numeric * 1_000_000)
     return int(numeric * 1_000_000_000)  # seconds
+
+
+# Outlives the longest (monthly) feed window, so an event's marker survives
+# for as long as the event can still appear in fetched data.
+EVENT_MARKER_TTL_SECONDS = 45 * 24 * 3600
+
+
+def _event_marker_key(measurement: str, event_id: Any) -> str:
+    return f"earthquake_sampler:event_marker:{measurement}:{event_id}"
+
+
+def _get_cached_int(influxdb3_local, key: str) -> Optional[int]:
+    raw = influxdb3_local.cache.get(key)
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_update_marker_ms(event: Dict[str, Any]) -> int:
@@ -599,7 +616,6 @@ def process_scheduled_call(
     user_agent = _safe_string(args.get("user_agent", "InfluxDB3-Earthquake-Plugin/1.0")) or "InfluxDB3-Earthquake-Plugin/1.0"
 
     now_ns = int(call_time.replace(tzinfo=timezone.utc).timestamp() * 1_000_000_000)
-    cache_key = f"earthquake_sampler:last_update_marker:{source_type}:{source}:{source_format}:{measurement}"
 
     items: List[Dict[str, Any]] = []
     if source_type == "influxdb_table":
@@ -647,17 +663,12 @@ def process_scheduled_call(
 
     normalized = [_normalize_event(item, source_format) for item in items]
 
-    last_seen_marker = influxdb3_local.cache.get(cache_key)
-    try:
-        last_seen_marker = int(last_seen_marker) if last_seen_marker is not None else None
-    except (TypeError, ValueError):
-        last_seen_marker = None
-
     fetched = 0
     written = 0
     skipped = 0
-    max_marker_this_run: Optional[int] = last_seen_marker
 
+    # Newest-first so the max_events cap prioritizes recent events; anything
+    # deferred by the cap stays uncached and is picked up on a later run.
     normalized.sort(key=_to_update_marker_ms, reverse=True)
 
     for event in normalized:
@@ -676,9 +687,13 @@ def process_scheduled_call(
             continue
 
         marker = _to_update_marker_ms(event)
-        if skip_unchanged and last_seen_marker is not None and marker <= last_seen_marker:
-            skipped += 1
-            continue
+        event_id = event.get("event_id")
+        marker_key = _event_marker_key(measurement, event_id) if event_id is not None else None
+        if skip_unchanged and marker_key is not None:
+            last_marker = _get_cached_int(influxdb3_local, marker_key)
+            if last_marker is not None and marker <= last_marker:
+                skipped += 1
+                continue
 
         try:
             if write_quake_schema:
@@ -699,14 +714,11 @@ def process_scheduled_call(
                 )
             if did_write:
                 written += 1
-                if max_marker_this_run is None or marker > max_marker_this_run:
-                    max_marker_this_run = marker
+                if marker_key is not None:
+                    influxdb3_local.cache.put(marker_key, marker, ttl=EVENT_MARKER_TTL_SECONDS)
         except Exception as e:
             skipped += 1
             influxdb3_local.error(f"[{task_id}] Failed to write earthquake event: {_exc(e)}")
-
-    if max_marker_this_run is not None:
-        influxdb3_local.cache.put(cache_key, max_marker_this_run, ttl=None)
 
     influxdb3_local.info(
         f"[{task_id}] Earthquake sampler complete: "

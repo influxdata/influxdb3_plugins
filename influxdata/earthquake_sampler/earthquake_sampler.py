@@ -257,29 +257,39 @@ def _coerce_time_ns(value: Any) -> Optional[int]:
     flat JSON feeds may use ISO strings or epoch seconds/milliseconds, so the
     unit of a bare number is inferred from its magnitude.
     """
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, str):
         ns = _to_ns_from_iso(value)
         if ns is not None:
             return ns
         try:
-            value = float(value)
+            value = int(value)
         except (TypeError, ValueError):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+    # Integers stay on an exact path: epoch nanoseconds exceed float64's
+    # 53-bit mantissa, and a float round-trip perturbs the low ~8 digits —
+    # which also un-aligns ms timestamps and defeats the sub-ms dedup offset.
+    if isinstance(value, float):
+        if not math.isfinite(value):
             return None
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
+        if 0 < value <= 1e11:  # fractional epoch seconds
+            return int(value * 1_000_000_000)
+        value = int(value)
+    elif not isinstance(value, int):
         return None
-    if not math.isfinite(numeric) or numeric <= 0:
+    if value <= 0:
         return None
-    if numeric > 1e17:  # nanoseconds
-        return int(numeric)
-    if numeric > 1e14:  # microseconds
-        return int(numeric * 1_000)
-    if numeric > 1e11:  # milliseconds
-        return int(numeric * 1_000_000)
-    return int(numeric * 1_000_000_000)  # seconds
+    if value > 10**17:  # nanoseconds
+        return value
+    if value > 10**14:  # microseconds
+        return value * 1_000
+    if value > 10**11:  # milliseconds
+        return value * 1_000_000
+    return value * 1_000_000_000  # seconds
 
 
 # Outlives the longest (monthly) feed window, so an event's marker survives

@@ -403,7 +403,6 @@ def _write_event(
             pass
 
     line = _line_builder(measurement).time_ns(timestamp_ns)
-    line.tag("event_id", _safe_tag(event.get("event_id"), "unknown"))
     line.tag("event_type", _safe_tag(event.get("event_type"), "earthquake"))
     line.tag("status", _safe_tag(event.get("status"), "unknown"))
     line.tag("alert", _safe_tag(event.get("alert"), "none"))
@@ -455,6 +454,7 @@ def _write_event(
         except (TypeError, ValueError):
             pass
 
+    line.string_field("event_id", _safe_string(event.get("event_id")))
     line.string_field("place", _safe_string(event.get("place")))
     line.string_field("title", _safe_string(event.get("title")))
     line.string_field("url", _safe_string(event.get("url")))

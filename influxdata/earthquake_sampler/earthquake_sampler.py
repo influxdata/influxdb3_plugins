@@ -34,7 +34,7 @@
         },
         {
             "name": "source_query",
-            "example": "SELECT * FROM \"quake\" WHERE time >= now() - INTERVAL '15 minutes' ORDER BY time DESC LIMIT 500",
+            "example": "SELECT * FROM quake WHERE time >= now() - INTERVAL '15 minutes' ORDER BY time DESC LIMIT 500",
             "description": "Optional SQL query override used when `source_type=influxdb_table`.",
             "required": false
         },

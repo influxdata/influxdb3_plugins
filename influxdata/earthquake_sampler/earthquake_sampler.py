@@ -72,7 +72,7 @@
         {
             "name": "use_event_timestamp",
             "example": "true",
-            "description": "Use event time for point timestamp. If false, use trigger execution time. Defaults to true.",
+            "description": "Use event time for point timestamp. If false, use trigger execution time. Defaults to true. Ignored (forced true) when write_quake_schema=true.",
             "required": false
         },
         {
@@ -100,6 +100,7 @@
 import json
 import math
 import uuid
+import zlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
@@ -383,13 +384,17 @@ def _normalize_event(item: Dict[str, Any], source_format: str) -> Dict[str, Any]
     return _normalize_usgs_feature(item)
 
 
-def _write_event(
-    influxdb3_local,
-    measurement: str,
+def _dedup_ns_offset(event_id: Any) -> int:
+    if event_id is None:
+        return 0
+    return zlib.crc32(str(event_id).encode("utf-8")) % 1_000_000
+
+
+def _event_timestamp_ns(
     event: Dict[str, Any],
     fallback_ts_ns: int,
     use_event_timestamp: bool,
-) -> bool:
+) -> int:
     timestamp_ns = fallback_ts_ns
     event_time_ns = event.get("event_time_ns")
     if use_event_timestamp and event_time_ns is not None:
@@ -397,6 +402,26 @@ def _write_event(
             timestamp_ns = int(event_time_ns)
         except (TypeError, ValueError):
             pass
+
+    # USGS event times are millisecond-precision, and the sparse series keys
+    # (empty in quake-schema mode) make timestamp collisions between distinct
+    # events overwrite each other. Fill the zero sub-ms bits of ms-aligned
+    # timestamps with a stable per-event offset; ms-level time is unchanged,
+    # and true nanosecond timestamps (e.g. from influxdb_table sources) are
+    # left alone.
+    if timestamp_ns % 1_000_000 == 0:
+        timestamp_ns += _dedup_ns_offset(event.get("event_id"))
+    return timestamp_ns
+
+
+def _write_event(
+    influxdb3_local,
+    measurement: str,
+    event: Dict[str, Any],
+    fallback_ts_ns: int,
+    use_event_timestamp: bool,
+) -> bool:
+    timestamp_ns = _event_timestamp_ns(event, fallback_ts_ns, use_event_timestamp)
 
     line = _line_builder(measurement).time_ns(timestamp_ns)
     line.tag("event_type", _safe_tag(event.get("event_type"), "earthquake"))
@@ -500,12 +525,7 @@ def _write_quake_event(
     use_event_timestamp: bool,
 ) -> bool:
     """Write a normalized USGS event to a table using only the canonical quake schema."""
-    timestamp_ns = fallback_ts_ns
-    if use_event_timestamp and event.get("event_time_ns") is not None:
-        try:
-            timestamp_ns = int(event["event_time_ns"])
-        except (TypeError, ValueError):
-            pass
+    timestamp_ns = _event_timestamp_ns(event, fallback_ts_ns, use_event_timestamp)
 
     line = _line_builder(measurement).time_ns(timestamp_ns)
     for column, event_key in QUAKE_FLOAT_COLUMN_MAP.items():
@@ -566,6 +586,14 @@ def process_scheduled_call(
     min_magnitude = _parse_float(args.get("min_magnitude"), None)
     max_events = max(1, _parse_int(args.get("max_events"), 250))
     use_event_timestamp = _parse_bool(args.get("use_event_timestamp"), True)
+    if write_quake_schema and not use_event_timestamp:
+        # Quake-schema rows have no tags, so a shared trigger timestamp would
+        # collapse every event in a run into a single surviving row.
+        influxdb3_local.warn(
+            f"[{task_id}] use_event_timestamp=false is ignored when write_quake_schema=true; "
+            f"using event timestamps to keep events distinct"
+        )
+        use_event_timestamp = True
     skip_unchanged = _parse_bool(args.get("skip_unchanged"), True)
     user_agent = _safe_string(args.get("user_agent", "InfluxDB3-Earthquake-Plugin/1.0")) or "InfluxDB3-Earthquake-Plugin/1.0"
 

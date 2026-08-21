@@ -283,8 +283,9 @@ def _fetch_table_rows(
         query = source_query
     else:
         safe_lookback = max(1, int(lookback_minutes))
+        safe_table = source_table.replace('"', '""')
         query = (
-            f'SELECT * FROM "{source_table}" '
+            f'SELECT * FROM "{safe_table}" '
             f"WHERE time >= now() - INTERVAL '{safe_lookback} minutes' "
             f"ORDER BY time DESC "
             f"LIMIT {max_events}"

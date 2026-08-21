@@ -33,7 +33,7 @@ On each scheduled run, the plugin:
 - `source_query`: optional SQL override for table mode
 - `lookback_minutes`: table query lookback window (default `15`)
 - `measurement`: destination measurement (default `earthquakes`)
-- `write_quake_schema`: write only the canonical `quake` columns (`depth`, `depthError`, `dmin`, `gap`, `horizontalError`, `id`, `latitude`, `locationSource`, `longitude`, `mag`, `magError`, `magNst`, `magSource`, `magType`, `net`, `nst`, `place`, `rms`, `status`, `time`, and `type`). Use with `measurement=quake`.
+- `write_quake_schema`: write only the canonical `quake` columns (`depth`, `depthError`, `dmin`, `gap`, `horizontalError`, `id`, `latitude`, `locationSource`, `longitude`, `mag`, `magError`, `magNst`, `magSource`, `magType`, `net`, `nst`, `place`, `rms`, `status`, `time`, and `type`). Use with `measurement=quake`. Note: `depthError`, `horizontalError`, `magError`, `magNst`, `locationSource`, and `magSource` exist only in USGS CSV feeds, not GeoJSON, so they are written only when a `flat_json` or `influxdb_table` source supplies them.
 
 - `min_magnitude`: optional minimum magnitude filter; when omitted, nothing is filtered (USGS feeds include negative-magnitude microseisms)
 - `max_events`: max events processed per run

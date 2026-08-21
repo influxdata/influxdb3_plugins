@@ -322,12 +322,8 @@ def _normalize_usgs_feature(feature: Dict[str, Any]) -> Dict[str, Any]:
         "place": properties.get("place"),
         "title": properties.get("title"),
         "url": properties.get("url"),
-        "depth_error": properties.get("depthError"),
-        "horizontal_error": properties.get("horizontalError"),
-        "mag_error": properties.get("magError"),
-        "mag_nst": properties.get("magNst"),
-        "location_source": properties.get("locationSource"),
-        "mag_source": properties.get("magSource"),
+        # depthError/horizontalError/magError/magNst/locationSource/magSource
+        # exist only in the USGS CSV feeds, never in GeoJSON properties.
     }
 
 
@@ -458,8 +454,10 @@ def _write_event(
     line.string_field("place", _safe_string(event.get("place")))
     line.string_field("title", _safe_string(event.get("title")))
     line.string_field("url", _safe_string(event.get("url")))
-    line.string_field("location_source", _safe_string(event.get("location_source")))
-    line.string_field("mag_source", _safe_string(event.get("mag_source")))
+    for field_name in ("location_source", "mag_source"):
+        raw = event.get(field_name)
+        if raw is not None:
+            line.string_field(field_name, _safe_string(raw))
 
     # Buffered write() only flushes after the trigger returns, so a failed
     # write could never be caught or counted here; write_sync raises inline.

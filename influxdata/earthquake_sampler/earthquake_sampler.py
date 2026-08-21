@@ -461,7 +461,9 @@ def _write_event(
     line.string_field("location_source", _safe_string(event.get("location_source")))
     line.string_field("mag_source", _safe_string(event.get("mag_source")))
 
-    influxdb3_local.write(line)
+    # Buffered write() only flushes after the trigger returns, so a failed
+    # write could never be caught or counted here; write_sync raises inline.
+    influxdb3_local.write_sync(line, no_sync=True)
     return True
 
 
@@ -524,7 +526,7 @@ def _write_quake_event(
         if value is not None:
             line.string_field(column, _safe_string(value))
 
-    influxdb3_local.write(line)
+    influxdb3_local.write_sync(line, no_sync=True)
     return True
 
 

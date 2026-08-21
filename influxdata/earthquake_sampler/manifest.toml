@@ -15,4 +15,4 @@ exclude = [
 ]
 
 [dependencies]
-database_version = ">=3.0.0"
+database_version = ">=3.8.2"

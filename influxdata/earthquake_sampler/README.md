@@ -21,15 +21,15 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 ### Data selection parameters
 
-| Parameter          | Type    | Default        | Description                                                                                                                                                  |
-|--------------------|---------|----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `feed`             | string  | all_hour       | USGS GeoJSON feed key: `all`, `significant`, `4.5`, `2.5`, or `1.0` combined with `_hour`, `_day`, `_week`, or `_month` (for example `significant_day`)       |
-| `source_type`      | string  | http           | Data source type: `http` fetches JSON from `source_url` or `feed`; `influxdb_table` queries an existing table in the trigger database                        |
-| `source_url`       | string  | none           | Custom source URL (`http` or `https` only). When provided, overrides `feed` and uses `source_format` parsing                                                 |
-| `source_format`    | string  | usgs_geojson   | Source parser for HTTP mode: `usgs_geojson` or `flat_json` (for records like `{id, latitude, longitude, mag, time, ...}`)                                    |
-| `source_table`     | string  | quake          | Source table name when `source_type=influxdb_table`                                                                                                          |
-| `source_query`     | string  | none           | Optional SQL override for `influxdb_table` mode; disables watermark paging                                                                                    |
-| `lookback_minutes` | integer | 15             | Initial lookback window for `influxdb_table` mode. Later runs page forward from the cached fetch watermark while `skip_unchanged=true`                        |
+| Parameter          | Type    | Default        | Description                                                                                                                                                                                                           |
+|--------------------|---------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `feed`             | string  | all_hour       | USGS GeoJSON feed key: `all`, `significant`, `4.5`, `2.5`, or `1.0` combined with `_hour`, `_day`, `_week`, or `_month` (for example `significant_day`)                                                               |
+| `source_type`      | string  | http           | Data source type: `http` fetches JSON from `source_url` or `feed`; `influxdb_table` queries an existing table in the trigger database                                                                                 |
+| `source_url`       | string  | none           | Custom source URL (`http` or `https` only). When provided, overrides `feed` and uses `source_format` parsing                                                                                                          |
+| `source_format`    | string  | usgs_geojson   | Source parser for HTTP mode: `usgs_geojson` or `flat_json` (for records like `{id, latitude, longitude, mag, time, ...}`)                                                                                             |
+| `source_table`     | string  | quake          | Source table name when `source_type=influxdb_table`                                                                                                                                                                   |
+| `source_query`     | string  | none           | Optional SQL override for `influxdb_table` mode; disables watermark paging and the source-table existence check. A query containing commas must come from a TOML file — see [TOML configuration](#toml-configuration) |
+| `lookback_minutes` | integer | 15             | Initial lookback window for `influxdb_table` mode. Later runs page forward from the cached fetch watermark while `skip_unchanged=true`                                                                                |
 
 ### Optional parameters
 
@@ -43,6 +43,42 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `skip_unchanged`      | boolean | true                            | Skip events whose update marker is not newer than the last written copy of the same event. Events without an id are always written                            |
 | `user_agent`          | string  | InfluxDB3-Earthquake-Plugin/1.0 | Custom User-Agent header for API requests                                                                                                                    |
 | `enable_full_logging` | boolean | false                           | When `true`, full exception messages are logged. When `false` (default), only exception types are logged                                                     |
+| `config_file_path`    | string  | none                            | Path to a TOML configuration file, relative to the plugin directory. See [TOML configuration](#toml-configuration)                                            |
+
+### TOML configuration
+
+Trigger arguments are a comma-separated `key=value` list, so a value that itself contains a comma — most notably `source_query` — cannot be passed inline. Put those parameters in a TOML file instead and point `config_file_path` at it. The path is resolved relative to the plugin directory (`PLUGIN_DIR`, `INFLUXDB3_PLUGIN_DIR`, or the processing-engine virtualenv).
+
+Values in the file override the inline trigger arguments. A file that is missing, malformed, or fails validation is reported in the logs and skipped, and the run continues with the inline arguments; a path that does not end in `.toml` is rejected the same way.
+
+`earthquake_sampler_config_scheduler.toml` ships alongside the plugin with every
+parameter documented and commented out. Copy it into your plugin directory and
+uncomment what you need:
+
+```toml
+measurement = "earthquakes"
+feed = "all_day"
+min_magnitude = 2.5
+max_events = 500
+skip_unchanged = true
+
+# A query containing commas is only expressible here, not in --trigger-arguments.
+# Use a single-quoted TOML string when column names need double quotes.
+source_type = "influxdb_table"
+source_table = "quake"
+source_query = 'SELECT time, id, mag, depth, "magType", net, updated FROM quake ORDER BY time DESC LIMIT 500'
+```
+
+```bash
+influxdb3 create trigger \
+  --database quakes \
+  --path "gh:influxdata/earthquake_sampler/earthquake_sampler.py" \
+  --trigger-spec "every:5m" \
+  --trigger-arguments "config_file_path=earthquake_sampler_config_scheduler.toml" \
+  earthquakes_from_toml
+```
+
+Types are native in TOML: `min_magnitude = 2.5` and `skip_unchanged = true` need no quoting, unlike the string values that inline arguments always deliver.
 
 ## Schema requirements
 
@@ -55,7 +91,7 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 ## Software requirements
 
 - **InfluxDB 3 Core/Enterprise**: 3.8.2 or later (the plugin writes with `write_sync`), with the Processing Engine enabled
-- **Python packages**: No additional packages required (uses the Python standard library only)
+- **Python packages**: `influxdata-plugin-utils>=0.3.0`
 - **Network access**: Outbound HTTPS access to `earthquake.usgs.gov` (HTTP mode)
 
 ### Installation steps
@@ -70,7 +106,11 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
      --plugin-dir ~/.plugins
    ```
 
-2. No additional Python packages are required for this plugin.
+2. Install the required Python package:
+
+   ```bash
+   influxdb3 install package influxdata-plugin-utils
+   ```
 
 ## Trigger setup
 
@@ -165,6 +205,8 @@ influxdb3 create trigger \
 ### Files
 
 - `earthquake_sampler.py`: The main plugin code containing the scheduled handler for earthquake ingestion
+- `requirements.txt`: Python dependencies (`influxdata-plugin-utils`, used for configuration loading, validation, and writes)
+- `earthquake_sampler_config_scheduler.toml`: Example TOML configuration with every parameter documented
 
 ### Logging
 
@@ -192,7 +234,7 @@ Normalize a USGS GeoJSON feature or a flat JSON/table record into the common int
 
 #### `_write_event(...)` / `_write_quake_event(...)`
 
-Build and write a point in the normalized schema (tags: `event_type`, `status`, `alert`, `net`, `mag_type`; `event_id` is a string field to avoid unbounded series cardinality) or in the canonical quake schema (no tags). Millisecond-aligned timestamps get a stable per-event sub-millisecond offset so same-millisecond events stay distinct.
+Build and write a point in the normalized schema (tags: `event_type`, `status`, `alert`, `net`, `mag_type`; `event_id` is a string field to avoid unbounded series cardinality) or in the canonical quake schema (no tags). Fields the source does not supply are left out of the point rather than written as empty values, and an event with no usable field at all is skipped and logged. Millisecond-aligned timestamps get a stable per-event sub-millisecond offset so same-millisecond events stay distinct.
 
 ## Troubleshooting
 
@@ -215,7 +257,11 @@ curl -H "User-Agent: test" https://earthquake.usgs.gov/earthquakes/feed/v1.0/sum
 
 #### Issue: `Invalid configuration` error in logs
 
-**Solution**: A trigger argument has an invalid value (unknown `feed` key, non-numeric `min_magnitude`, unrecognized boolean, and so on). The error message names the argument; the run aborts rather than proceeding with a silent fallback.
+**Solution**: A trigger argument has an invalid value (unknown `feed` key, non-numeric `min_magnitude`, unrecognized boolean, `max_events` below 1, and so on). The message quotes the offending value; the run aborts rather than proceeding with a silent fallback. Booleans accept `true/false`, `yes/no`, `on/off`, and `1/0`.
+
+#### Issue: `Source table ... not found in the trigger database`
+
+**Solution**: `source_type=influxdb_table` checks that `source_table` exists before querying it. Verify the name with `influxdb3 query --database YOUR_DATABASE "SHOW TABLES"`, or supply an explicit `source_query`, which bypasses the check.
 
 #### Issue: Log summary shows `written=0` with a nonzero `skipped` count
 

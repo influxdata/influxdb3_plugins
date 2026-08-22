@@ -35,7 +35,7 @@
         {
             "name": "source_query",
             "example": "SELECT * FROM quake WHERE time >= now() - INTERVAL '15 minutes' ORDER BY time DESC LIMIT 500",
-            "description": "Optional SQL query override used when `source_type=influxdb_table`.",
+            "description": "Optional SQL query override used when `source_type=influxdb_table`. Trigger arguments are comma-separated, so a query containing commas must be supplied through `config_file_path` instead.",
             "required": false
         },
         {
@@ -92,6 +92,12 @@
             "example": "false",
             "description": "When true, full exception messages are logged. When false (default), only exception types are logged.",
             "required": false
+        },
+        {
+            "name": "config_file_path",
+            "example": "earthquake_sampler_config_scheduler.toml",
+            "description": "Path to a TOML configuration file, relative to the plugin directory. Values in the file override the inline trigger arguments.",
+            "required": false
         }
     ]
 }
@@ -106,6 +112,11 @@ from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.introspection import get_table_names
+from influxdata_plugin_utils.parsing import parse_bool, parse_int
+from influxdata_plugin_utils.write import build_line_typed, write_data
 
 
 # At server runtime LineBuilder is injected as a builtin. In test environments
@@ -147,49 +158,103 @@ def _exc(e: BaseException) -> str:
     return str(e) if _ENABLE_FULL_LOGGING else type(e).__name__
 
 
-class ConfigError(ValueError):
-    """Raised when a trigger argument has an invalid value."""
+DEFAULT_USER_AGENT = "InfluxDB3-Earthquake-Plugin/1.0"
 
 
-_TRUE_STRINGS = {"1", "true", "yes", "y", "on"}
-_FALSE_STRINGS = {"0", "false", "no", "n", "off"}
+def _optional_text(raw: Any) -> str:
+    return "" if raw is None else str(raw).strip()
 
 
-def _parse_bool_arg(name: str, value: Any, default: bool) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in _TRUE_STRINGS:
-        return True
-    if text in _FALSE_STRINGS:
-        return False
-    raise ConfigError(f"{name} must be a boolean (true/false), got '{value}'")
+def _text_or(default: str):
+    """Build a cast that falls back to `default` for empty or missing text."""
+
+    def cast(raw: Any) -> str:
+        return _optional_text(raw) or default
+
+    return cast
 
 
-def _parse_float_arg(name: str, value: Any, default: Optional[float]) -> Optional[float]:
-    if value is None:
-        return default
+def _choice_or(default: str):
+    """Cast for `is_in` arguments: normalize case, fall back to `default` when empty."""
+
+    def cast(raw: Any) -> str:
+        return _optional_text(raw).lower() or default
+
+    return cast
+
+
+def _finite_float(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError(f"must be a finite number, got {raw!r}")
+    return value
+
+
+def _positive_int(raw: Any) -> int:
+    return parse_int(raw, minimum=1)
+
+
+_VALIDATORS = [
+    Validator("feed", default="all_hour", cast=_choice_or("all_hour"), is_in=sorted(FEED_URLS)),
+    Validator("source_url", default="", cast=_optional_text),
+    Validator(
+        "source_type",
+        default="http",
+        cast=_choice_or("http"),
+        is_in=["http", "influxdb_table"],
+    ),
+    Validator(
+        "source_format",
+        default="usgs_geojson",
+        cast=_choice_or("usgs_geojson"),
+        is_in=["usgs_geojson", "flat_json"],
+    ),
+    Validator("source_table", default="quake", cast=_text_or("quake")),
+    Validator("source_query", default="", cast=_optional_text),
+    Validator("lookback_minutes", default=15, cast=_positive_int),
+    Validator("measurement", default="earthquakes", cast=_text_or("earthquakes")),
+    Validator("write_quake_schema", default=False, cast=parse_bool),
+    Validator("min_magnitude", default=None, cast=_finite_float),
+    Validator("max_events", default=250, cast=_positive_int),
+    Validator("use_event_timestamp", default=True, cast=parse_bool),
+    Validator("skip_unchanged", default=True, cast=parse_bool),
+    Validator("user_agent", default=DEFAULT_USER_AGENT, cast=_text_or(DEFAULT_USER_AGENT)),
+    Validator("enable_full_logging", default=False, cast=parse_bool),
+]
+
+
+def _load_config(influxdb3_local, args: Optional[Dict[str, Any]], task_id: str) -> Optional[Dict[str, Any]]:
+    """Load and validate the trigger configuration.
+
+    Returns:
+        Config keyed by lower-case name, or None when the inline arguments
+        themselves are invalid.
+    """
+    args = args or {}
+    config_file_path = args.get("config_file_path")
+    if config_file_path and not str(config_file_path).endswith(".toml"):
+        influxdb3_local.error(f"[{task_id}] Invalid config file format: expected a .toml file")
+        config_file_path = None
+
     try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        raise ConfigError(f"{name} must be a number, got '{value}'")
-    if not math.isfinite(parsed):
-        raise ConfigError(f"{name} must be finite, got '{value}'")
-    return parsed
+        loaded = load_plugin_config(args, validators=_VALIDATORS, source="args")
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Invalid configuration: {e}")
+        return None
 
+    if config_file_path:
+        try:
+            loaded = load_plugin_config(args, validators=_VALIDATORS, source="merge")
+            influxdb3_local.info(f"[{task_id}] Loaded configuration from {config_file_path}")
+        except Exception as e:
+            influxdb3_local.error(
+                f"[{task_id}] Failed to apply config file '{config_file_path}': {_exc(e)}. "
+                f"Continuing with inline arguments"
+            )
 
-def _parse_int_arg(name: str, value: Any, default: int, minimum: int) -> int:
-    if value is None:
-        return default
-    try:
-        parsed = int(str(value).strip())
-    except (TypeError, ValueError):
-        raise ConfigError(f"{name} must be an integer, got '{value}'")
-    if parsed < minimum:
-        raise ConfigError(f"{name} must be >= {minimum}, got {parsed}")
-    return parsed
+    return {key.lower(): value for key, value in loaded.as_dict().items()}
 
 
 def _redact_url(url: str) -> str:
@@ -217,19 +282,29 @@ def _safe_tag(value: Any, fallback: str = "unknown") -> str:
     return out.replace(",", " ").replace("=", " ")
 
 
-def _safe_string(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value)
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _to_ns_from_ms(ms: Any) -> Optional[int]:
-    if ms is None:
+    """Convert epoch milliseconds to nanoseconds on an exact integer path."""
+    if ms is None or isinstance(ms, bool):
         return None
-    try:
-        return int(float(ms) * 1_000_000)
-    except (TypeError, ValueError):
-        return None
+    if not isinstance(ms, (int, float)):
+        text = str(ms).strip()
+        if not text:
+            return None
+        try:
+            ms = int(text)
+        except ValueError:
+            try:
+                ms = float(text)
+            except ValueError:
+                return None
+    if isinstance(ms, float):
+        if not math.isfinite(ms):
+            return None
+        return int(round(ms * 1_000)) * 1_000
+    return ms * 1_000_000
 
 
 def _to_ns_from_iso(ts: Any) -> Optional[int]:
@@ -244,9 +319,10 @@ def _to_ns_from_iso(ts: Any) -> Optional[int]:
             dt = dt.replace(tzinfo=timezone.utc)
         else:
             dt = dt.astimezone(timezone.utc)
-        return int(dt.timestamp() * 1_000_000_000)
     except Exception:
         return None
+    delta = dt - _EPOCH
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
 
 
 
@@ -310,19 +386,13 @@ def _get_cached_int(influxdb3_local, key: str) -> Optional[int]:
 
 
 def _to_update_marker_ms(event: Dict[str, Any]) -> int:
-    raw = event.get("updated_ms")
-    if raw is not None:
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            pass
-    ts_ns = event.get("event_time_ns")
-    if ts_ns is not None:
-        try:
-            return int(int(ts_ns) / 1_000_000)
-        except (TypeError, ValueError):
-            pass
-    return 0
+    """Millisecond marker that detects a revised copy of the same event."""
+    marker_ns = _coerce_time_ns(event.get("updated_ms"))
+    if marker_ns is None:
+        marker_ns = _coerce_time_ns(event.get("event_time_ns"))
+    if marker_ns is None:
+        return 0
+    return marker_ns // 1_000_000
 
 
 def _fetch_payload(url: str, user_agent: str) -> Dict[str, Any]:
@@ -494,6 +564,68 @@ def _event_timestamp_ns(
     return timestamp_ns
 
 
+EVENT_FLOAT_FIELDS = (
+    "magnitude",
+    "depth_km",
+    "longitude",
+    "latitude",
+    "gap_degrees",
+    "distance_km",
+    "rms",
+    "mmi",
+    "depth_error",
+    "horizontal_error",
+    "mag_error",
+)
+
+EVENT_INT_FIELDS = (
+    "significance",
+    "felt_reports",
+    "tsunami",
+    "nst",
+    "mag_nst",
+    "updated_ms",
+)
+
+EVENT_STRING_FIELDS = (
+    "event_id",
+    "place",
+    "title",
+    "url",
+    "location_source",
+    "mag_source",
+)
+
+
+def _float_or_none(raw: Any) -> Optional[float]:
+    """Coerce to a finite float, or None so the field is left out of the line."""
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _int_or_none(raw: Any) -> Optional[int]:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _write_line(influxdb3_local, line) -> None:
+    """Write one line via write_sync, which raises inline so the caller can count it.
+
+    Retries stay off: a rejected line should be reported at once rather than
+    sleeping through a backoff for every event in the run.
+    """
+    write_data(influxdb3_local, [line], batch=False, retries=0, no_sync=True)
+
+
 def _write_event(
     influxdb3_local,
     measurement: str,
@@ -503,70 +635,30 @@ def _write_event(
 ) -> bool:
     timestamp_ns = _event_timestamp_ns(event, fallback_ts_ns, use_event_timestamp)
 
-    line = LineBuilder(measurement).time_ns(timestamp_ns)
-    line.tag("event_type", _safe_tag(event.get("event_type"), "earthquake"))
-    line.tag("status", _safe_tag(event.get("status"), "unknown"))
-    line.tag("alert", _safe_tag(event.get("alert"), "none"))
-    line.tag("net", _safe_tag(event.get("net"), "unknown"))
-    line.tag("mag_type", _safe_tag(event.get("mag_type"), "unknown"))
+    typed_fields: Dict[str, Any] = {
+        name: (_float_or_none(event.get(name)), "float") for name in EVENT_FLOAT_FIELDS
+    }
+    typed_fields.update(
+        {name: (_int_or_none(event.get(name)), "int") for name in EVENT_INT_FIELDS}
+    )
+    typed_fields.update(
+        {name: (event.get(name), "string") for name in EVENT_STRING_FIELDS}
+    )
 
-    for field_name in (
-        "magnitude",
-        "depth_km",
-        "longitude",
-        "latitude",
-        "gap_degrees",
-        "distance_km",
-        "rms",
-        "mmi",
-        "depth_error",
-        "horizontal_error",
-        "mag_error",
-    ):
-        raw = event.get(field_name)
-        if raw is None:
-            continue
-        try:
-            val = float(raw)
-            if math.isfinite(val):
-                line.float64_field(field_name, val)
-        except (TypeError, ValueError):
-            continue
-
-    for field_name in (
-        "significance",
-        "felt_reports",
-        "tsunami",
-        "nst",
-        "mag_nst",
-    ):
-        raw = event.get(field_name)
-        if raw is None:
-            continue
-        try:
-            line.int64_field(field_name, int(raw))
-        except (TypeError, ValueError):
-            continue
-
-    updated_ms = event.get("updated_ms")
-    if updated_ms is not None:
-        try:
-            line.int64_field("updated_ms", int(updated_ms))
-        except (TypeError, ValueError):
-            pass
-
-    line.string_field("event_id", _safe_string(event.get("event_id")))
-    line.string_field("place", _safe_string(event.get("place")))
-    line.string_field("title", _safe_string(event.get("title")))
-    line.string_field("url", _safe_string(event.get("url")))
-    for field_name in ("location_source", "mag_source"):
-        raw = event.get(field_name)
-        if raw is not None:
-            line.string_field(field_name, _safe_string(raw))
-
-    # Buffered write() only flushes after the trigger returns, so a failed
-    # write could never be caught or counted here; write_sync raises inline.
-    influxdb3_local.write_sync(line, no_sync=True)
+    line = build_line_typed(
+        LineBuilder,
+        measurement,
+        tags={
+            "event_type": _safe_tag(event.get("event_type"), "earthquake"),
+            "status": _safe_tag(event.get("status"), "unknown"),
+            "alert": _safe_tag(event.get("alert"), "none"),
+            "net": _safe_tag(event.get("net"), "unknown"),
+            "mag_type": _safe_tag(event.get("mag_type"), "unknown"),
+        },
+        typed_fields=typed_fields,
+        time_ns=timestamp_ns,
+    )
+    _write_line(influxdb3_local, line)
     return True
 
 
@@ -607,24 +699,24 @@ def _write_quake_event(
     """Write a normalized USGS event to a table using only the canonical quake schema."""
     timestamp_ns = _event_timestamp_ns(event, fallback_ts_ns, use_event_timestamp)
 
-    line = LineBuilder(measurement).time_ns(timestamp_ns)
-    for column, event_key in QUAKE_FLOAT_COLUMN_MAP.items():
-        value = event.get(event_key)
-        if value is None:
-            continue
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(numeric):
-            line.float64_field(column, numeric)
+    typed_fields: Dict[str, Any] = {
+        column: (_float_or_none(event.get(event_key)), "float")
+        for column, event_key in QUAKE_FLOAT_COLUMN_MAP.items()
+    }
+    typed_fields.update(
+        {
+            column: (event.get(event_key), "string")
+            for column, event_key in QUAKE_STRING_COLUMN_MAP.items()
+        }
+    )
 
-    for column, event_key in QUAKE_STRING_COLUMN_MAP.items():
-        value = event.get(event_key)
-        if value is not None:
-            line.string_field(column, _safe_string(value))
-
-    influxdb3_local.write_sync(line, no_sync=True)
+    line = build_line_typed(
+        LineBuilder,
+        measurement,
+        typed_fields=typed_fields,
+        time_ns=timestamp_ns,
+    )
+    _write_line(influxdb3_local, line)
     return True
 
 
@@ -635,40 +727,33 @@ def process_scheduled_call(
     args: Optional[Dict[str, Any]] = None,
 ) -> None:
     task_id = str(uuid.uuid4())
-    args = args or {}
 
     global _ENABLE_FULL_LOGGING
     try:
-        _ENABLE_FULL_LOGGING = _parse_bool_arg(
-            "enable_full_logging", args.get("enable_full_logging"), False
-        )
+        _ENABLE_FULL_LOGGING = parse_bool((args or {}).get("enable_full_logging", False))
+    except ValueError:
+        _ENABLE_FULL_LOGGING = False
 
-        source_type = _safe_string(args.get("source_type", "http")).lower() or "http"
-        if source_type not in {"http", "influxdb_table"}:
-            raise ConfigError(f"source_type must be 'http' or 'influxdb_table', got '{source_type}'")
-
-        source_url = _safe_string(args.get("source_url"))
-        source_format = _safe_string(args.get("source_format", "usgs_geojson")).lower() or "usgs_geojson"
-        if source_format not in {"usgs_geojson", "flat_json"}:
-            raise ConfigError(f"source_format must be 'usgs_geojson' or 'flat_json', got '{source_format}'")
-
-        feed = _safe_string(args.get("feed", "all_hour"))
-        if feed not in FEED_URLS:
-            raise ConfigError(f"unknown feed '{feed}'; valid keys: {', '.join(sorted(FEED_URLS))}")
-
-        source_table = _safe_string(args.get("source_table", "quake")) or "quake"
-        source_query = _safe_string(args.get("source_query"))
-        lookback_minutes = _parse_int_arg("lookback_minutes", args.get("lookback_minutes"), 15, minimum=1)
-
-        measurement = _safe_string(args.get("measurement", "earthquakes")) or "earthquakes"
-        write_quake_schema = _parse_bool_arg("write_quake_schema", args.get("write_quake_schema"), False)
-        min_magnitude = _parse_float_arg("min_magnitude", args.get("min_magnitude"), None)
-        max_events = _parse_int_arg("max_events", args.get("max_events"), 250, minimum=1)
-        use_event_timestamp = _parse_bool_arg("use_event_timestamp", args.get("use_event_timestamp"), True)
-        skip_unchanged = _parse_bool_arg("skip_unchanged", args.get("skip_unchanged"), True)
-    except ConfigError as e:
-        influxdb3_local.error(f"[{task_id}] Invalid configuration: {e}")
+    config = _load_config(influxdb3_local, args, task_id)
+    if config is None:
         return
+
+    _ENABLE_FULL_LOGGING = config["enable_full_logging"]
+
+    source_type: str = config["source_type"]
+    source_url: str = config["source_url"]
+    source_format: str = config["source_format"]
+    feed: str = config["feed"]
+    source_table: str = config["source_table"]
+    source_query: str = config["source_query"]
+    lookback_minutes: int = config["lookback_minutes"]
+    measurement: str = config["measurement"]
+    write_quake_schema: bool = config["write_quake_schema"]
+    min_magnitude: Optional[float] = config["min_magnitude"]
+    max_events: int = config["max_events"]
+    use_event_timestamp: bool = config["use_event_timestamp"]
+    skip_unchanged: bool = config["skip_unchanged"]
+    user_agent: str = config["user_agent"]
 
     if write_quake_schema and not use_event_timestamp:
         # Quake-schema rows have no tags, so a shared trigger timestamp would
@@ -678,7 +763,6 @@ def process_scheduled_call(
             f"using event timestamps to keep events distinct"
         )
         use_event_timestamp = True
-    user_agent = _safe_string(args.get("user_agent", "InfluxDB3-Earthquake-Plugin/1.0")) or "InfluxDB3-Earthquake-Plugin/1.0"
 
     # Display name for logs: URLs are stripped of userinfo/query string and
     # custom SQL is truncated so credentials or literals stay out of the logs.
@@ -691,6 +775,19 @@ def process_scheduled_call(
 
     items: List[Dict[str, Any]] = []
     if source_type == "influxdb_table":
+        if not source_query:
+            # Uncached: a cached list would keep rejecting a table created later.
+            try:
+                table_names = get_table_names(influxdb3_local, use_cache=False)
+            except Exception as e:
+                influxdb3_local.error(f"[{task_id}] Failed to list tables: {_exc(e)}")
+                return
+            if source_table not in table_names:
+                influxdb3_local.error(
+                    f"[{task_id}] Source table '{source_table}' not found in the trigger database"
+                )
+                return
+
         watermark_key = _table_watermark_key(measurement, source_table)
         use_watermark = skip_unchanged and not source_query.strip()
         watermark_ns = _get_cached_int(influxdb3_local, watermark_key) if use_watermark else None
@@ -803,7 +900,10 @@ def process_scheduled_call(
                     influxdb3_local.cache.put(marker_key, marker, ttl=EVENT_MARKER_TTL_SECONDS)
         except Exception as e:
             skipped += 1
-            influxdb3_local.error(f"[{task_id}] Failed to write earthquake event: {_exc(e)}")
+            influxdb3_local.error(
+                f"[{task_id}] Failed to write earthquake event "
+                f"'{event.get('event_id')}': {_exc(e)}"
+            )
 
     influxdb3_local.info(
         f"[{task_id}] Earthquake sampler complete: "

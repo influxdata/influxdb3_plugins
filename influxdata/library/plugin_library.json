@@ -402,8 +402,8 @@
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/earthquake_sampler/README.md",
                 "required_plugins": [],
-                "required_libraries": [],
-                "last_update": "2026-08-21",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0"],
+                "last_update": "2026-08-22",
                 "trigger_types_supported": ["scheduler"]
             }
         ]

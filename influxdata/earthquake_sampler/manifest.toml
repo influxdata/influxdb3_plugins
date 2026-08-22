@@ -16,3 +16,4 @@ exclude = [
 
 [dependencies]
 database_version = ">=3.8.2"
+python = ["influxdata-plugin-utils>=0.3.0"]

@@ -17,7 +17,7 @@
             {
                 "name": "Forecast Error Evaluator",
                 "path": "influxdata/forecast_error_evaluator/forecast_error_evaluator.py",
-                "description": "Evaluates the accuracy of forecast models by comparing predicted values with actual observations. Computes error metrics (MSE, MAE, RMSE) and detects anomalies based on elevated errors with multi-channel notifications.",
+                "description": "Evaluates the accuracy of forecast models by comparing predicted values with actual observations. Computes per-timestamp error metrics (MSE, MAE, RMSE, MAPE, SMAPE) and detects anomalies based on elevated errors with multi-channel notifications.",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/forecast_error_evaluator/README.md",
                 "required_plugins": [
@@ -26,8 +26,8 @@
                         "path": "influxdata/notifier/notifier_plugin.py"
                     }
                 ],
-                "required_libraries": ["pandas", "requests"],
-                "last_update": "2025-07-18",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0", "pandas", "requests"],
+                "last_update": "2026-08-23",
                 "trigger_types_supported": ["scheduler"]
             },
             {

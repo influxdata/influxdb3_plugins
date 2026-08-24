@@ -1,0 +1,19 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "earthquake_sampler"
+version = "0.1.0"
+description = "Ingests USGS earthquake events on a schedule and writes normalized records for dashboards and alerting, with optional canonical quake-schema output."
+triggers = ["process_scheduled_call"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/earthquake_sampler"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/earthquake_sampler/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!earthquake_sampler.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = ["influxdata-plugin-utils>=0.3.0"]

@@ -1,7 +1,7 @@
 {
     "plugin_library": {
         "version": "1.0.0",
-        "last_updated": "2026-07-14T00:00:00+00:00",
+        "last_updated": "2026-08-21T00:00:00+00:00",
         "plugins": [
             {
                 "name": "Downsampler",
@@ -394,6 +394,17 @@
                 "required_libraries": ["influxdb3-python"],
                 "last_update": "2026-06-24",
                 "trigger_types_supported": ["scheduler", "data_writes"]
+            },
+            {
+                "name": "Earthquake Sampler",
+                "path": "influxdata/earthquake_sampler/earthquake_sampler.py",
+                "description": "[BETA] Ingests USGS earthquake events on a schedule and writes normalized records for dashboards and alerting, with optional canonical quake-schema output.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/earthquake_sampler/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0"],
+                "last_update": "2026-08-22",
+                "trigger_types_supported": ["scheduler"]
             }
         ]
     }

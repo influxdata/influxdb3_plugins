@@ -1,0 +1,65 @@
+# Earthquake Sampler plugin configuration for a scheduled trigger.
+# Use via the config_file_path trigger argument (path relative to PLUGIN_DIR).
+# Values set here override the inline --trigger-arguments.
+
+########## Required ##########
+# None. The defaults ingest the USGS all_hour feed into the `earthquakes`
+# measurement, so every line below is commented out — uncomment what you need.
+
+########## Source ##########
+# USGS GeoJSON feed key: all, significant, 4.5, 2.5 or 1.0, combined with
+# _hour, _day, _week or _month. Default: "all_hour".
+#feed = "all_day"
+# Data source: http (default) fetches `feed` or `source_url`; influxdb_table
+# queries an existing table in the trigger database.
+#source_type = "influxdb_table"
+# Custom JSON endpoint, http or https only. Overrides `feed`.
+#source_url = "https://example.com/earthquakes.json"
+# Parser for HTTP sources: usgs_geojson (default) or flat_json, the latter for
+# records like {id, latitude, longitude, mag, time, ...}.
+#source_format = "flat_json"
+# Source table when source_type = "influxdb_table". Default: "quake".
+#source_table = "quake"
+# SQL override for influxdb_table mode; disables watermark paging and the
+# source-table existence check. A query containing commas can only be given
+# here, not through --trigger-arguments. The single-quoted TOML string keeps
+# the double quotes that case-sensitive column names require.
+#source_query = 'SELECT time, id, mag, depth, "magType", net, updated FROM quake ORDER BY time DESC LIMIT 500'
+# Initial lookback window for influxdb_table mode, in minutes, at least 1.
+# Later runs page forward from the cached fetch watermark. Default: 15.
+#lookback_minutes = 60
+
+########## Destination ##########
+# Destination measurement. Default: "earthquakes".
+#measurement = "earthquakes"
+# Write using the canonical quake table's column names: no tags, every numeric
+# column as float64. Use with measurement = "quake". Default: false.
+#write_quake_schema = true
+# Use the event time as the point timestamp; false uses the trigger execution
+# time. Forced true when write_quake_schema = true. Default: true.
+#use_event_timestamp = true
+
+########## Filtering ##########
+# Minimum magnitude. Omit to ingest everything, including negative-magnitude
+# microseisms and events with no magnitude at all. Default: no filtering.
+#min_magnitude = 2.5
+# Maximum events written per run, at least 1. Events deferred by the cap stay
+# uncached and are written on a later run. Default: 250.
+#max_events = 250
+# Skip events whose update marker is not newer than the last written copy of
+# the same event. Default: true.
+#skip_unchanged = true
+
+########## Misc ##########
+# User-Agent header for HTTP requests.
+#user_agent = "InfluxDB3-Earthquake-Plugin/1.0"
+# Log full exception messages instead of only exception types. Default: false.
+#enable_full_logging = false
+
+###### Example: create a trigger using this config ######
+# influxdb3 create trigger \
+#   --database [YOUR_DATABASE] \
+#   --path earthquake_sampler.py \
+#   --trigger-spec "every:[DURATION e.g. 2m, 5m, 1h]" \
+#   --trigger-arguments config_file_path=earthquake_sampler_config_scheduler.toml \
+#   earthquake_sampler_trigger

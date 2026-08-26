@@ -90,8 +90,8 @@
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/prophet_forecasting/README.md",
                 "required_plugins": [],
-                "required_libraries": ["pandas", "requests", "prophet", "numpy"],
-                "last_update": "2025-06-25",
+                "required_libraries": ["influxdata-plugin-utils>=0.3.0", "pandas", "requests", "prophet"],
+                "last_update": "2026-08-26",
                 "trigger_types_supported": ["http", "scheduler"]
             },
             {

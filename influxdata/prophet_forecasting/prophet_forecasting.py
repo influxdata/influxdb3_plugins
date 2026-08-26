@@ -17,19 +17,19 @@
         {
             "name": "window",
             "example": "30d",
-            "description": "Historical window duration for training data. Format: <number><unit> where unit is s, min, h, d, w, m, q, y.",
+            "description": "Historical window duration for training data. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m (30.42d), q (91.25d), y (365d).",
             "required": true
         },
         {
             "name": "forecast_horizont",
             "example": "2d",
-            "description": "Future duration to forecast. Format: <number><unit> where unit is s, min, h, d, w, m, q, y.",
+            "description": "Future duration to forecast. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m, q, y.",
             "required": true
         },
         {
             "name": "tag_values",
             "example": "region:us-west.device:sensor1",
-            "description": "Dot-separated tag filter string for querying specific tag values.",
+            "description": "Tag filters for the source query, as dot-separated 'tag:value' pairs. A TOML table such as { region = 'us-west' } is also accepted.",
             "required": true
         },
         {
@@ -41,13 +41,13 @@
         {
             "name": "model_mode",
             "example": "train",
-            "description": "Mode of operation: 'train' to train a new model, 'predict' to use an existing one or train if not found.",
+            "description": "Mode of operation: 'train' to train a new in-memory model on every run, 'predict' to load the saved model or train and save it when no file exists.",
             "required": true
         },
         {
             "name": "unique_suffix",
             "example": "20250619_v1",
-            "description": "Unique identifier for model versioning and storage.",
+            "description": "Model version identifier, also used as the file name suffix. Up to 64 characters from letters, digits, '.', '_' and '-'.",
             "required": true
         },
         {
@@ -59,43 +59,49 @@
         {
             "name": "changepoint_prior_scale",
             "example": "0.05",
-            "description": "Flexibility of trend changepoints. Defaults to 0.05.",
+            "description": "Flexibility of trend changepoints, must be greater than 0. Defaults to 0.05.",
             "required": false
         },
         {
             "name": "changepoints",
             "example": "2025-01-01 2025-06-01",
-            "description": "Space-separated list of changepoint dates (ISO format).",
+            "description": "Space-separated list of changepoint dates (ISO format). A TOML or JSON list is also accepted.",
             "required": false
         },
         {
             "name": "holiday_date_list",
             "example": "2025-01-01 2025-12-25",
-            "description": "Space-separated list of custom holiday dates (ISO format).",
+            "description": "Space-separated list of custom holiday dates (ISO format). A TOML or JSON list is also accepted.",
             "required": false
         },
         {
             "name": "holiday_names",
             "example": "New Year.Christmas",
-            "description": "Dot-separated list of names corresponding to the holiday dates.",
+            "description": "Dot-separated list of names matching holiday_date_list. A TOML or JSON list is also accepted.",
             "required": false
         },
         {
             "name": "holiday_country_names",
-            "example": "US.UK",
-            "description": "Dot-separated list of country codes for built-in holidays.",
+            "example": "US",
+            "description": "Country code for built-in holidays, as a dot-separated string or a TOML list. Prophet supports one country, so only the first entry is used.",
             "required": false
         },
         {
             "name": "inferred_freq",
             "example": "1D",
-            "description": "Manually specified frequency (e.g., '1D', '1H'). If not provided, frequency is inferred from data.",
+            "description": "Manually specified pandas frequency alias, fixed ('30min', '1h', '1s') or calendar ('D', 'W-SUN', 'MS', 'QS'). If not provided, frequency is inferred from data.",
             "required": false
         },
         {
             "name": "validation_window",
             "example": "3d",
-            "description": "Duration for validation window. Defaults to '0s' (no validation). Format: <number><unit>.",
+            "description": "Duration held back from training and used to validate the forecast. Defaults to '0s' (no validation).",
+            "required": false
+        },
+        {
+            "name": "validation_alignment",
+            "example": "nearest",
+            "description": "How actual and forecasted values are paired during validation: 'position' (default) pairs them in time order, 'nearest' pairs each actual value with the closest forecast point within half a frequency step.",
             "required": false
         },
         {
@@ -105,9 +111,15 @@
             "required": false
         },
         {
+            "name": "max_forecast_points",
+            "example": "10000",
+            "description": "Maximum number of forecast points per run, counting the validation window. Defaults to 10000.",
+            "required": false
+        },
+        {
             "name": "target_database",
             "example": "forecast_db",
-            "description": "Optional InfluxDB database name for writing forecast results.",
+            "description": "Database for forecast results. Defaults to a database named 'default', which is created on first write.",
             "required": false
         },
         {
@@ -119,31 +131,31 @@
         {
             "name": "notification_text",
             "example": "Validation failed for prophet model:$version on table:$measurement, field:$field for period from $start_time to $end_time, forecast not written to table:$output_measurement",
-            "description": "Templated text for alert message. Variables like $version, $measurement can be used.",
+            "description": "Templated text for the alert message. Supported variables: $version, $measurement, $field, $start_time, $end_time, $output_measurement.",
             "required": false
         },
         {
             "name": "senders",
             "example": "slack",
-            "description": "Dot-separated list of sender types (e.g., 'slack.sms').",
+            "description": "Dot-separated list of sender types (e.g., 'slack.sms'). Required when is_sending_alert is true.",
             "required": false
         },
         {
             "name": "notification_path",
             "example": "notify",
-            "description": "URL path for posting the alert. Defaults to 'notify'.",
+            "description": "URL path of the notification sender plugin. Defaults to 'notify'.",
             "required": false
         },
         {
             "name": "influxdb3_auth_token",
             "example": "your_token",
-            "description": "Authentication token for sending notifications. If not provided, uses INFLUXDB3_AUTH_TOKEN environment variable.",
+            "description": "Authentication token for sending notifications. If not provided, uses the INFLUXDB3_AUTH_TOKEN environment variable.",
             "required": false
         },
         {
             "name": "port_override",
             "example": "8182",
-            "description": "Optional custom port for notification dispatch (1–65535). Defaults to 8181.",
+            "description": "Custom port for notification dispatch (1-65535). Defaults to 8181.",
             "required": false
         },
         {
@@ -155,7 +167,7 @@
         {
             "name": "slack_headers",
             "example": "eyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vanNvbiJ9",
-            "description": "Optional headers as base64-encoded string for HTTP notifications.",
+            "description": "Optional base64-encoded headers for the Slack webhook.",
             "required": false
         },
         {
@@ -165,9 +177,9 @@
             "required": false
         },
         {
-            "name": "slack_headers",
+            "name": "discord_headers",
             "example": "eyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vanNvbiJ9",
-            "description": "Optional headers as base64-encoded string for HTTP notifications.",
+            "description": "Optional base64-encoded headers for the Discord webhook.",
             "required": false
         },
         {
@@ -179,7 +191,7 @@
         {
             "name": "http_headers",
             "example": "eyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vanNvbiJ9",
-            "description": "Optional headers as base64-encoded string for HTTP notifications.",
+            "description": "Optional base64-encoded headers for the HTTP webhook.",
             "required": false
         },
         {
@@ -208,8 +220,136 @@
         },
         {
             "name": "config_file_path",
-            "example": "config.toml",
-            "description": "Path to config file to override args. Format: 'config.toml'.",
+            "example": "prophet_forecasting_scheduler.toml",
+            "description": "Path to a TOML file supplying all parameters, relative to PLUGIN_DIR. When set, the file replaces the inline trigger arguments.",
+            "required": false
+        }
+    ],
+    "http_body_config": [
+        {
+            "name": "measurement",
+            "example": "temperature",
+            "description": "The InfluxDB measurement to query for historical data.",
+            "required": true
+        },
+        {
+            "name": "field",
+            "example": "value",
+            "description": "The field name within the measurement to forecast.",
+            "required": true
+        },
+        {
+            "name": "forecast_horizont",
+            "example": "7d",
+            "description": "Future duration to forecast. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m, q, y.",
+            "required": true
+        },
+        {
+            "name": "tag_values",
+            "example": "{'region': 'us-west', 'device': 'sensor1'}",
+            "description": "Tag filters for the source query, as a JSON object. The dot-separated 'tag:value' string form is also accepted.",
+            "required": true
+        },
+        {
+            "name": "target_measurement",
+            "example": "temperature_forecast",
+            "description": "Destination measurement for storing forecast results.",
+            "required": true
+        },
+        {
+            "name": "unique_suffix",
+            "example": "20250619_v1",
+            "description": "Model version identifier, also used as the file name suffix. Up to 64 characters from letters, digits, '.', '_' and '-'.",
+            "required": true
+        },
+        {
+            "name": "start_time",
+            "example": "2025-05-20T00:00:00Z",
+            "description": "Start of the historical window, ISO 8601 with timezone.",
+            "required": true
+        },
+        {
+            "name": "end_time",
+            "example": "2025-06-19T00:00:00Z",
+            "description": "End of the historical window, ISO 8601 with timezone. Forecast points are written from this moment onward.",
+            "required": true
+        },
+        {
+            "name": "save_mode",
+            "example": "true",
+            "description": "When true, load the saved model for unique_suffix or train and save it when no file exists. Defaults to false, which trains an in-memory model per request.",
+            "required": false
+        },
+        {
+            "name": "seasonality_mode",
+            "example": "additive",
+            "description": "Prophet seasonality mode ('additive' or 'multiplicative'). Defaults to 'additive'.",
+            "required": false
+        },
+        {
+            "name": "changepoint_prior_scale",
+            "example": "0.05",
+            "description": "Flexibility of trend changepoints, must be greater than 0. Defaults to 0.05.",
+            "required": false
+        },
+        {
+            "name": "changepoints",
+            "example": "['2025-01-01', '2025-06-01']",
+            "description": "Changepoint dates (ISO format) as a JSON list or a space-separated string.",
+            "required": false
+        },
+        {
+            "name": "holiday_date_list",
+            "example": "['2025-07-04']",
+            "description": "Custom holiday dates (ISO format) as a JSON list or a space-separated string.",
+            "required": false
+        },
+        {
+            "name": "holiday_names",
+            "example": "['Independence Day']",
+            "description": "Names matching holiday_date_list, as a JSON list or a dot-separated string.",
+            "required": false
+        },
+        {
+            "name": "holiday_country_names",
+            "example": "['US']",
+            "description": "Country code for built-in holidays, as a JSON list or a dot-separated string. Prophet supports one country, so only the first entry is used.",
+            "required": false
+        },
+        {
+            "name": "inferred_freq",
+            "example": "1D",
+            "description": "Manually specified pandas frequency alias, fixed ('30min', '1h', '1s') or calendar ('D', 'W-SUN', 'MS', 'QS'). If not provided, frequency is inferred from data.",
+            "required": false
+        },
+        {
+            "name": "validation_window",
+            "example": "3d",
+            "description": "Duration held back from training and used to validate the forecast. Defaults to '0s' (no validation).",
+            "required": false
+        },
+        {
+            "name": "validation_alignment",
+            "example": "nearest",
+            "description": "How actual and forecasted values are paired during validation: 'position' (default) pairs them in time order, 'nearest' pairs each actual value with the closest forecast point within half a frequency step.",
+            "required": false
+        },
+        {
+            "name": "msre_threshold",
+            "example": "0.05",
+            "description": "Maximum acceptable Mean Squared Relative Error (MSRE) for validation. Defaults to infinity (no threshold).",
+            "required": false
+        },
+        {
+            "name": "max_forecast_points",
+            "example": "10000",
+            "description": "Maximum number of forecast points per run, counting the validation window. Defaults to 10000.",
+            "required": false
+        },
+        {
+            "name": "target_database",
+            "example": "forecast_db",
+            "description": "Database for forecast results. Defaults to a database named 'default', which is created on first write.",
             "required": false
         }
     ]
@@ -217,11 +357,11 @@
 """
 
 import json
+import math
 import os
 import random
 import re
 import time
-import tomllib
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -229,9 +369,20 @@ from pathlib import Path
 from string import Template
 from urllib.parse import urlparse
 
-import numpy as np
 import pandas as pd
 import requests
+from influxdata_plugin_utils.config import (
+    Validator,
+    load_plugin_config,
+    resolve_plugin_dir,
+)
+from influxdata_plugin_utils.parsing import (
+    parse_bool,
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
+)
+from influxdata_plugin_utils.write import build_line, write_data
 from prophet import Prophet
 from prophet.serialize import model_from_json, model_to_json
 
@@ -251,461 +402,595 @@ AVAILABLE_SENDERS = {
 # Keywords to skip when validating sender args
 EXCLUDED_KEYWORDS = ["headers", "token", "sid"]
 
+# Calendar units have no fixed length, so they are approximated in days.
+CALENDAR_UNIT_DAYS = {"m": 30.42, "q": 91.25, "y": 365.0}
 
-def parse_time_interval(raw: str, task_id: str) -> timedelta:
+MODEL_DIR_NAME = "prophet_models"
+# unique_suffix becomes part of a file name, so its character set is restricted
+SAFE_SUFFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+SEASONALITY_MODES = ("additive", "multiplicative")
+MODEL_MODES = ("train", "predict")
+VALIDATION_ALIGNMENTS = ("position", "nearest")
+
+DEFAULT_MAX_FORECAST_POINTS = 10000
+
+# Database used when target_database is not configured
+DEFAULT_TARGET_DATABASE = "default"
+
+DEFAULT_NOTIFICATION_TEXT = (
+    "Validation failed for prophet model:$version on table:$measurement, field:$field "
+    "for period from $start_time to $end_time, forecast not written to "
+    "table:$output_measurement"
+)
+
+# run_forecast outcomes
+FORECAST_WRITTEN = "written"
+FORECAST_VALIDATION_FAILED = "validation_failed"
+FORECAST_FAILED = "failed"
+
+
+class ForecastError(Exception):
+    """Raised for a condition that stops the run with a message meant for the user."""
+
+
+def parse_interval(raw) -> timedelta:
     """
-    Parses the interval string from raw into a datetime.timedelta.
+    Parse an interval string ('30s', '10min', '2d', '1m', '1q', '1y') into a timedelta.
 
-    Supports time units:
-      - seconds: "s"
-      - minutes: "min"
-      - hours: "h"
-      - days: "d"
-      - weeks: "w"
-      - months: "m"      (approximate: 1 month ≈ 30.42 days)
-      - quarters: "q"    (approximate: 1 quarter ≈ 91.25 days)
-      - years: "y"       (approximate: 1 year = 365 days)
+    Supported units: us, ms, s, min, h, d, w, plus the approximate calendar units
+    m (30.42d), q (91.25d) and y (365d).
+    """
+    if isinstance(raw, timedelta):
+        return raw
+
+    match = re.fullmatch(r"\s*(\d+)\s*([a-zA-Z]+)\s*", str(raw))
+    if match and match.group(2).lower() in CALENDAR_UNIT_DAYS:
+        magnitude: int = int(match.group(1))
+        unit: str = match.group(2).lower()
+        days: int = int(magnitude * CALENDAR_UNIT_DAYS[unit])
+        if days < 1:
+            raise ValueError(f"Duration {raw!r} rounds down to less than one day")
+        return timedelta(days=days)
+
+    try:
+        return parse_timedelta(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid duration {raw!r} ({e}). Expected '<number><unit>', e.g. '10min', '2d', '1y'"
+        ) from e
+
+
+def parse_positive_interval(raw) -> timedelta:
+    """Parse an interval and require it to be greater than zero."""
+    interval: timedelta = parse_interval(raw)
+    if interval <= timedelta(0):
+        raise ValueError(f"Duration must be positive, got {raw!r}")
+    return interval
+
+
+def parse_unique_suffix(raw) -> str:
+    """Validate the model version suffix, which becomes part of a file name."""
+    suffix: str = str(raw).strip()
+    if not SAFE_SUFFIX_PATTERN.fullmatch(suffix) or ".." in suffix:
+        raise ValueError(
+            f"Invalid unique_suffix {raw!r}: use up to 64 characters from letters, "
+            "digits, '.', '_' and '-'"
+        )
+    return suffix
+
+
+def parse_choice(raw, name: str, allowed: tuple[str, ...]) -> str:
+    """Validate a lower-cased value against a fixed set of options."""
+    value: str = str(raw).strip().lower()
+    if value not in allowed:
+        raise ValueError(
+            f"Invalid {name} {raw!r}: expected one of {', '.join(allowed)}"
+        )
+    return value
+
+
+def parse_prior_scale(raw) -> float:
+    """Parse the changepoint prior scale, which Prophet requires to be finite and positive."""
+    value: float = float(raw)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"changepoint_prior_scale must be greater than 0, got {raw!r}")
+    return value
+
+
+def parse_msre_threshold(raw) -> float:
+    """Parse the MSRE threshold, which cannot be negative."""
+    value: float = float(raw)
+    if value < 0:
+        raise ValueError(f"msre_threshold cannot be negative, got {raw!r}")
+    return value
+
+
+def parse_freq(raw) -> str:
+    """Validate a pandas frequency alias; an empty value means 'infer from data'."""
+    freq: str = str(raw).strip()
+    if not freq:
+        return ""
+    pd.tseries.frequencies.to_offset(freq)
+    return freq
+
+
+COMMON_VALIDATORS: list = [
+    Validator("measurement", required=True, cast=str),
+    Validator("field", required=True, cast=str),
+    Validator("forecast_horizont", required=True, cast=parse_positive_interval),
+    Validator("tag_values", required=True),
+    Validator("target_measurement", required=True, cast=str),
+    Validator("unique_suffix", required=True, cast=parse_unique_suffix),
+    Validator(
+        "seasonality_mode",
+        default="additive",
+        cast=lambda raw: parse_choice(raw, "seasonality_mode", SEASONALITY_MODES),
+    ),
+    Validator("changepoint_prior_scale", default=0.05, cast=parse_prior_scale),
+    Validator("changepoints", default=""),
+    Validator("holiday_date_list", default=""),
+    Validator(
+        "holiday_names",
+        default="",
+        cast=lambda raw: parse_delimited_list(raw, sep="."),
+    ),
+    Validator(
+        "holiday_country_names",
+        default="",
+        cast=lambda raw: parse_delimited_list(raw, sep="."),
+    ),
+    Validator("inferred_freq", default="", cast=parse_freq),
+    Validator("validation_window", default="0s", cast=parse_interval),
+    Validator(
+        "validation_alignment",
+        default="position",
+        cast=lambda raw: parse_choice(
+            raw, "validation_alignment", VALIDATION_ALIGNMENTS
+        ),
+    ),
+    Validator("msre_threshold", default=float("inf"), cast=parse_msre_threshold),
+    Validator(
+        "max_forecast_points",
+        default=DEFAULT_MAX_FORECAST_POINTS,
+        cast=lambda raw: parse_int(raw, minimum=1),
+    ),
+    Validator("target_database", default="", cast=str),
+]
+
+SCHEDULED_VALIDATORS: list = COMMON_VALIDATORS + [
+    Validator("window", required=True, cast=parse_positive_interval),
+    Validator(
+        "model_mode",
+        required=True,
+        cast=lambda raw: parse_choice(raw, "model_mode", MODEL_MODES),
+    ),
+    Validator("is_sending_alert", default=False, cast=parse_bool),
+    Validator("notification_text", default=DEFAULT_NOTIFICATION_TEXT, cast=str),
+    Validator("notification_path", default="notify", cast=str),
+    Validator(
+        "port_override",
+        default=8181,
+        cast=lambda raw: parse_int(raw, minimum=1, maximum=65535),
+    ),
+]
+
+HTTP_VALIDATORS: list = COMMON_VALIDATORS + [
+    Validator("start_time", required=True, cast=str),
+    Validator("end_time", required=True, cast=str),
+    Validator("save_mode", default=False, cast=parse_bool),
+]
+
+
+def load_config(
+    args: dict | None, validators: list, *, source: str, env_keys=None
+) -> dict:
+    """
+    Load and validate the plugin configuration.
 
     Args:
-        raw (str): The interval string to be parsed.
-        task_id (str): Task identifier for logging context.
+        args (dict | None): Trigger arguments or the parsed HTTP request body.
+        validators (list): Validators for the entry point in use.
+        source (str): "toml" to read the file named by config_file_path, "args" otherwise.
+        env_keys (list[str] | None): Environment variables merged below the other layers.
 
     Returns:
-        timedelta: The parsed duration as a datetime.timedelta.
+        dict: Config values keyed by lower-case name.
 
     Raises:
-        Exception: If the format is invalid, unit unsupported.
+        ForecastError: If a required value is missing or a value fails to cast.
     """
-    unit_mapping: dict = {
-        "s": "seconds",
-        "min": "minutes",
-        "h": "hours",
-        "d": "days",
-        "w": "weeks",
-        "m": "days",  # months -> days
-        "q": "days",  # quarters -> days
-        "y": "days",  # years -> days
-    }
-    # Approximate conversions to days for month, quarter, year
-    day_conversions: dict = {
-        "m": 30.42,  # average days in a month
-        "q": 91.25,  # average days in a quarter
-        "y": 365.0,  # days in a year
-    }
-    valid_units = unit_mapping.keys()
-
-    if not isinstance(raw, str):
-        raise Exception(
-            f"[{task_id}] Invalid {raw} type: expected string like '10min', got {type(raw)}"
-        )
-
-    match = re.fullmatch(r"(\d+)([a-zA-Z]+)", raw.strip())
-    if not match:
-        raise Exception(
-            f"[{task_id}] Invalid raw format: '{raw}'. Expected format '<number><unit>', e.g. '10min', '2d'."
-        )
-
-    number_part, unit = match.groups()
     try:
-        magnitude = int(number_part)
-    except ValueError:
-        raise Exception(f"[{task_id}] Invalid number in {raw}: '{number_part}'")
+        loaded = load_plugin_config(
+            args, validators=validators, env_keys=env_keys, source=source
+        )
+    except Exception as e:
+        raise ForecastError(f"Failed to load configuration: {e}") from e
 
-    unit = unit.lower()
-    if unit not in valid_units:
-        raise Exception(f"[{task_id}] Unsupported unit '{unit}' in raw: '{raw}'")
-
-    # Build timedelta
-    if unit in day_conversions:
-        # months, quarters, years -> approximate days
-        days_approx = int(magnitude * day_conversions[unit])
-        if days_approx < 1:
-            raise Exception(
-                f"[{task_id}] Computed days < 1 for {magnitude}{unit} in raw"
-            )
-        return timedelta(days=days_approx)
-
-    # For other units, use direct timedelta arguments
-    if unit == "s":
-        return timedelta(seconds=magnitude)
-    elif unit == "min":
-        return timedelta(minutes=magnitude)
-    elif unit == "h":
-        return timedelta(hours=magnitude)
-    elif unit == "d":
-        return timedelta(days=magnitude)
-    elif unit == "w":
-        return timedelta(weeks=magnitude)
+    return {key.lower(): value for key, value in loaded.as_dict().items()}
 
 
-def generate_tag_filter_clause(tag_values: dict):
+def quote_identifier(name: str) -> str:
+    """Quote a SQL identifier, escaping embedded double quotes."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def parse_tag_values(influxdb3_local, raw, task_id: str) -> dict[str, str]:
     """
-    Generates the WHERE clause for filtering by tag values.
+    Parse tag filters from a 'tag:value.tag2:value2' string or a mapping.
 
-    Args:
-        tag_values (dict): Dictionary mapping tag names to values, or None.
+    Malformed pairs are skipped with a warning so one bad pair does not stop the run.
 
     Returns:
-        str: SQL WHERE clause string for tag filters, or empty string if tag_values is None.
+        dict[str, str]: Tag names mapped to the values to filter on.
+
+    Example:
+        >>> parse_tag_values(client, "host:server1.region:us-west", "t")
+        {'host': 'server1', 'region': 'us-west'}
     """
-    if not tag_values:
-        return ""
+    if isinstance(raw, dict):
+        tag_values = {}
+        for tag, value in raw.items():
+            if isinstance(value, (list, tuple, set, dict)):
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping tag filter '{tag}': one value per tag is supported"
+                )
+                continue
+            tag_values[str(tag)] = str(value)
+        return tag_values
 
-    sql_clause: str = ""
-    for key, value in tag_values.items():
-        sql_clause += f"AND\n\t\"{key}\" = '{value}'\n"
-    return sql_clause
+    tag_values: dict = {}
+    for pair in parse_delimited_list(raw, sep="."):
+        tag, separator, value = pair.partition(":")
+        if not separator:
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping malformed tag filter '{pair}': expected <tag>:<value>"
+            )
+            continue
+        tag_values[tag.strip()] = value.strip()
+    return tag_values
 
 
-def generate_query(
-    measurement: str,
-    field: str,
+def parse_date_list(influxdb3_local, raw, name: str, task_id: str) -> list[str] | None:
+    """
+    Parse ISO dates from a space-separated string or a list, skipping invalid entries.
+
+    Returns:
+        list[str] | None: Valid dates, or None when none remain.
+    """
+    dates: list = []
+    for item in parse_delimited_list(raw, sep=" "):
+        try:
+            datetime.fromisoformat(item)
+        except ValueError:
+            influxdb3_local.warn(f"[{task_id}] Skipping invalid {name} value '{item}'")
+            continue
+        dates.append(item)
+
+    return dates or None
+
+
+def build_where(
+    tag_values: dict, start_time: datetime, end_time: datetime
+) -> tuple[str, dict]:
+    """
+    Build the WHERE clause and bound parameters for a time window and tag filters.
+
+    Values are passed as query parameters and identifiers are quote-escaped, so a
+    quote in a tag value or column name can neither break nor inject the query.
+
+    Returns:
+        tuple[str, dict]: The clause and the parameters it references.
+    """
+    params: dict = {
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+    }
+    clause: str = "time >= $start_time AND time < $end_time"
+    for index, (tag, value) in enumerate(tag_values.items()):
+        name: str = f"tag{index}"
+        clause += f" AND {quote_identifier(tag)} = ${name}"
+        params[name] = value
+    return clause, params
+
+
+def query_series(
+    influxdb3_local,
+    config: dict,
     tag_values: dict,
     start_time: datetime,
     end_time: datetime,
-) -> str:
-    """Generate an SQL query to fetch data from InfluxDB."""
-    tag_filter_clause: str = generate_tag_filter_clause(tag_values)
-
-    return f"""
-        SELECT time AS ds, "{field}" AS y
-        FROM '{measurement}'
-        WHERE time >= '{start_time.isoformat()}'
-          AND time < '{end_time.isoformat()}'
-          {tag_filter_clause}
-        ORDER BY time
-    """
-
-
-def transform_to_influx_line(
-    data: list[dict],
-    measurement: str,
-    fields_list: list[tuple[str, str]],
-    tag_values: dict,
-) -> list[LineBuilder]:
-    """
-    Transforms data into LineBuilder objects for writing to InfluxDB.
-
-    Args:
-        data (list[dict]): List of data rows as dictionaries.
-        measurement (str): Name of the target measurement.
-        fields_list (list[tuple[str, str]]): List of tuples containing field names and aggregation functions.
-        tag_values (dict): Dictionary mapping tag names to values.
-
-    Returns:
-        list[LineBuilder]: List of LineBuilder objects ready for writing to InfluxDB.
-    """
-    builders: list = []
-
-    for row in data:
-        builder = LineBuilder(measurement)
-        timestamp: int = row["time"]
-        builder.time_ns(timestamp)
-        builder.tag("model_version", row["model_version"])
-        for tag, value in tag_values.items():
-            builder.tag(tag, value)
-
-        for field_name in fields_list:
-            value = row[field_name]
-            if isinstance(value, int):
-                builder.int64_field(field_name, value)
-            elif isinstance(value, float):
-                builder.float64_field(field_name, value)
-            else:
-                builder.string_field(field_name, str(value))
-
-        builders.append(builder)
-
-    return builders
-
-
-def write_downsampled_data(
-    influxdb3_local,
-    data: list,
-    max_retries: int,
-    target_measurement: str,
-    target_database: str | None,
     task_id: str,
-):
+) -> pd.DataFrame | None:
     """
-    Writes downsampled data to the target measurement with retry logic.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        data (list): List of LineBuilder objects to write.
-        max_retries (int): Maximum number of retry attempts for write operations.
-        target_measurement (str): Name of the target measurement.
-        target_database (str | None): Target database name, or None to use the default database.
-        task_id (str): The task ID.
+    Query one time window and return it as a Prophet-shaped frame.
 
     Returns:
-        tuple[bool, str | None, int]: Tuple containing success status, error message (if any), and number of retries.
-    """
-    retry_count: int = 0
-    record_count: int = len(data)
-    db_name: str = target_database if target_database else "default"
-    log_data: dict = {
-        "records": record_count,
-        "database": db_name,
-        "measurement": target_measurement,
-        "max_retries": max_retries,
-    }
-    influxdb3_local.info(f"[{task_id}] Preparing to write data", log_data)
-    try:
-        for tries in range(max_retries):
-            try:
-                for row in data:
-                    influxdb3_local.write_to_db(db_name, row)
-                success_log: dict = {
-                    "records_written": record_count,
-                    "database": db_name,
-                    "measurement": target_measurement,
-                    "retries": retry_count,
-                }
-                influxdb3_local.info(
-                    f"[{task_id}] Successful write to {target_measurement}", success_log
-                )
-                return True, None, retry_count
-            except Exception as e:
-                retry_count += 1
-                retry_log: dict = {
-                    "attempt": tries + 1,
-                    "max_retries": max_retries,
-                    "records": record_count,
-                    "database": db_name,
-                    "error": str(e),
-                }
-                influxdb3_local.warn(
-                    f"[{task_id}] Error write attempt {tries + 1}", retry_log
-                )
-                wait_time: float = (2**tries) + random.random()
-                time.sleep(wait_time)
-                if tries == max_retries - 1:
-                    raise
-    except Exception as e:
-        failure_log: dict = {
-            "records": record_count,
-            "database": db_name,
-            "measurement": target_measurement,
-            "retries": retry_count,
-            "error": str(e),
-        }
-        influxdb3_local.error(f"[{task_id}] Write failed with exception, {failure_log}")
-        return False, str(e), retry_count
-
-
-def parse_tag_values(
-    influxdb3_local, tag_input: str | dict, args: dict, task_id: str
-) -> dict[str, str]:
-    """
-    Parse a string of the form 'tag:value.tag2:value...' into a dictionary.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        tag_input (str or dict): Input string in the format 'tag:value.tag:value2.tag2:value...' or a dictionary.
-        args (dict): Dictionary of runtime arguments.
-        task_id (str): Unique task identifier.
-
-    Returns:
-        dict[str, str]: Dictionary where keys are tag names and values are tag values.
-
-    Example:
-        parse_tag_values("host:server1.region:us-west")
-        {'host': 'server1', 'region': 'us-west'}
-    """
-    if not tag_input:
-        return {}
-
-    if args["use_config_file"]:
-        if isinstance(tag_input, dict):
-            return tag_input
-        else:
-            influxdb3_local.warn(
-                f"[{task_id}] Skipping malformed tag-value pair: '{tag_input}' (expected dict)"
-            )
-            return {}
-
-    result: dict = {}
-    # Split the string by '.' to get individual tag:value pairs
-    pairs: list = tag_input.split(".")
-
-    for pair in pairs:
-        # Split each pair by ':' to separate tag and value
-        if ":" not in pair:
-            influxdb3_local.warn(
-                f"[{task_id}] Skipping malformed tag-value pair: '{pair}' (missing ':')"
-            )
-            continue  # Skip malformed pairs
-        tag, value = pair.split(":", 1)  # Split on first ':'
-        result[tag] = value
-
-    return result
-
-
-def parse_string_of_dates(
-    influxdb3_local, input_value: str | list | None, args: dict, task_id: str
-) -> list[str] | None:
-    """
-    Parses a space-separated string of changepoint dates and validates their format or use values from config file.
-
-    Args:
-        influxdb3_local: Logger for reporting errors.
-        input_value (str | None): Space-separated string of date strings.
-        args (dict): Dictionary of runtime arguments.
-        task_id (str): Task identifier for logging.
-
-    Returns:
-        list[str] | None: List of validated date strings, or None if input is None or invalid.
-    """
-    if input_value is None:
-        return None
-    result: list = []
-
-    if args["use_config_file"]:
-        if isinstance(input_value, list):
-            for point in input_value:
-                try:
-                    datetime.fromisoformat(point)
-                    result.append(point)
-                except ValueError:
-                    influxdb3_local.warn(
-                        f"[{task_id}] Skipping invalid point '{point}'"
-                    )
-            return result
-        else:
-            influxdb3_local.warn(
-                f"[{task_id}] Skipping malformed date string: '{input_value}' (expected list)"
-            )
-            return None
-
-    raw_points: list = input_value.strip().split(" ")
-    for point in raw_points:
-        if not point.strip():
-            continue  # skip empty parts
-        # Validate the format — allow ISO-like date strings
-        try:
-            datetime.fromisoformat(point)
-            result.append(point)
-        except ValueError:
-            influxdb3_local.warn(f"[{task_id}] Skipping invalid point '{point}'")
-
-    if not result:
-        return None
-
-    return result
-
-
-def get_model_storage_path(unique_file_suffix: str) -> Path:
-    """
-    Generate a unique model storage path based on plugin directory and unique suffix.
-
-    Args:
-        unique_file_suffix (str): Unique suffix for model storage.
-
-    Returns:
-        Path: Path object pointing to the model JSON file.
+        pd.DataFrame | None: Columns 'ds' (tz-naive UTC) and 'y' (numeric), or None
+        when the window holds no usable rows.
 
     Raises:
-        Exception: If unique_file_suffix is missing or invalid.
+        ForecastError: If the results lack the time or field column.
     """
+    measurement: str = config["measurement"]
+    field: str = config["field"]
+    where, params = build_where(tag_values, start_time, end_time)
+    query: str = (
+        f"SELECT time, {quote_identifier(field)} "
+        f"FROM {quote_identifier(measurement)} WHERE {where} ORDER BY time"
+    )
+
+    rows: list = influxdb3_local.query(query, params)
+    if not rows:
+        return None
+
+    df: pd.DataFrame = pd.DataFrame(rows)
+    if "time" not in df.columns or field not in df.columns:
+        raise ForecastError(
+            f"Query results for '{measurement}' are missing 'time' or '{field}'"
+        )
+
+    df = df.rename(columns={"time": "ds", field: "y"})
+    df["ds"] = pd.to_datetime(df["ds"], unit="ns")
+    df["y"] = pd.to_numeric(df["y"], errors="coerce")
+    dropped: int = int(df["y"].isna().sum())
+    if dropped:
+        influxdb3_local.warn(
+            f"[{task_id}] Dropping {dropped} rows where '{field}' is missing or not numeric"
+        )
+        df = df.dropna(subset=["y"])
+    if df.empty:
+        return None
+
+    influxdb3_local.info(
+        f"[{task_id}] Retrieved {len(df)} rows from {measurement} "
+        f"({start_time.isoformat()} to {end_time.isoformat()})"
+    )
+    return df.reset_index(drop=True)
+
+
+def get_model_storage_path(unique_suffix: str) -> Path:
+    """
+    Return the model file path for a version suffix, creating the directory if needed.
+
+    Args:
+        unique_suffix (str): Validated model version suffix.
+
+    Returns:
+        Path: Path to the model JSON file under <plugin dir>/prophet_models.
+    """
+    model_dir: Path = resolve_plugin_dir() / MODEL_DIR_NAME
+    model_dir.mkdir(parents=True, exist_ok=True)
+    return model_dir / f"prophet_model_{unique_suffix}.json"
+
+
+def save_model(model: Prophet, file_path: Path) -> None:
+    """Serialize a model through a temporary file so readers never see partial JSON."""
+    temp_path: Path = file_path.with_name(f"{file_path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        plugin_dir = Path(__file__).parent / "prophet_models"
-    except NameError:
-        plugin_dir = Path(os.path.expanduser("~/.plugins/prophet_models"))
+        temp_path.write_text(model_to_json(model))
+        os.replace(temp_path, file_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
-    # Ensure the directory exists
-    plugin_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create the model file path
-    model_path = plugin_dir / f"prophet_model_{unique_file_suffix}.json"
-    return model_path
+def create_prophet_model(
+    influxdb3_local,
+    config: dict,
+    changepoints: list | None,
+    holiday_dates: list | None,
+    task_id: str,
+) -> Prophet:
+    """
+    Build a Prophet model from the configured seasonality, changepoints and holidays.
+
+    Returns:
+        Prophet: An unfitted model.
+    """
+    model: Prophet = Prophet(
+        seasonality_mode=config["seasonality_mode"],
+        changepoint_prior_scale=config["changepoint_prior_scale"],
+        changepoints=changepoints,
+    )
+
+    holiday_names: list = config["holiday_names"]
+    if bool(holiday_dates) != bool(holiday_names):
+        missing: str = "holiday_names" if holiday_dates else "holiday_date_list"
+        influxdb3_local.warn(
+            f"[{task_id}] {missing} is not set, skipping custom holidays"
+        )
+    elif holiday_dates and holiday_names:
+        if len(holiday_dates) != len(holiday_names):
+            influxdb3_local.warn(
+                f"[{task_id}] holiday_date_list ({len(holiday_dates)}) and holiday_names "
+                f"({len(holiday_names)}) differ in length, skipping holidays"
+            )
+        else:
+            model.holidays = pd.DataFrame(
+                {"ds": pd.to_datetime(holiday_dates), "holiday": holiday_names}
+            )
+
+    country_names: list = config["holiday_country_names"]
+    if country_names:
+        if len(country_names) > 1:
+            influxdb3_local.warn(
+                f"[{task_id}] Prophet supports built-in holidays for one country, "
+                f"using '{country_names[0]}'"
+            )
+        model.add_country_holidays(country_name=country_names[0])
+
+    return model
+
+
+def load_or_train_model(
+    influxdb3_local,
+    config: dict,
+    history: pd.DataFrame,
+    changepoints: list | None,
+    holiday_dates: list | None,
+    use_saved_model: bool,
+    task_id: str,
+) -> Prophet:
+    """
+    Load the saved model for this version, or train one and save it when missing.
+
+    With use_saved_model set to False the model is trained in memory and not stored.
+
+    Returns:
+        Prophet: A fitted model.
+    """
+    if not use_saved_model:
+        model: Prophet = create_prophet_model(
+            influxdb3_local, config, changepoints, holiday_dates, task_id
+        )
+        model.fit(history)
+        influxdb3_local.info(f"[{task_id}] Model trained")
+        return model
+
+    file_path: Path = get_model_storage_path(config["unique_suffix"])
+    if file_path.exists():
+        model = model_from_json(file_path.read_text())
+        influxdb3_local.info(f"[{task_id}] Model loaded from {file_path}")
+        return model
+
+    influxdb3_local.warn(
+        f"[{task_id}] Model file not found at {file_path}, training a new model now"
+    )
+    model = create_prophet_model(
+        influxdb3_local, config, changepoints, holiday_dates, task_id
+    )
+    model.fit(history)
+    save_model(model, file_path)
+    influxdb3_local.info(f"[{task_id}] Newly trained model saved to {file_path}")
+    return model
+
+
+def fixed_step(freq: str) -> timedelta | None:
+    """Duration of one step, or None for calendar frequencies (day, week, month, ...)."""
+    try:
+        return pd.to_timedelta(pd.tseries.frequencies.to_offset(freq)).to_pytimedelta()
+    except (ValueError, TypeError):
+        return None
+
+
+def resolve_frequency(
+    influxdb3_local, config: dict, history: pd.DataFrame, task_id: str
+) -> tuple[str, timedelta | None]:
+    """
+    Return the forecast frequency alias and its duration.
+
+    Calendar frequencies such as ``D``, ``W-SUN`` or ``MS`` have no fixed duration;
+    ``None`` is returned for them and the grid is stepped by the offset itself.
+
+    Raises:
+        ForecastError: If the frequency is neither configured nor inferable, or if
+        one step does not move time forward.
+    """
+    freq: str = config["inferred_freq"]
+    if not freq:
+        if len(history) < 3:
+            raise ForecastError(
+                f"Only {len(history)} points retrieved, at least 3 are needed to infer the "
+                "frequency; provide it with the 'inferred_freq' argument"
+            )
+        freq = pd.infer_freq(history["ds"])
+        if freq is None:
+            raise ForecastError(
+                "Unable to infer frequency, please provide it manually with the "
+                "'inferred_freq' argument"
+            )
+
+    if pd.tseries.frequencies.to_offset(freq).n <= 0:
+        raise ForecastError(f"Frequency '{freq}' does not move time forward")
+
+    step: timedelta | None = fixed_step(freq)
+
+    influxdb3_local.info(f"[{task_id}] Using frequency: {freq}")
+    return freq, step
+
+
+def forecast_tolerance(freq: str, grid: pd.DatetimeIndex) -> timedelta:
+    """Half of one forecast step: the widest gap that still maps an actual value to one point."""
+    if len(grid) > 1:
+        spacing: pd.Timedelta = pd.Series(grid).diff().median()
+    else:
+        offset = pd.tseries.frequencies.to_offset(freq)
+        spacing = (grid[0] + offset) - grid[0]
+    return (spacing / 2).to_pytimedelta()
 
 
 def validate_forecast(
     influxdb3_local,
-    val_results: list[dict],
+    actual: pd.DataFrame,
     forecast: pd.DataFrame,
     msre_threshold: float,
+    alignment: str,
+    tolerance: timedelta,
     task_id: str,
 ) -> bool:
     """
-    Validate forecast against actual values over a validation window.
+    Compare forecasted values with actual ones over the validation window.
 
-    Args:
-        val_results: List of dicts from InfluxDB query for validation period; each dict must contain:
-            - 'ds': timestamp in nanoseconds or convertible to datetime
-            - 'y': actual value for the target field
-        forecast: DataFrame from model.predict; must have columns 'ds' (datetime64[ns], possibly tz-aware)
-            and 'yhat'.
-        msre_threshold: Threshold for MSRE; if computed MSRE > threshold, validation fails.
-        influxdb3_local: Logger-like interface with methods .info(), .warn(), .error().
-        task_id: String identifier for logging context.
+    With alignment "position" the two series are paired in time order; with
+    "nearest" each actual value is paired with the closest forecast point within
+    `tolerance`.
 
     Returns:
-        bool: True if validation passes (sufficient matches and MSRE ≤ threshold), False otherwise.
+        bool: True when MSRE stays within the threshold, False when MSRE cannot be
+        computed or exceeds it.
     """
-    val_df: pd.DataFrame = pd.DataFrame(val_results)
-
-    # Convert 'ds' in val_df from nanoseconds to datetime64[ns], unify to UTC-naive
-    val_df["ds"] = pd.to_datetime(val_df["ds"], unit="ns", utc=True)
-    # Drop tzinfo to get UTC-naive timestamps
-    val_df["ds"] = val_df["ds"].dt.tz_convert("UTC").dt.tz_localize(None)
-    fc = forecast[["ds", "yhat"]].copy()
-
-    # Convert forecast['ds'] to UTC-naive if tz-aware
-    try:
-        if pd.api.types.is_datetime64_any_dtype(fc["ds"]):
-            if fc["ds"].dt.tz is not None:
-                fc["ds"] = fc["ds"].dt.tz_convert("UTC").dt.tz_localize(None)
-        else:
-            # If forecast['ds'] is not datetime dtype, try parsing
-            fc["ds"] = (
-                pd.to_datetime(fc["ds"], utc=True)
-                .dt.tz_convert("UTC")
-                .dt.tz_localize(None)
-            )
-    except Exception as e:
-        influxdb3_local.error(
-            f"[{task_id}] Failed to convert forecast['ds'] to datetime: {e}"
-        )
-        return False
-
-    val_sorted: pd.DataFrame = (
-        val_df.sort_values("ds").dropna(subset=["y"]).reset_index(drop=True)
+    actual_sorted: pd.DataFrame = (
+        actual.dropna(subset=["y"]).sort_values("ds").reset_index(drop=True)
     )
-    fc_sorted: pd.DataFrame = fc.sort_values("ds").reset_index(drop=True)
+    predicted: pd.DataFrame = (
+        forecast[["ds", "yhat"]].sort_values("ds").reset_index(drop=True)
+    )
 
-    # Get minimum length to avoid IndexError
-    min_len: int = min(len(val_sorted), len(fc_sorted))
+    if alignment == "nearest":
+        # half a step keeps the mapping unambiguous: the windows of neighbouring
+        # forecast points do not overlap
+        matched: pd.DataFrame = pd.merge_asof(
+            actual_sorted,
+            predicted,
+            on="ds",
+            direction="nearest",
+            tolerance=pd.Timedelta(tolerance),
+        ).dropna(subset=["yhat"])
+        if matched.empty:
+            influxdb3_local.warn(
+                f"[{task_id}] No actual value falls within {tolerance} of a forecast "
+                f"point, treating validation as failed"
+            )
+            return False
+        influxdb3_local.info(
+            f"[{task_id}] Validating {len(matched)} of {len(actual_sorted)} actual "
+            f"points matched within {tolerance}"
+        )
+        y_true, y_pred = matched["y"], matched["yhat"]
+    else:
+        length: int = min(len(actual_sorted), len(predicted))
+        y_true = actual_sorted["y"].iloc[:length]
+        y_pred = predicted["yhat"].iloc[:length]
 
-    # Trim both DataFrames to the same length
-    val_trimmed: pd.DataFrame = val_sorted.iloc[:min_len]
-    fc_trimmed: pd.DataFrame = fc_sorted.iloc[:min_len]
-
-    # Extract the actual and predicted values
-    y_true: pd.Series = val_trimmed["y"]
-    y_pred: pd.Series = fc_trimmed["yhat"]
-
-    # Filter out zero actuals to avoid division by zero in MSRE
-    nonzero_mask: pd.Series = y_true != 0
-    y_true = y_true[nonzero_mask]
-    y_pred = y_pred[nonzero_mask]
-
+    # zero actuals would divide by zero in the relative error
+    nonzero = y_true != 0
+    y_true, y_pred = y_true[nonzero], y_pred[nonzero]
     if y_true.empty:
         influxdb3_local.warn(
-            f"[{task_id}] All actual 'y' values are zero after filtering; cannot compute MSRE."
+            f"[{task_id}] All actual values in the validation window are zero, MSRE has "
+            f"nothing to compare, treating validation as failed"
         )
         return False
 
-    # Compute MSRE
-    try:
-        msre = ((y_true - y_pred) ** 2 / y_true**2).mean()
-        influxdb3_local.info(f"[{task_id}] MSRE: {msre}")
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to compute MSRE: {e}")
+    msre: float = float(((y_true - y_pred) ** 2 / y_true**2).mean())
+    influxdb3_local.info(f"[{task_id}] MSRE: {msre}")
+
+    if math.isnan(msre):
+        influxdb3_local.warn(
+            f"[{task_id}] MSRE is not a number, treating validation as failed"
+        )
         return False
 
-    # Compare to threshold
     if msre > msre_threshold:
         influxdb3_local.warn(
             f"[{task_id}] MSRE {msre} exceeds threshold {msre_threshold}, consider retraining."
@@ -715,43 +1000,322 @@ def validate_forecast(
     return True
 
 
-def create_prophet_model(
-    influxdb3_local,
-    seasonality_mode: str,
-    changepoint_prior_scale: float,
-    changepoints: list | None,
-    holiday_date_list: list | None,
-    holiday_names_list: list | None,
-    holiday_country_names: list | None,
-    task_id: str,
-) -> Prophet:
-    model: Prophet = Prophet(
-        seasonality_mode=seasonality_mode,
-        changepoint_prior_scale=changepoint_prior_scale,
-        changepoints=changepoints,
-    )
+def to_naive_utc(moment: datetime) -> pd.Timestamp:
+    """Convert a datetime to a tz-naive UTC timestamp, matching the queried data."""
+    timestamp: pd.Timestamp = pd.Timestamp(moment)
+    if timestamp.tz is None:
+        return timestamp
+    return timestamp.tz_convert("UTC").tz_localize(None)
 
-    # Add holidays if provided
-    if holiday_date_list and holiday_names_list:
-        if not len(holiday_date_list) == len(holiday_names_list):
-            influxdb3_local.warn(
-                f"[{task_id}] Number of holiday dates and names must be equal. Scipping adding holidays."
+
+def build_forecast_lines(
+    influxdb3_local,
+    forecast: pd.DataFrame,
+    config: dict,
+    tag_values: dict,
+    run_time: datetime,
+    forecast_start: datetime,
+    task_id: str,
+) -> list:
+    """
+    Turn forecast rows at or after forecast_start into LineBuilder objects.
+
+    Points with a non-finite value are skipped, because one of them would fail the
+    whole batched write.
+
+    Returns:
+        list: LineBuilder objects ready to write.
+    """
+    cutoff: pd.Timestamp = to_naive_utc(forecast_start)
+    future: pd.DataFrame = forecast.loc[
+        forecast["ds"] >= cutoff, ["ds", "yhat", "yhat_lower", "yhat_upper"]
+    ].copy()
+    future["time_ns"] = future["ds"].astype("datetime64[ns]").astype("int64")
+
+    tags: dict = {"model_version": config["unique_suffix"], **tag_values}
+    run_time_text: str = run_time.isoformat()
+
+    lines: list = []
+    skipped: int = 0
+    for row in future.itertuples(index=False):
+        values: tuple = (float(row.yhat), float(row.yhat_lower), float(row.yhat_upper))
+        if not all(math.isfinite(value) for value in values):
+            skipped += 1
+            continue
+        forecast_value, lower, upper = values
+        lines.append(
+            build_line(
+                LineBuilder,
+                config["target_measurement"],
+                tags=tags,
+                fields={
+                    "forecast": forecast_value,
+                    "yhat_lower": lower,
+                    "yhat_upper": upper,
+                    "run_time": run_time_text,
+                },
+                time_ns=int(row.time_ns),
             )
-        else:
-            holidays: pd.DataFrame = pd.DataFrame(
-                {"ds": pd.to_datetime(holiday_date_list), "holiday": holiday_names_list}
-            )
-            model.holidays = holidays
-    else:
-        influxdb3_local.info(
-            f"[{task_id}] No holidays date or names provided. Skipping adding holidays."
         )
 
-    if holiday_country_names:
-        for country_name in holiday_country_names:
-            model.add_country_holidays(country_name=country_name)
+    if skipped:
+        influxdb3_local.warn(
+            f"[{task_id}] Skipped {skipped} forecast points with non-finite values"
+        )
+    return lines
 
-    return model
+
+def write_forecast(influxdb3_local, lines: list, database: str, task_id: str) -> None:
+    """Queue forecast points as one batched payload."""
+    influxdb3_local.info(
+        f"[{task_id}] Writing {len(lines)} forecast points to database {database}"
+    )
+    write_data(influxdb3_local, lines, database=database, retries=0)
+
+
+def run_forecast(
+    influxdb3_local,
+    config: dict,
+    tag_values: dict,
+    *,
+    history_start: datetime,
+    history_end: datetime,
+    forecast_start: datetime,
+    use_saved_model: bool,
+    run_time: datetime,
+    task_id: str,
+) -> tuple[str, str]:
+    """
+    Train or load a model, forecast, optionally validate, and write the results.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        config (dict): Loaded configuration.
+        tag_values (dict): Tag filters for the source query.
+        history_start (datetime): Start of the training window.
+        history_end (datetime): End of the training window and start of validation.
+        forecast_start (datetime): End of validation and first timestamp written.
+        use_saved_model (bool): Load or persist the model for this version.
+        run_time (datetime): Value stored in the run_time field.
+        task_id (str): Unique task identifier.
+
+    Returns:
+        tuple[str, str]: Outcome (FORECAST_WRITTEN, FORECAST_VALIDATION_FAILED or
+        FORECAST_FAILED) and a message describing it.
+    """
+    target_measurement: str = config["target_measurement"]
+    validation_window: timedelta = config["validation_window"]
+
+    try:
+        history: pd.DataFrame | None = query_series(
+            influxdb3_local, config, tag_values, history_start, history_end, task_id
+        )
+        if history is None:
+            return (
+                FORECAST_FAILED,
+                f"No data found from {history_start.isoformat()} to {history_end.isoformat()}",
+            )
+
+        changepoints: list | None = parse_date_list(
+            influxdb3_local, config["changepoints"], "changepoints", task_id
+        )
+        holiday_dates: list | None = parse_date_list(
+            influxdb3_local, config["holiday_date_list"], "holiday_date_list", task_id
+        )
+        model: Prophet = load_or_train_model(
+            influxdb3_local,
+            config,
+            history,
+            changepoints,
+            holiday_dates,
+            use_saved_model,
+            task_id,
+        )
+
+        freq, step = resolve_frequency(influxdb3_local, config, history, task_id)
+        forecast_horizont: timedelta = config["forecast_horizont"]
+        if step is not None and forecast_horizont < step:
+            return (
+                FORECAST_FAILED,
+                f"Forecast horizon {forecast_horizont} is shorter than one '{freq}' step",
+            )
+
+        # the timestamps follow the queried data, so a model loaded from disk forecasts
+        # the requested range instead of the dates it happens to be trained up to
+        anchor: pd.Timestamp = history["ds"].max() + pd.tseries.frequencies.to_offset(
+            freq
+        )
+        target_end: pd.Timestamp = to_naive_utc(forecast_start) + forecast_horizont
+        if anchor >= target_end:
+            return (
+                FORECAST_FAILED,
+                f"The first '{freq}' point after the data is {anchor}, "
+                f"not before the end of the horizon {target_end}",
+            )
+
+        max_points: int = config["max_forecast_points"]
+        span: pd.Timedelta = target_end - anchor
+        if step is not None:
+            periods: int = math.ceil(span / step)
+            if periods > max_points:
+                return (
+                    FORECAST_FAILED,
+                    f"Forecast needs {periods} points at the '{freq}' step, above "
+                    f"max_forecast_points ({max_points})",
+                )
+            grid: pd.DatetimeIndex = pd.date_range(
+                start=anchor, periods=periods, freq=freq
+            )
+        else:
+            # a calendar step has no fixed length, so the grid is bounded by the
+            # requested range and counted once it exists
+            grid = pd.date_range(
+                start=anchor, end=target_end, freq=freq, inclusive="left"
+            )
+            if len(grid) > max_points:
+                return (
+                    FORECAST_FAILED,
+                    f"Forecast needs {len(grid)} points at the '{freq}' step, above "
+                    f"max_forecast_points ({max_points})",
+                )
+
+        if grid.empty:
+            return (
+                FORECAST_FAILED,
+                f"No '{freq}' point falls between {anchor} and {target_end}",
+            )
+        influxdb3_local.info(
+            f"[{task_id}] Forecast horizon: {forecast_horizont}, frequency: {freq}, "
+            f"periods: {len(grid)} from {grid[0]}"
+        )
+
+        forecast: pd.DataFrame = model.predict(pd.DataFrame({"ds": grid}))
+
+        if validation_window > timedelta(0):
+            actual: pd.DataFrame | None = query_series(
+                influxdb3_local,
+                config,
+                tag_values,
+                history_end,
+                forecast_start,
+                task_id,
+            )
+            if actual is None:
+                return (
+                    FORECAST_VALIDATION_FAILED,
+                    f"No data found for validation window "
+                    f"{history_end.isoformat()} to {forecast_start.isoformat()}, "
+                    f"forecast not written to {target_measurement}",
+                )
+            if not validate_forecast(
+                influxdb3_local,
+                actual,
+                forecast,
+                config["msre_threshold"],
+                config["validation_alignment"],
+                forecast_tolerance(freq, grid),
+                task_id,
+            ):
+                return (
+                    FORECAST_VALIDATION_FAILED,
+                    f"Validation failed, forecast not written to {target_measurement}",
+                )
+
+        lines: list = build_forecast_lines(
+            influxdb3_local,
+            forecast,
+            config,
+            tag_values,
+            run_time,
+            forecast_start,
+            task_id,
+        )
+        if not lines:
+            return (
+                FORECAST_FAILED,
+                f"Forecast holds no points at or after {forecast_start.isoformat()}",
+            )
+
+        database: str = config["target_database"] or DEFAULT_TARGET_DATABASE
+        write_forecast(influxdb3_local, lines, database, task_id)
+        return FORECAST_WRITTEN, f"Forecast written to {target_measurement}"
+
+    except ForecastError as e:
+        return FORECAST_FAILED, str(e)
+
+
+def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
+    """
+    Parse and validate sender configurations from the loaded config.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        config (dict): Loaded configuration containing "senders" (dot-separated string
+            or list) and the keys each sender requires (see AVAILABLE_SENDERS).
+        task_id (str): Unique task identifier used for logging context.
+
+    Returns:
+        dict: A mapping `{sender_type: {key: value}}` for each valid sender.
+
+    Raises:
+        Exception: If no valid senders are found after parsing.
+    """
+    senders_config: defaultdict = defaultdict(dict)
+    senders: list = parse_delimited_list(config.get("senders", ""), sep=".")
+    if not senders:
+        raise Exception("No senders provided")
+
+    for sender in senders:
+        if sender not in AVAILABLE_SENDERS:
+            influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
+            continue
+        for key in AVAILABLE_SENDERS[sender]:
+            if key not in config and not any(ex in key for ex in EXCLUDED_KEYWORDS):
+                influxdb3_local.warn(
+                    f"[{task_id}] Required key '{key}' missing for sender '{sender}'"
+                )
+                senders_config.pop(sender, None)
+                break
+            if "url" in key and not validate_webhook_url(
+                influxdb3_local, sender, config[key], task_id
+            ):
+                senders_config.pop(sender, None)
+                break
+
+            if key not in config:
+                continue
+            senders_config[sender][key] = config[key]
+
+    if not senders_config:
+        raise Exception("No valid senders configured")
+    return senders_config
+
+
+def validate_webhook_url(influxdb3_local, service: str, url: str, task_id: str) -> bool:
+    """
+    Validate webhook URL format.
+
+    Returns:
+        bool: True if URL is valid, False otherwise.
+    """
+    try:
+        result = urlparse(url)
+        if result.scheme not in ("http", "https"):
+            influxdb3_local.error(
+                f"[{task_id}] {service} webhook URL must start with 'https://' or 'http://'"
+            )
+            return False
+        return True
+    except Exception as e:
+        influxdb3_local.error(
+            f"[{task_id}] Unable to parse {service} webhook URL: {str(e)}"
+        )
+        return False
+
+
+def interpolate_notification_text(text: str, row_data: dict) -> str:
+    """Replace $variables in the notification template with actual values."""
+    return Template(text).safe_substitute(row_data)
 
 
 def send_notification(
@@ -768,9 +1332,6 @@ def send_notification(
         token (str): API v3 token string (without the "Bearer " prefix).
         payload (dict): Dict to serialize as JSON in the POST body.
         task_id (str): Unique task identifier.
-
-    Raises:
-        requests.RequestException: If all retries fail or a non-2xx response is received.
     """
     url: str = f"http://localhost:{port}/api/v3/engine/{path}"
     headers: dict = {
@@ -789,7 +1350,7 @@ def send_notification(
             influxdb3_local.info(
                 f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
-            break
+            return
         except requests.RequestException as e:
             influxdb3_local.warn(
                 f"[{task_id}] [Attempt {attempt}/{max_retries}] Error sending alert to notification plugin: {e}"
@@ -806,595 +1367,153 @@ def send_notification(
                 )
 
 
-def interpolate_notification_text(text: str, row_data: dict) -> str:
-    """
-    Replace variables in notification text with actual values from row data.
+def send_validation_alert(
+    influxdb3_local,
+    config: dict,
+    validation_start: datetime,
+    validation_end: datetime,
+    task_id: str,
+) -> None:
+    """Send the validation-failure alert for the window that was actually validated."""
+    try:
+        senders_config: dict = parse_senders(influxdb3_local, config, task_id)
+        token: str = config.get("influxdb3_auth_token", "")
+        if not token:
+            raise Exception("INFLUXDB3_AUTH_TOKEN not found")
 
-    Args:
-        text (str): Template string with variables
-        row_data (dict): Dictionary containing values to interpolate
-
-    Returns:
-        str: Interpolated text with variables replaced
-    """
-    return Template(text).safe_substitute(row_data)
-
-
-def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
-    """
-    Parse and validate sender configurations from input arguments.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        args (dict): Input arguments containing:
-            - "senders": dot-separated list of sender types (e.g., "slack.http").
-            - For each sender, its own required keys (see AVAILABLE_SENDERS).
-        task_id (str): Unique task identifier used for logging context.
-
-    Returns:
-        dict: A mapping `{sender_type: {key: value}}` for each valid sender.
-              For example:
+        payload: dict = {
+            "notification_text": interpolate_notification_text(
+                config["notification_text"],
                 {
-                  "slack": {
-                    "slack_webhook_url": "https://hooks.slack.com/...",
-                    "slack_headers": "..."
-                  },
-                  "sms": { ... }
-                }
-
-    Raises:
-        Exception: If no valid senders are found after parsing.
-    """
-    senders_config: defaultdict = defaultdict(dict)
-
-    senders_input: str | list | None = args.get("senders", None)
-    if not senders_input:
-        raise Exception(f"[{task_id}] No senders provided. Skipping sending alerts.")
-
-    if args["use_config_file"]:
-        if not isinstance(senders_input, list):
-            raise Exception(
-                f"[{task_id}] 'senders' must be a list when using config file"
-            )
-    else:
-        senders_input = senders_input.split(".")
-
-    for sender in senders_input:
-        if sender not in AVAILABLE_SENDERS:
-            influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
-            continue
-        for key in AVAILABLE_SENDERS[sender]:
-            if key not in args and not any(ex in key for ex in EXCLUDED_KEYWORDS):
-                influxdb3_local.warn(
-                    f"[{task_id}] Required key '{key}' missing for sender '{sender}'"
-                )
-                senders_config.pop(sender, None)
-                break
-            if "url" in key and not validate_webhook_url(
-                influxdb3_local, sender, args[key], task_id
-            ):
-                senders_config.pop(sender, None)
-                break
-
-            if key not in args:
-                continue
-            senders_config[sender][key] = args[key]
-
-    if not senders_config:
-        raise Exception(f"[{task_id}] No valid senders configured")
-    return senders_config
-
-
-def validate_webhook_url(influxdb3_local, service: str, url: str, task_id: str) -> bool:
-    """
-    Validate webhook URL format.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        service (str): Type of service (e.g., "slack", "telegram", etc.).
-        url (str): Webhook URL to validate.
-        task_id (str): Unique task identifier.
-
-    Returns:
-        bool: True if URL is valid, False otherwise
-    """
-    try:
-        result = urlparse(url)
-        if result.scheme not in ("http", "https"):
-            influxdb3_local.error(
-                f"[{task_id}] {service} webhook URL must start with 'https://' or 'http://'"
-            )
-            return False
-        return True
+                    "version": config["unique_suffix"],
+                    "measurement": config["measurement"],
+                    "field": config["field"],
+                    "start_time": validation_start.isoformat(),
+                    "end_time": validation_end.isoformat(),
+                    "output_measurement": config["target_measurement"],
+                },
+            ),
+            "senders_config": senders_config,
+        }
+        send_notification(
+            influxdb3_local,
+            config["port_override"],
+            config["notification_path"],
+            token,
+            payload,
+            task_id,
+        )
     except Exception as e:
-        influxdb3_local.error(
-            f"[{task_id}] Unable to parse {service} webhook URL: {str(e)}"
-        )
-        return False
-
-
-def parse_port_override(args: dict, task_id: str) -> int:
-    """
-    Parse and validate 'port_override' from args (default 8181).
-
-    Args:
-        args (dict): Runtime argument's dict.
-        task_id (str): Unique task identifier.
-
-    Returns:
-        int: Validated port number between 1 and 65535.
-
-    Raises:
-        Exception if invalid or out of range.
-    """
-    raw: str | int = args.get("port_override", 8181)
-    try:
-        port = int(raw)
-    except (ValueError, TypeError):
-        raise Exception(f"[{task_id}] 'port_override' must be an integer, got '{raw}'")
-    if not (1 <= port <= 65535):
-        raise Exception(
-            f"[{task_id}] 'port_override' {port} is out of valid range 1–65535"
-        )
-    return port
+        influxdb3_local.error(f"[{task_id}] Failed to send notification: {e}")
 
 
 def process_scheduled_call(
     influxdb3_local, call_time: datetime, args: dict | None = None
 ):
     """
-    Executes a scheduled forecasting task using the Prophet time series model. Supports both model
-    training and prediction. Validates forecasts (if configured), writes results to InfluxDB, and optionally
-    sends alerts via configured senders on validation failure.
-
-    This function is typically invoked by a scheduler with pre-defined configuration arguments.
+    Run a scheduled Prophet forecast: query the historical window, train or load a
+    model, forecast the configured horizon, validate the result when a validation
+    window is set, write the forecast, and alert on validation failure.
 
     Args:
-        influxdb3_local: Logger and InfluxDB client instance.
-        call_time (datetime): The time at which the function is invoked. Used to define window boundaries.
-        args (dict | None): Configuration dictionary for forecasting task.
+        influxdb3_local: InfluxDB client instance.
+        call_time (datetime): Time the trigger fired; the windows hang off it.
+        args (dict | None): Trigger arguments, or a TOML file named by
+            config_file_path. See the plugin metadata for the supported keys.
 
-            Required keys:
-                - measurement (str): Source InfluxDB measurement name.
-                - field (str): Target field to forecast.
-                - window (str): Historical window duration (e.g., "30d").
-                - forecast_horizont (str): Future duration to forecast (e.g., "2d").
-                - tag_values (str): Comma-separated tag filter string.
-                - target_measurement (str): Destination measurement for storing forecast.
-                - model_mode (str): Mode of operation - "train" or "predict".
-                - unique_suffix (str): Unique version suffix for model saving/loading.
-
-            Optional keys:
-                - config_file_path: path to config file to override args (str).
-                - seasonality_mode (str): Prophet seasonality mode ("additive" or "multiplicative").
-                - changepoint_prior_scale (float): Changepoint flexibility parameter.
-                - changepoints (str): Comma-separated list of changepoint timestamps (ISO format).
-                - holiday_date_list (str): List of holiday timestamps to inject.
-                - holiday_names (str): Name to associate with the custom holiday list.
-                - holiday_country_names (str): Built-in country holidays to include.
-                - inferred_freq (str): Manually specified frequency string (e.g., "1H").
-                - validation_window (str): Duration to validate forecast against recent true values.
-                - msre_threshold (float): Maximum MSRE allowed; above this triggers validation failure.
-                - target_database (str): Optional InfluxDB database override.
-                - is_sending_alert (bool): Whether to send alerts on validation failure.
-                - notification_text (str): Templated text for alert message.
-                - senders (str): Dot-separated list of sender types (e.g., "slack.sms").
-                - [sender-specific keys]: Each sender requires its own credentials and config.
-                - notification_path (str): URL path for posting the alert (e.g., "notify").
-                - influxdb3_auth_token (str): Auth token used for sending notifications.
-                - port_override (int): Optional custom port for notification dispatch.
-
-    Behavior:
-        - Validates presence of all required configuration.
-        - Loads or trains a Prophet model.
-        - Forecasts future values and optionally validates them.
-        - Writes forecast to InfluxDB if valid.
-        - On validation failure, sends alert if `is_sending_alert` is True and `senders` are configured.
-
-    Raises:
-        All exceptions are caught and logged. No exceptions are propagated upward.
+    All exceptions are caught and logged; nothing propagates to the engine.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Starting scheduled forecast process at {call_time} with args: {args}")
-
-    # Override args with config file if specified
-    if args:
-        if path := args.get("config_file_path", None):
-            if not path.endswith(".toml"):
-                influxdb3_local.error(
-                    f"[{task_id}] Invalid config file format: expected a .toml file"
-                )
-                return
-            try:
-                plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if plugin_dir_var:
-                    file_path = Path(plugin_dir_var) / path
-                else:
-                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-                    candidates: list[str] = []
-                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                        candidates.append(influxdb3_plugin_dir)
-                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                        candidates.append(str(Path(virtual_env).parent))
-
-                    resolved = None
-                    for base in candidates:
-                        candidate = Path(base) / path
-                        if candidate.exists():
-                            resolved = candidate
-                            break
-
-                    if resolved is None:
-                        candidates_str = ", ".join(candidates) if candidates else "none available"
-                        influxdb3_local.error(
-                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
-                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
-                        )
-                        return
-                    file_path = resolved
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
-                with open(file_path, "rb") as f:
-                    args = tomllib.load(f)
-                    args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
-            except Exception:
-                influxdb3_local.error(f"[{task_id}] Failed to read config file")
-                return
-        else:
-            args["use_config_file"] = False
-
-    required_keys: list = [
-        "measurement",
-        "field",
-        "window",
-        "forecast_horizont",
-        "tag_values",
-        "target_measurement",
-        "model_mode",
-        "unique_suffix",
-    ]
-
-    if not args or any(key not in args for key in required_keys):
-        influxdb3_local.error(
-            f"[{task_id}] Missing some of the required arguments: {', '.join(required_keys)}"
-        )
-        return
+    influxdb3_local.info(f"[{task_id}] Starting scheduled forecast at {call_time}")
 
     try:
-        # Set up configuration
-        measurement: str = args["measurement"]
-        field: str = args["field"]
+        config_file_path = (args or {}).get("config_file_path")
+        if config_file_path and not str(config_file_path).endswith(".toml"):
+            raise ForecastError("Invalid config file format: expected a .toml file")
+
+        config: dict = load_config(
+            args,
+            SCHEDULED_VALIDATORS,
+            source="toml" if config_file_path else "args",
+            env_keys=["INFLUXDB3_AUTH_TOKEN"],
+        )
         tag_values: dict = parse_tag_values(
-            influxdb3_local, args.get("tag_values", ""), args, task_id
-        )
-        is_sending_alert: bool = str(args.get("is_sending_alert", "")).lower() == "true"
-        window: timedelta = parse_time_interval(args["window"], task_id)
-        forecast_horizont: timedelta = parse_time_interval(
-            args["forecast_horizont"], task_id
-        )
-        output_measurement: str = args["target_measurement"]
-        model_mode: str = args["model_mode"].lower()
-        unique_suffix: str = args["unique_suffix"]
-        seasonality_mode: str = args.get("seasonality_mode", "additive")
-        if seasonality_mode not in ["additive", "multiplicative"]:
-            raise Exception(f"[{task_id}] Wrong seasonality mode: {seasonality_mode}")
-        changepoint_prior_scale: float = float(
-            args.get("changepoint_prior_scale", 0.05)
-        )
-        changepoints: list | None = parse_string_of_dates(
-            influxdb3_local, args.get("changepoints", None), args, task_id
-        )
-        validation_window: timedelta = parse_time_interval(
-            args.get("validation_window", "0s"), task_id
-        )
-        msre_threshold: float = float(args.get("msre_threshold", float("inf")))
-        target_database: str | None = args.get("target_database", None)
-        holiday_date_list: list[str] | None = parse_string_of_dates(
-            influxdb3_local, args.get("holiday_date_list", None), args, task_id
+            influxdb3_local, config["tag_values"], task_id
         )
 
-        if args["use_config_file"]:
-            holiday_names_list: list | None = args.get("holiday_names")
-            if not isinstance(holiday_names_list, list) and not None:
-                influxdb3_local.warn(
-                    f"[{task_id}] Expecting holiday_names to be a list, got {type(holiday_names_list)}. Skipping adding holidays."
-                )
-                holiday_names_list = None
-        else:
-            holiday_names_list: list[str] | None = (
-                args.get("holiday_names").split(".")
-                if args.get("holiday_names")
-                else None
+        # the engine passes a naive UTC timestamp
+        run_time: datetime = (
+            call_time if call_time.tzinfo else call_time.replace(tzinfo=timezone.utc)
+        )
+        if config["is_sending_alert"] and config["validation_window"] <= timedelta(0):
+            influxdb3_local.warn(
+                f"[{task_id}] is_sending_alert has no effect without validation_window: "
+                f"alerts are only sent when validation fails"
             )
 
-        if args["use_config_file"]:
-            holiday_country_names: list | None = args.get("holiday_country_names")
-            if not isinstance(holiday_country_names, list) and not None:
-                influxdb3_local.warn(
-                    f"[{task_id}] Expecting holiday_country_names to be a list, got {type(holiday_country_names)}. Skipping adding holidays."
-                )
-                holiday_country_names = None
-        else:
-            holiday_country_names: list | None = (
-                args.get("holiday_country_names").split(".")
-                if args.get("holiday_country_names")
-                else None
+        history_start: datetime = run_time - config["window"]
+        history_end: datetime = run_time - config["validation_window"]
+        if history_start >= history_end:
+            raise ForecastError(
+                f"Empty training window: 'window' ({config['window']}) must exceed "
+                f"'validation_window' ({config['validation_window']})"
             )
 
-        inferred_freq: str | None = args.get("inferred_freq", None)
-
-        # Fetch historical data
-        if validation_window > timedelta(0):
-            end_time: datetime = call_time - validation_window
-        else:
-            end_time: datetime = call_time
-        start_time: datetime = call_time - window
-        if start_time == end_time:
-            raise Exception(
-                f"[{task_id}] Time window for data query is zero — no time range specified for data collection."
-            )
-        influxdb3_local.info(f"[{task_id}] Fetching data from {start_time} to {end_time}")
-        query: str = generate_query(
-            measurement, field, tag_values, start_time, end_time
+        status, message = run_forecast(
+            influxdb3_local,
+            config,
+            tag_values,
+            history_start=history_start,
+            history_end=history_end,
+            forecast_start=run_time,
+            use_saved_model=config["model_mode"] == "predict",
+            run_time=run_time,
+            task_id=task_id,
         )
-        results: list = influxdb3_local.query(query)
 
-        if not results:
-            influxdb3_local.error(
-                f"[{task_id}] No data found from {start_time} to {end_time}"
-            )
-            return
-        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
-
-        df: pd.DataFrame = pd.DataFrame(results)
-        df["ds"] = pd.to_datetime(df["ds"], unit="ns", utc=True)
-        df["ds"] = df["ds"].dt.tz_convert("UTC").dt.tz_localize(None)
-
-        influxdb3_local.info(
-            f"[{task_id}] Starting Prophet model with {model_mode} mode"
-        )
-        # Train or load model
-        if model_mode == "train":
-            model: Prophet = create_prophet_model(
-                influxdb3_local,
-                seasonality_mode,
-                changepoint_prior_scale,
-                changepoints,
-                holiday_date_list,
-                holiday_names_list,
-                holiday_country_names,
-                task_id,
-            )
-            model.fit(df)
-            influxdb3_local.info(f"[{task_id}] Model trained")
-        elif model_mode == "predict":
-            file_path: Path = get_model_storage_path(unique_suffix)
-            if not file_path.exists():
-                # Model file not found: train a new model now, then save
-                influxdb3_local.warn(
-                    f"[{task_id}] Model file not found at {file_path}. Training a new model now."
-                )
-                try:
-                    model = create_prophet_model(
-                        influxdb3_local,
-                        seasonality_mode,
-                        changepoint_prior_scale,
-                        changepoints,
-                        holiday_date_list,
-                        holiday_names_list,
-                        holiday_country_names,
-                        task_id,
-                    )
-                    # Train on the full historical df
-                    model.fit(df)
-                    influxdb3_local.info(
-                        f"[{task_id}] New model trained because no existing file was found."
-                    )
-
-                    # Save the newly trained model
-                    file_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(file_path, "w") as file:
-                        file.write(model_to_json(model))
-                    influxdb3_local.info(
-                        f"[{task_id}] Newly trained model saved to {file_path}"
-                    )
-                except Exception as e:
-                    influxdb3_local.error(
-                        f"[{task_id}] Failed to train and save new model: {e}"
-                    )
-                    return
-            else:
-                with open(file_path, "r") as fin:
-                    model = model_from_json(fin.read())
-                influxdb3_local.info(f"[{task_id}] Model loaded from {file_path}")
-        else:
-            influxdb3_local.error(f"[{task_id}] Invalid model_mode: {model_mode}")
+        if status == FORECAST_WRITTEN:
+            influxdb3_local.info(f"[{task_id}] {message}")
             return
 
-        # Generate forecast
-        if not inferred_freq:
-            inferred_freq: str = pd.infer_freq(df["ds"])
-
-            if inferred_freq is None:
-                influxdb3_local.error(
-                    f"[{task_id}] Unable to infer frequency, please provide it manually with the 'inferred_freq' argument"
-                )
-                return
-        influxdb3_local.info(f"[{task_id}] Inferred frequency: {inferred_freq}")
-
-        try:
-            freq_timedelta: timedelta = pd.to_timedelta(
-                pd.tseries.frequencies.to_offset(inferred_freq)
+        influxdb3_local.error(f"[{task_id}] {message}")
+        if status == FORECAST_VALIDATION_FAILED and config["is_sending_alert"]:
+            send_validation_alert(
+                influxdb3_local, config, history_end, run_time, task_id
             )
-        except Exception:
-            influxdb3_local.error(
-                f"[{task_id}] Unable to transform {inferred_freq} to timedelta"
-            )
-            return
 
-        periods: int = int((forecast_horizont + validation_window) / freq_timedelta)
-        influxdb3_local.info(
-            f"[{task_id}] Forecast horizon: {forecast_horizont}, inferred frequency: {inferred_freq}, periods: {periods}"
-        )
-
-        future: pd.DataFrame = model.make_future_dataframe(
-            periods=periods, freq=inferred_freq, include_history=False
-        )
-        forecast: pd.DataFrame = model.predict(future)
-
-        # Model evaluation (if validation window is set)
-        is_valid: bool = True
-        if validation_window > timedelta(0):
-            val_start_time: datetime = end_time
-            val_query: str = generate_query(
-                measurement, field, tag_values, val_start_time, call_time
-            )
-            val_results: list = influxdb3_local.query(val_query)
-            if val_results:
-                is_valid = validate_forecast(
-                    influxdb3_local=influxdb3_local,
-                    val_results=val_results,
-                    forecast=forecast,
-                    msre_threshold=msre_threshold,
-                    task_id=task_id,
-                )
-            else:
-                influxdb3_local.warn(
-                    f"[{task_id}] No data found for validation window: {val_start_time} to {end_time}, skipping validation"
-                )
-
-        if is_valid:
-            # Prepare forecast data
-            forecast_df: pd.DataFrame = forecast[
-                forecast["ds"] >= np.datetime64(call_time)
-            ][["ds", "yhat", "yhat_lower", "yhat_upper"]].rename(
-                columns={"ds": "time", "yhat": "forecast"}
-            )
-            forecast_df["model_version"] = unique_suffix
-            forecast_df["run_time"] = call_time.isoformat()
-            forecast_df["time"] = forecast_df["time"].astype("int64")
-            forecast_data: list = forecast_df.to_dict("records")
-
-            # Define fields for forecast data (no aggregation needed)
-            fields_list: list = ["forecast", "yhat_lower", "yhat_upper", "run_time"]
-
-            # Transform data to LineBuilder objects
-            builders: list = transform_to_influx_line(
-                forecast_data, output_measurement, fields_list, tag_values
-            )
-            influxdb3_local.info(f"[{task_id}] Writing {len(builders)} lines to InfluxDB")
-            # Write forecast data to InfluxDB
-            max_retries: int = 3
-            success, error, retries = write_downsampled_data(
-                influxdb3_local,
-                builders,
-                max_retries=max_retries,
-                target_measurement=output_measurement,
-                target_database=target_database,
-                task_id=task_id,
-            )
-            if success:
-                influxdb3_local.info(
-                    f"[{task_id}] Forecast written to {output_measurement}"
-                )
-            else:
-                influxdb3_local.error(f"[{task_id}] Failed to write forecast: {error}")
-
-        else:
-            influxdb3_local.error(
-                f"[{task_id}] Validation failed, forecast not written to {output_measurement}"
-            )
-            if is_sending_alert:
-                try:
-                    senders_config: dict = parse_senders(influxdb3_local, args, task_id)
-                    notification_tpl: str = args.get(
-                        "notification_text",
-                        "Validation failed for prophet model:$version on table:$measurement, field:$field for period from $start_time to $end_time, forecast not written to table:$output_measurement",
-                    )
-                    val_start_time: datetime = end_time - validation_window
-                    port_override: int = parse_port_override(args, task_id)
-                    notification_path: str = args.get("notification_path", "notify")
-                    influxdb3_auth_token: str = args.get(
-                        "influxdb3_auth_token"
-                    ) or os.getenv("INFLUXDB3_AUTH_TOKEN")
-                    if not influxdb3_auth_token:
-                        raise Exception(f"[{task_id}] INFLUXDB3_AUTH_TOKEN not found")
-
-                    payload: dict = {
-                        "notification_text": interpolate_notification_text(
-                            notification_tpl,
-                            {
-                                "version": unique_suffix,
-                                "measurement": measurement,
-                                "field": field,
-                                "start_time": val_start_time,
-                                "end_time": end_time,
-                                "output_measurement": output_measurement,
-                            },
-                        ),
-                        "senders_config": senders_config,
-                    }
-                    send_notification(
-                        influxdb3_local,
-                        port_override,
-                        notification_path,
-                        influxdb3_auth_token,
-                        payload,
-                        task_id,
-                    )
-                except Exception as e:
-                    influxdb3_local.error(
-                        f"[{task_id}] Failed to send notification: {e}"
-                    )
-
+    except ForecastError as e:
+        influxdb3_local.error(f"[{task_id}] {e}")
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
 
 
-def parse_time_window(
-    data: dict, start_key: str, end_key: str, task_id: str
-) -> tuple[datetime | None, datetime]:
+def parse_time_window(config: dict) -> tuple[datetime, datetime]:
     """
-    Parses time window. Requires timezone-aware datetime strings
-    in ISO 8601 format (e.g., '2025-05-01T00:00:00+03:00').
-
-    Args:
-        data (dict): Dictionary containing 'start_time' and 'end_time' keys.
-        start_key (str): The key for the start time.
-        end_key (str): The key for the end time.
-        task_id (str): The task ID.
+    Parse the historical window bounds, which must be timezone-aware ISO 8601
+    strings (e.g. '2025-05-01T00:00:00+03:00').
 
     Returns:
-        tuple[datetime | None, datetime]: Tuple of start and end datetimes in UTC.
+        tuple[datetime, datetime]: Start and end of the window in UTC.
 
     Raises:
-        Exception: If the datetime format is invalid, lacks timezone info, or if start ≥ end.
+        ForecastError: If a value is not ISO 8601, lacks a timezone, or start >= end.
     """
 
     def parse_iso_datetime(name: str, value: str) -> datetime:
         try:
-            dt: datetime = datetime.fromisoformat(value)
+            moment: datetime = datetime.fromisoformat(str(value))
         except ValueError:
-            raise Exception(
-                f"[{task_id}] Invalid ISO 8601 datetime for {name}: '{value}'."
-            )
-        if dt.tzinfo is None:
-            raise Exception(
-                f"[{task_id}] {name} must include timezone info (e.g., '+00:00')."
-            )
-        return dt.astimezone(timezone.utc)
+            raise ForecastError(f"Invalid ISO 8601 datetime for {name}: '{value}'.")
+        if moment.tzinfo is None:
+            raise ForecastError(f"{name} must include timezone info (e.g., '+00:00').")
+        return moment.astimezone(timezone.utc)
 
-    start_str: str = data.get(start_key)
-    end_str: str = data.get(end_key)
-
-    start_time: datetime = parse_iso_datetime(start_key, start_str)
-    end_time: datetime = parse_iso_datetime(end_key, end_str)
+    start_time: datetime = parse_iso_datetime("start_time", config["start_time"])
+    end_time: datetime = parse_iso_datetime("end_time", config["end_time"])
 
     if start_time >= end_time:
-        raise Exception(
-            f"[{task_id}] start_time {start_time} must be earlier than end_time {end_time}."
+        raise ForecastError(
+            f"start_time {start_time} must be earlier than end_time {end_time}."
         )
 
     return start_time, end_time
@@ -1404,329 +1523,74 @@ def process_request(
     influxdb3_local, query_parameters, request_headers, request_body, args=None
 ):
     """
-        Handle an HTTP request to perform a one-off Prophet forecast over a specified historical window
-        and horizon, optionally saving/loading the model, validating the forecast, and writing results to InfluxDB.
+    Run a one-off Prophet forecast over the window given in the request body.
 
-        This function is intended to be invoked by an HTTP endpoint. It:
-          1. Parses the JSON body for required forecasting parameters.
-          2. Queries InfluxDB for historical data in [start_time, end_time].
-          3. Creates or loads a Prophet model (depending on save_mode).
-          4. Infers or uses provided frequency, computes the forecast horizon, and predicts future values.
-          5. Optionally validates the forecast against a recent validation window.
-          6. Writes forecast points to the specified InfluxDB measurement.
-          7. Returns a dictionary containing a "message" summarizing success or error.
+    Reads the historical window, trains a model or loads the saved one for
+    unique_suffix when save_mode is set, forecasts the configured horizon,
+    validates the result when a validation window is set, and writes the forecast.
 
-        Args:
-            influxdb3_local:
-                An object providing:
-                  - Logging methods: .info(), .warn(), .error().
-                  - A .query(query_str) method to execute InfluxDB queries and return results as list[dict].
-                  - Other utilities as needed by helper functions (e.g., write_downsampled_data).
-            query_parameters:
-                A dict of HTTP query parameters (currently not used by this implementation but provided for extensibility).
-            request_headers:
-                A dict of HTTP request headers (currently not used here but available for future checks, e.g. auth).
-            request_body:
-                A JSON-encoded string containing the forecasting configuration. Must include the following keys:
-                    - "measurement" (str): Source InfluxDB measurement name to query historical data from.
-                    - "field" (str): Field name within the measurement to forecast.
-                    - "forecast_horizont" (str): Forecast horizon duration (e.g., "7d", "24h"). Parsed via parse_time_duration.
-                    - "tag_values" (dict): Tag filters for the InfluxDB query, e.g. {"region":"us-west","device":"sensor1"}.
-                    - "target_measurement" (str): Destination measurement name to write forecast points.
-                    - "unique_suffix" (str): Unique identifier for model versioning and storage.
-                    - "start_time" (str): Start of historical window, in a format supported by parse_time_window (e.g., ISO 8601).
-                    - "end_time" (str): End of historical window, in a format supported by parse_time_window.
-                Optional keys in the JSON body:
-                    - "seasonality_mode" (str): Prophet seasonality mode, "additive" or "multiplicative". Defaults to "additive".
-                    - "changepoint_prior_scale" (float): Flexibility of trend changepoints. Defaults to 0.05.
-                    - "changepoints" (list[str]): List of changepoint dates/strings in ISO format.
-                    - "save_mode" (str or bool-like): If present and equals "true" (case-insensitive), the function will attempt to load/save a persisted model from disk using unique_suffix. Otherwise, the model is always trained from scratch for this request.
-                    - "validation_window" (str): Duration for validation window (e.g., "3d"). Defaults to "0s" (no validation).
-                    - "msre_threshold" (float): Maximum acceptable MSRE for validation. Defaults to infinity (no threshold).
-                    - "target_database" (str): Optional InfluxDB database name to write forecast.
-                    - "holiday_date_list" (list[str]): List of custom holiday dates (ISO strings).
-                    - "holiday_names" (list[str]): List of names corresponding to holiday_date_list.
-                    - "holiday_country_names" (list[str]): List of country codes/names for built-in Prophet holidays.
-                    - "inferred_freq" (str): Manually specified frequency (e.g., "1D", "1H"). If absent, code attempts pd.infer_freq.
-            args:
-                A dict of additional arguments.
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        query_parameters: HTTP query parameters (unused).
+        request_headers: HTTP request headers (unused).
+        request_body: JSON body holding the forecast configuration. See the
+            http_body_config section of the plugin metadata for the supported keys.
+        args: Trigger arguments (unused; the body carries the configuration).
 
-        Side Effects:
-            - Queries InfluxDB for historical data via influxdb3_local.query().
-            - Trains or loads a Prophet model:
-                - If save_mode is true and a model file exists at the path determined by unique_suffix, it loads it.
-                - If save_mode is true but no file exists (or loading fails), it trains a new model on the full historical df and saves it.
-                - If save_mode is false or absent, always trains a new model in-memory.
-            - Infers or uses provided frequency for forecasting; computes periods = int(forecast_horizont / freq_timedelta).
-            - Generates forecast DataFrame via model.make_future_dataframe(...) and model.predict(...).
-            - Optionally validates forecast against recent actuals if validation_window > 0:
-                - If validation fails, does not write forecast and returns an error message.
-            - On successful validation (or if validation not requested), prepares forecast points:
-                - Writes to InfluxDB.
-            - Logs all steps and errors via influxdb3_local.info()/warn()/error().
-
-        Example Usage (curl):
-            # Minimal required fields:
-            curl -X POST https://your-server/api/forecast \
-                 -H "Content-Type: application/json" \
-                 -d '{
-                       "measurement": "temperature",
-                       "field": "value",
-                       "forecast_horizont": "7d",
-                       "tag_values": {"region":"us-west"},
-                       "target_measurement": "temperature_forecast",
-                       "unique_suffix": "20250619_v1",
-                       "start_time": "2025-05-20T00:00:00Z",
-                       "end_time": "2025-06-19T00:00:00Z"
-                     }'
-        """
+    Returns:
+        dict: {"message": <outcome>}.
+    """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Received forecasting request.")
-    run_time: datetime = datetime.now(timezone.utc)
+    influxdb3_local.info(f"[{task_id}] Received forecasting request")
 
-    if request_body:
-        data: dict = json.loads(request_body)
-        influxdb3_local.info(f"[{task_id}] Request body: {data}")
-    else:
+    if not request_body:
         influxdb3_local.error(f"[{task_id}] No request body provided.")
         return {"message": f"[{task_id}] Error: No request body provided."}
 
-    required_keys: list = [
-        "measurement",
-        "field",
-        "forecast_horizont",
-        "tag_values",
-        "target_measurement",
-        "unique_suffix",
-        "start_time",
-        "end_time",
-    ]
-
-    if not data or any(key not in data for key in required_keys):
-        influxdb3_local.error(
-            f"[{task_id}] Missing some of the required arguments: {', '.join(required_keys)}"
-        )
-        return {
-            "message": f"[{task_id}] Missing some of the required arguments: {', '.join(required_keys)}"
-        }
-
     try:
-        # Set up configuration
-        measurement: str = data["measurement"]
-        field: str = data["field"]
-        tag_values: dict = data["tag_values"]
-        forecast_horizont: timedelta = parse_time_interval(
-            data["forecast_horizont"], task_id
-        )
-        output_measurement: str = data["target_measurement"]
-        save_mode: bool = str(data.get("save_mode", "")).lower() == "true"
-        unique_suffix: str = data["unique_suffix"]
-        seasonality_mode: str = data.get("seasonality_mode", "additive")
-        changepoint_prior_scale: float = float(
-            data.get("changepoint_prior_scale", 0.05)
-        )
-        changepoints: list | None = data.get("changepoints", None)
-        validation_window: timedelta = parse_time_interval(
-            data.get("validation_window", "0s"), task_id
-        )
-        msre_threshold: float = float(data.get("msre_threshold", float("inf")))
-        target_database: str | None = data.get("target_database", None)
-        holiday_date_list: list[str] | None = data.get("holiday_date_list", None)
-        holiday_names: list | None = data.get("holiday_names", None)
-        holiday_country_names: list | None = data.get("holiday_country_names", None)
-        inferred_freq: str | None = data.get("inferred_freq", None)
+        data = json.loads(request_body)
+        if not isinstance(data, dict):
+            raise ForecastError("Request body must be a JSON object")
 
-        start_time, end_time = parse_time_window(
-            data, "start_time", "end_time", task_id
+        # an explicit JSON null means "not set", so the validator default applies
+        config: dict = load_config(
+            {key: value for key, value in data.items() if value is not None},
+            HTTP_VALIDATORS,
+            source="args",
         )
-        validation_start_time: datetime = end_time - validation_window
-
-        influxdb3_local.info(f"[{task_id}] Fetching historical data from {start_time} to {validation_start_time}.")
-        query: str = generate_query(
-            measurement, field, tag_values, start_time, validation_start_time
+        tag_values: dict = parse_tag_values(
+            influxdb3_local, config["tag_values"], task_id
         )
-        results: list = influxdb3_local.query(query)
 
-        if not results:
-            influxdb3_local.error(
-                f"[{task_id}] No data found from {start_time} to {end_time}"
+        start_time, end_time = parse_time_window(config)
+        history_end: datetime = end_time - config["validation_window"]
+        if start_time >= history_end:
+            raise ForecastError(
+                f"Empty training window: 'validation_window' "
+                f"({config['validation_window']}) covers the whole requested range"
             )
-            return {
-                "message": f"[{task_id}] No data found from {start_time} to {end_time}"
-            }
-        influxdb3_local.info(f"[{task_id}] Retrieved {len(results)} records from {measurement}")
 
-        df: pd.DataFrame = pd.DataFrame(results)
-        df["ds"] = pd.to_datetime(df["ds"], unit="ns", utc=True)
-        df["ds"] = df["ds"].dt.tz_convert("UTC").dt.tz_localize(None)
-
-        influxdb3_local.info(
-            f"[{task_id}] Starting Prophet model with safe mode: {save_mode}"
+        status, message = run_forecast(
+            influxdb3_local,
+            config,
+            tag_values,
+            history_start=start_time,
+            history_end=history_end,
+            forecast_start=end_time,
+            use_saved_model=config["save_mode"],
+            run_time=datetime.now(timezone.utc),
+            task_id=task_id,
         )
-        # Train or load model
-        if save_mode:
-            file_path: Path = get_model_storage_path(unique_suffix)
-            if not file_path.exists():
-                # Model file not found: train a new model now, then save
-                influxdb3_local.warn(
-                    f"[{task_id}] Model file not found at {file_path}. Training a new model now."
-                )
-                try:
-                    model: Prophet = create_prophet_model(
-                        influxdb3_local,
-                        seasonality_mode,
-                        changepoint_prior_scale,
-                        changepoints,
-                        holiday_date_list,
-                        holiday_names,
-                        holiday_country_names,
-                        task_id,
-                    )
-                    # Train on the full historical df
-                    model.fit(df)
-                    influxdb3_local.info(
-                        f"[{task_id}] New model trained because no existing file was found."
-                    )
 
-                    # Save the newly trained model
-                    file_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(file_path, "w") as file:
-                        file.write(model_to_json(model))
-                    influxdb3_local.info(
-                        f"[{task_id}] Newly trained model saved to {file_path}"
-                    )
-                except Exception as e:
-                    influxdb3_local.error(
-                        f"[{task_id}] Failed to train and save new model: {e}"
-                    )
-                    return {
-                        "message": f"[{task_id}] Failed to train and save new model: {e}"
-                    }
-            else:
-                with open(file_path, "r") as fin:
-                    model = model_from_json(fin.read())
-                influxdb3_local.info(f"[{task_id}] Model loaded from {file_path}")
-
+        if status == FORECAST_WRITTEN:
+            influxdb3_local.info(f"[{task_id}] {message}")
         else:
-            model = create_prophet_model(
-                influxdb3_local,
-                seasonality_mode,
-                changepoint_prior_scale,
-                changepoints,
-                holiday_date_list,
-                holiday_names,
-                holiday_country_names,
-                task_id,
-            )
-            model.fit(df)
-            influxdb3_local.info(f"[{task_id}] Model trained")
+            influxdb3_local.error(f"[{task_id}] {message}")
+        return {"message": f"[{task_id}] {message}"}
 
-        # Generate forecast
-        if not inferred_freq:
-            inferred_freq: str = pd.infer_freq(df["ds"])
-
-            if inferred_freq is None:
-                influxdb3_local.error(
-                    f"[{task_id}] Unable to infer frequency, please provide it manually with the 'inferred_freq' argument"
-                )
-                return {
-                    "message": f"[{task_id}] Unable to infer frequency, please provide it manually with the 'inferred_freq' argument"
-                }
-        influxdb3_local.info(f"[{task_id}] Inferred frequency: {inferred_freq}")
-
-        try:
-            freq_timedelta: timedelta = pd.to_timedelta(
-                pd.tseries.frequencies.to_offset(inferred_freq)
-            )
-        except Exception:
-            influxdb3_local.error(
-                f"[{task_id}] Unable to transform {inferred_freq} to timedelta"
-            )
-            return {
-                "message": f"[{task_id}] Unable to transform {inferred_freq} to timedelta"
-            }
-
-        periods: int = int((forecast_horizont + validation_window) / freq_timedelta)
-        influxdb3_local.info(
-            f"[{task_id}] Forecast horizon: {forecast_horizont}, inferred frequency: {inferred_freq}, periods: {periods}"
-        )
-
-        future: pd.DataFrame = model.make_future_dataframe(
-            periods=periods, freq=inferred_freq, include_history=False
-        )
-        forecast: pd.DataFrame = model.predict(future)
-
-        # Model evaluation (if validation window is set)
-        is_valid: bool = True
-        if validation_window > timedelta(0):
-            val_start_time: datetime = validation_start_time
-            val_query: str = generate_query(
-                measurement, field, tag_values, val_start_time, end_time
-            )
-            val_results: list = influxdb3_local.query(val_query)
-            if val_results:
-                is_valid = validate_forecast(
-                    influxdb3_local=influxdb3_local,
-                    val_results=val_results,
-                    forecast=forecast,
-                    msre_threshold=msre_threshold,
-                    task_id=task_id,
-                )
-            else:
-                influxdb3_local.warn(
-                    f"[{task_id}] No data found for validation window: {val_start_time} to {end_time}, skipping validation"
-                )
-
-        if is_valid:
-            # Prepare forecast data
-            forecast_df: pd.DataFrame = forecast[
-                forecast["ds"] >= np.datetime64(end_time)
-            ][["ds", "yhat", "yhat_lower", "yhat_upper"]].rename(
-                columns={"ds": "time", "yhat": "forecast"}
-            )
-            forecast_df["model_version"] = unique_suffix
-            forecast_df["run_time"] = run_time.isoformat()
-            forecast_df["time"] = forecast_df["time"].astype("int64")
-            forecast_data: list = forecast_df.to_dict("records")
-
-            # Define fields for forecast data (no aggregation needed)
-            fields_list: list = ["forecast", "yhat_lower", "yhat_upper", "run_time"]
-
-            # Transform data to LineBuilder objects
-            builders: list = transform_to_influx_line(
-                forecast_data, output_measurement, fields_list, tag_values
-            )
-            influxdb3_local.info(f"[{task_id}] Writing {len(builders)} lines to InfluxDB")
-
-            # Write forecast data to InfluxDB
-            max_retries: int = 3
-            success, error, retries = write_downsampled_data(
-                influxdb3_local,
-                builders,
-                max_retries=max_retries,
-                target_measurement=output_measurement,
-                target_database=target_database,
-                task_id=task_id,
-            )
-            if success:
-                influxdb3_local.info(
-                    f"[{task_id}] Forecast written to {output_measurement}. Forecast generation completed."
-                )
-                return {
-                    "message": f"[{task_id}] Forecast written to {output_measurement}. Forecast generation completed."
-                }
-            else:
-                influxdb3_local.error(f"[{task_id}] Failed to write forecast: {error}")
-                return {"message": f"[{task_id}] Failed to write forecast: {error}"}
-
-        else:
-            influxdb3_local.error(
-                f"[{task_id}] Validation failed, forecast not written to {output_measurement}"
-            )
-            return {
-                "message": f"[{task_id}] Validation failed, forecast not written to {output_measurement}"
-            }
-
+    except (ForecastError, json.JSONDecodeError) as e:
+        influxdb3_local.error(f"[{task_id}] {e}")
+        return {"message": f"[{task_id}] {e}"}
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
         return {"message": f"[{task_id}] Unexpected error: {e}"}

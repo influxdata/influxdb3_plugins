@@ -3,6 +3,7 @@
 #   --trigger-arguments config_file_path=<relative_path>
 # Example: If the file is at /plugins/configs/prophet_forecasting_scheduler.toml, use
 #   config_file_path=configs/prophet_forecasting_scheduler.toml
+# When this file is used, it replaces the inline trigger arguments.
 
 ########## Required Parameters ##########
 # InfluxDB measurement to query for historical data
@@ -14,15 +15,16 @@ measurement = "your_measurement"  # e.g., "cpu_load", "temperature", "home"
 field = "your_field"  # e.g., "value", "temp"
 
 # Historical window duration for training data
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks), m (months), q (quarters), y (years)
+# Format: <number><unit>, where unit is us, ms, s (seconds), min (minutes), h (hours),
+# d (days), w (weeks), m (months ≈30.42d), q (quarters ≈91.25d), y (years = 365d)
 window = "your_window"  # e.g., "7d", "90d"
 
 # Future duration to forecast
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks), m (months), q (quarters), y (years)
+# Format: <number><unit>, same units as window
 forecast_horizont = "your_forecast_horizont"  # e.g., "1h", "7d"
 
 # Tag filters for querying specific tag values
-# Format: {tag_name = tag_value, ...}
+# Format: {tag_name = tag_value, ...} or the string form "tag:value.tag2:value2"
 tag_values = { tag1 = "your_tag_value" }  # e.g., { room = "Kitchen" }
 
 # Destination measurement for writing forecast results
@@ -30,11 +32,12 @@ tag_values = { tag1 = "your_tag_value" }  # e.g., { room = "Kitchen" }
 target_measurement = "your_target_measurement"  # e.g., "temperature_forecast", "cpu_forecast"
 
 # Mode of operation
-# Specify "train" to train a new model for each trigger, or "predict" to load existing or train if not found
+# "train" trains a new in-memory model on every run;
+# "predict" loads the saved model for unique_suffix, or trains and saves it when no file exists
 model_mode = "your_mode"  # e.g., "train", "predict"
 
-# Unique identifier for model versioning and storage
-# Specify a unique string (e.g., date_version)
+# Model version identifier, also used as the model file name suffix
+# Up to 64 characters from letters, digits, ".", "_" and "-"
 unique_suffix = "your_unique_suffix"  # e.g., "20250619_v1", "20250701_v2"
 
 ########## Optional Parameters ##########
@@ -51,48 +54,58 @@ unique_suffix = "your_unique_suffix"  # e.g., "20250619_v1", "20250701_v2"
 #changepoints = ["your_date"]  # e.g., ["2025-01-01", "2025-06-01"]
 
 # Custom holiday dates
-# Specify a space-separated list of dates in ISO format (YYYY-MM-DD)
+# Specify a list of dates in ISO format (YYYY-MM-DD)
 #holiday_date_list = ["your_holiday_date"]  # e.g., ["2025-01-01", "2025-12-25"]
 
 # Names for custom holidays
-# Specify a dot-separated list matching holiday_date_list
-#holiday_names = ["your_holiday_name"]  # e.g., "New Year", "Christmas"
+# Specify a list matching holiday_date_list in length
+#holiday_names = ["your_holiday_name"]  # e.g., ["New Year", "Christmas"]
 
 # Built-in holiday country codes
-# Specify a dot-separated list (e.g., "US.UK")
-#holiday_country_names = ["your_country_code"]  # e.g., ["US", "UK"]
+# Specify a list of country codes
+#holiday_country_names = ["your_country_code"]  # e.g., ["US"]; only the first entry is used
 
 # Manually specified frequency
-# Specify a string (e.g., "1D", "1H"); if not provided, frequency is inferred from data
-#inferred_freq = "your_frequency"  # e.g., "1s", "1D"
+# Specify a pandas frequency alias: fixed ("1s", "30min", "1h") or calendar ("D", "W-SUN", "MS", "QS");
+# if omitted, frequency is inferred from data
+#inferred_freq = "your_frequency"  # e.g., "1s", "1h", "MS"
 
-# Duration for validation window
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks), m (months), q (quarters), y (years); default: "0s"
+# Duration held back from training and used to validate the forecast
+# Format: <number><unit>, same units as window; default: "0s" (no validation)
 #validation_window = "your_validation_window"  # e.g., "3d", "10s"
 
+# How actual and forecasted values are paired during validation
+# "position" (default) pairs them in time order, "nearest" pairs each actual value with the
+# closest forecast point within half a frequency step
+#validation_alignment = "position"  # e.g., "nearest"
+
 # Threshold for Mean Squared Relative Error
-# Specify a float; default is infinite
+# Specify a float >= 0; default is infinite (no threshold)
 #msre_threshold = 0.0  # e.g., 0.05
 
-# InfluxDB database for writing results
-# Specify the target database name (string)
+# Maximum number of forecast points per run, counting the validation window
+# Specify an integer >= 1; default is 10000
+#max_forecast_points = 10000  # e.g., 50000
+
+# Database for forecast results
+# Defaults to a database named "default", which is created on first write
 #target_database = "your_target_database"  # e.g., "forecast_db"
 
 # Send alerts if validation fails
-# Specify a boolean (true/false); default is "false"; requires Sender-Specific Settings if true
+# Specify a boolean (true/false); default is false; requires Sender-Specific Settings if true
 #is_sending_alert = false  # e.g., true
 
 # Template for notification message on validation failure
 # Use variables: $version, $measurement, $field, $start_time, $end_time, $output_measurement
-# Will be used if is_sending_alert = "true"
+# Will be used if is_sending_alert = true
 #notification_text = "your_notification_template"  # e.g., "Validation failed for model:$version on measurement:$measurement.$field"
 
 # Notification channels
-# Specify a list of channels (strings); required if is_sending_alert = "true"
+# Specify a list of channels (strings); required if is_sending_alert = true
 #senders = ["your_channel"]  # e.g., ["slack", "sms"]
 
 # Custom URL path for notification sender plugin
-# Specify a custom path (string); defaults to "notify" if omitted; used if is_sending_alert = "true"
+# Specify a custom path (string); defaults to "notify" if omitted; used if is_sending_alert = true
 #notification_path = "your_notification_path"  # e.g., "notify", "custom/notify"
 
 # InfluxDB API token for notifications
@@ -100,7 +113,7 @@ unique_suffix = "your_unique_suffix"  # e.g., "20250619_v1", "20250701_v2"
 #influxdb3_auth_token = "your_api_token"  # e.g., "apiv3_AuHk_8LYFHTa1QM..."
 
 # Override InfluxDB port for notifications
-# Specify a port number (integer); defaults to 8181 if omitted
+# Specify a port number (1-65535); defaults to 8181 if omitted
 #port_override = 8181  # e.g., 8183
 
 ########## Sender-Specific Settings ##########
@@ -124,21 +137,15 @@ unique_suffix = "your_unique_suffix"  # e.g., "20250619_v1", "20250701_v2"
 # Optional: Custom HTTP headers (Base64-encoded JSON string)
 #http_headers = "your_http_headers"  # e.g., "eyJhdXRoIjogIkJlYXJlciBZT1VSX1RPS0VOIn0="
 
-# --- SMS (Twilio) ---
-# Twilio Account SID (required, or via TWILIO_SID env var)
+# --- SMS and WhatsApp (Twilio) ---
+# Twilio Account SID (required)
 #twilio_sid = "your_twilio_sid"  # e.g., "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
-# Twilio Auth Token (required, or via TWILIO_TOKEN env var)
+# Twilio Auth Token (required)
 #twilio_token = "your_twilio_token"  # e.g., "your_auth_token"
 # Twilio sender number (required, format: +1234567890)
-# twilio_from_number = "your_twilio_from_number"  # e.g., "+1234567890"
-# Recipient phone number (required, format: +0987654321)
-# twilio_to_number = "your_twilio_to_number"  # e.g., "+0987654321"
-
-# --- WhatsApp (via Twilio) ---
-# WhatsApp sender number (required, format: +1234567890)
-#whatsapp_from_number = "your_whatsapp_from_number"  # e.g., "+1234567890"
-# WhatsApp recipient number (required, format: +0987654321)
-#whatsapp_to_number = "your_whatsapp_to_number"  # e.g., "+0987654321"
+#twilio_from_number = "your_twilio_from_number"  # e.g., "+1234567890"
+# Recipient number (required, format: +0987654321)
+#twilio_to_number = "your_twilio_to_number"  # e.g., "+0987654321"
 
 ###### Example: Create Trigger Using This Config ######
 # influxdb3 create trigger \

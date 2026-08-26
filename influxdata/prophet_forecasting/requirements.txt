@@ -1,4 +1,4 @@
+influxdata-plugin-utils>=0.3.0
 pandas
-numpy
 requests
 prophet

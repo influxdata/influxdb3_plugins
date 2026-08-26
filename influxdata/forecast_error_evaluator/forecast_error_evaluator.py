@@ -29,49 +29,55 @@
         {
             "name": "error_metric",
             "example": "rmse",
-            "description": "The error metric to use (mse, mae, rmse, mape, smape).",
+            "description": "The error metric to use (mse, mae, rmse, mape, smape). Computed per timestamp, so rmse equals mae.",
             "required": true
         },
         {
             "name": "error_thresholds",
             "example": "INFO-'0.5':WARN-'0.9':ERROR-'1.2':CRITICAL-'1.5'",
-            "description": "The threshold value for the error metric to trigger an anomaly with levels.",
+            "description": "Colon-separated <level>-<threshold> pairs (a TOML config may use a table instead). Levels: INFO, WARN, ERROR, CRITICAL. Thresholds must be above 0. Every level is evaluated on its own, so a point above several thresholds alerts once per level.",
             "required": true
         },
         {
             "name": "window",
             "example": "1h",
-            "description": "Time window for data analysis (e.g., '1h' for 1 hour). Units: 's', 'min', 'h', 'd', 'w'.",
+            "description": "Time window for data analysis (e.g., `1h` for 1 hour). Must be a positive duration. Units: `us`, `ms`, `s`, `min`, `h`, `d`, `w`.",
             "required": true
         },
         {
             "name": "senders",
             "example": "slack",
-            "description": "Dot-separated list of notification channels (e.g., slack.discord).",
+            "description": "Dot-separated list of notification channels (a TOML config may use a list instead). Supported channels: slack, discord, http, sms, whatsapp.",
             "required": true
         },
         {
             "name": "influxdb3_auth_token",
             "example": "YOUR_API_TOKEN",
-            "description": "API token for InfluxDB 3. Can be set via INFLUXDB3_AUTH_TOKEN environment variable.",
+            "description": "API token for InfluxDB 3. Can be set via `INFLUXDB3_AUTH_TOKEN` environment variable.",
             "required": false
         },
         {
             "name": "min_condition_duration",
             "example": "5min",
-            "description": "Minimum duration for an anomaly condition to persist before triggering a notification (e.g., '5m'). Units: 's', 'min', 'h', 'd', 'w'.",
+            "description": "Minimum duration for an anomaly condition to persist before triggering a notification (e.g., `5min`). Units: `us`, `ms`, `s`, `min`, `h`, `d`, `w`. Default: `0s` (alert on the first point above the threshold).",
             "required": false
         },
         {
             "name": "rounding_freq",
             "example": "1s",
-            "description": "Frequency to round timestamps for alignment (e.g., '1s').",
+            "description": "Fixed pandas frequency used to round timestamps before matching forecast to actual rows (e.g., `1s`, `500ms`, `5min`, `1h`). Default: no rounding.",
+            "required": false
+        },
+        {
+            "name": "max_notifications_per_run",
+            "example": "20",
+            "description": "Maximum number of notifications sent by a single run. Levels are processed from the highest threshold down, and alerts beyond the limit are counted in a warning and not resent later. Default: 20.",
             "required": false
         },
         {
             "name": "notification_text",
             "example": "[$level] Forecast error alert in $measurement.$field: $metric=$error. Tags: $tags",
-            "description": "Template for notification message with variables $measurement, $level, $field, $error, $metric, $tags.",
+            "description": "Template for notification message with variables `$measurement`, `$level`, `$field`, `$error`, `$metric`, `$tags`, `$timestamp`.",
             "required": false
         },
         {
@@ -95,7 +101,7 @@
         {
             "name": "slack_headers",
             "example": "eyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vanNvbiJ9",
-            "description": "Optional headers as base64-encoded string for HTTP notifications.",
+            "description": "Optional headers as base64-encoded string for Slack notifications.",
             "required": false
         },
         {
@@ -105,9 +111,9 @@
             "required": false
         },
         {
-            "name": "slack_headers",
+            "name": "discord_headers",
             "example": "eyJDb250ZW50LVR5cGUiOiAiYXBwbGljYXRpb24vanNvbiJ9",
-            "description": "Optional headers as base64-encoded string for HTTP notifications.",
+            "description": "Optional headers as base64-encoded string for Discord notifications.",
             "required": false
         },
         {
@@ -160,16 +166,25 @@ import json
 import os
 import random
 import time
-import tomllib
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from string import Template
 from urllib.parse import urlparse
 
 import pandas as pd
 import requests
+from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.introspection import (
+    get_table_names,
+    get_tag_names,
+    query_window,
+)
+from influxdata_plugin_utils.parsing import (
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
+)
 
 # Supported sender types with their required arguments
 AVAILABLE_SENDERS = {
@@ -188,16 +203,236 @@ AVAILABLE_SENDERS = {
 # Keywords to skip when validating sender args
 EXCLUDED_KEYWORDS = ["headers", "token", "sid"]
 
+# Error metrics computed per timestamp
+AVAILABLE_ERROR_METRICS = ("mse", "mae", "rmse", "mape", "smape")
+
+# Severity levels accepted in error_thresholds
+THRESHOLD_LEVELS = ("INFO", "WARN", "ERROR", "CRITICAL")
+
+_DEFAULT_NOTIFICATION_TEXT = (
+    "[$level] Forecast error alert in $measurement.$field: $metric=$error. Tags: $tags"
+)
+
+
+def parse_window(raw) -> timedelta:
+    """Parse the analysis window, rejecting non-positive durations."""
+    window: timedelta = parse_timedelta(raw)
+    if window <= timedelta(0):
+        raise ValueError(f"Invalid window: {raw!r} (must be a positive duration)")
+    return window
+
+
+def parse_error_metric(raw) -> str:
+    """Normalize the error metric name and reject unsupported ones."""
+    metric: str = str(raw).strip().lower()
+    if metric not in AVAILABLE_ERROR_METRICS:
+        raise ValueError(
+            f"Unsupported error_metric {raw!r}; use {'|'.join(AVAILABLE_ERROR_METRICS)}"
+        )
+    return metric
+
+
+def parse_rounding_freq(raw) -> str:
+    """Validate a pandas rounding frequency, treating an empty value as no rounding."""
+    freq: str = str(raw).strip()
+    if not freq:
+        return ""
+    try:
+        pd.Timestamp(0).round(freq)
+    except Exception:
+        raise ValueError(
+            f"Invalid rounding_freq {raw!r}; use a fixed pandas frequency "
+            f"such as 1s, 500ms, 5min or 1h"
+        )
+    return freq
+
+
+_VALIDATORS = [
+    Validator("forecast_measurement", required=True, cast=str),
+    Validator("actual_measurement", required=True, cast=str),
+    Validator("forecast_field", required=True, cast=str),
+    Validator("actual_field", required=True, cast=str),
+    Validator("error_metric", required=True, cast=parse_error_metric),
+    Validator("error_thresholds", required=True),
+    Validator("window", required=True, cast=parse_window),
+    Validator("senders", required=True),
+    Validator("min_condition_duration", default="0s", cast=parse_timedelta),
+    Validator("rounding_freq", default="", cast=parse_rounding_freq),
+    Validator(
+        "max_notifications_per_run",
+        default=20,
+        cast=lambda raw: parse_int(raw, minimum=1),
+    ),
+    Validator("notification_text", default=_DEFAULT_NOTIFICATION_TEXT, cast=str),
+    Validator("notification_path", default="notify", cast=str),
+    Validator(
+        "port_override",
+        default=8181,
+        cast=lambda raw: parse_int(raw, minimum=1, maximum=65535),
+    ),
+]
+
+
+def _load_config(influxdb3_local, args: dict | None, task_id: str) -> dict | None:
+    """
+    Load the plugin configuration, applying defaults and type casts.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        args (dict | None): Runtime arguments of the trigger.
+        task_id (str): Unique task identifier.
+
+    Returns:
+        dict | None: Config values keyed by lower-case name, or None if loading failed.
+    """
+    config_file_path = (args or {}).get("config_file_path")
+    if config_file_path and not str(config_file_path).endswith(".toml"):
+        influxdb3_local.error(
+            f"[{task_id}] Invalid config file format: expected a .toml file"
+        )
+        return None
+
+    try:
+        loaded = load_plugin_config(
+            args,
+            validators=_VALIDATORS,
+            env_keys=["INFLUXDB3_AUTH_TOKEN"],
+            source="toml" if config_file_path else "args",
+        )
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Failed to load configuration: {e}")
+        return None
+
+    return {key.lower(): value for key, value in loaded.as_dict().items()}
+
+
+def parse_error_thresholds(
+    influxdb3_local, config: dict, task_id: str
+) -> dict[str, float]:
+    """
+    Parse the error thresholds into a mapping of severity level to threshold value.
+
+    Accepts the inline ``<level>-<value>`` form separated by colons and a mapping
+    coming from a TOML table.
+
+    Returns:
+        dict[str, float]: Thresholds keyed by level, empty when nothing is valid.
+
+    Example:
+        >>> parse_error_thresholds(client, {"error_thresholds": "INFO-10:WARN-'20.5'"}, "t")
+        {'INFO': 10.0, 'WARN': 20.5}
+    """
+    raw: str | dict = config["error_thresholds"]
+    if isinstance(raw, dict):
+        pairs: list = list(raw.items())
+    else:
+        pairs = []
+        for part in str(raw).split(":"):
+            part = part.strip()
+            if not part:
+                continue
+            level, separator, value = part.partition("-")
+            if not separator:
+                influxdb3_local.warn(
+                    f"[{task_id}] Skipping threshold '{part}': expected <level>-<value>"
+                )
+                continue
+            pairs.append((level, value))
+
+    thresholds: dict = {}
+    for raw_level, raw_value in pairs:
+        level: str = str(raw_level).strip().upper()
+        if level not in THRESHOLD_LEVELS:
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping threshold '{raw_level}': level must be one of "
+                f"{', '.join(THRESHOLD_LEVELS)}"
+            )
+            continue
+
+        text: str = str(raw_value).strip().strip("'\"")
+        try:
+            threshold: float = float(text)
+        except ValueError:
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping threshold '{level}': '{text}' is not a number"
+            )
+            continue
+
+        if threshold <= 0:
+            # every supported metric is non-negative, so such a threshold flags every point
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping threshold '{level}': {threshold} would flag every "
+                f"point, use a value above 0"
+            )
+            continue
+
+        if level in thresholds:
+            influxdb3_local.warn(
+                f"[{task_id}] Skipping duplicate threshold '{level}': keeping "
+                f"{thresholds[level]}"
+            )
+            continue
+        thresholds[level] = threshold
+
+    return thresholds
+
+
+def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
+    """
+    Parse and validate sender configurations from the loaded config.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        config (dict): Loaded config containing "senders" and the sender-specific
+            keys listed in AVAILABLE_SENDERS.
+        task_id (str): Unique task identifier used for logging context.
+
+    Returns:
+        dict: A mapping `{sender_type: {key: value}}` for each valid sender.
+              For example:
+                {
+                  "slack": {
+                    "slack_webhook_url": "https://hooks.slack.com/...",
+                    "slack_headers": "..."
+                  },
+                  "sms": { ... }
+                }
+
+    Raises:
+        Exception: If no valid senders are found after parsing.
+    """
+    senders_config: defaultdict = defaultdict(dict)
+    senders: list = parse_delimited_list(config["senders"], sep=".")
+
+    for sender in senders:
+        if sender not in AVAILABLE_SENDERS:
+            influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
+            continue
+        for key in AVAILABLE_SENDERS[sender]:
+            if key not in config and not any(ex in key for ex in EXCLUDED_KEYWORDS):
+                influxdb3_local.warn(
+                    f"[{task_id}] Required key '{key}' missing for sender '{sender}'"
+                )
+                senders_config.pop(sender, None)
+                break
+            if "url" in key and not validate_webhook_url(
+                influxdb3_local, sender, config[key], task_id
+            ):
+                senders_config.pop(sender, None)
+                break
+
+            if key not in config:
+                continue
+            senders_config[sender][key] = config[key]
+
+    if not senders_config:
+        raise Exception("No valid senders configured")
+    return senders_config
+
 
 def validate_webhook_url(influxdb3_local, service: str, url: str, task_id: str) -> bool:
     """
     Validate webhook URL format.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        service (str): Type of service (e.g., "slack", "telegram", etc.).
-        url (str): Webhook URL to validate.
-        task_id (str): Unique task identifier.
 
     Returns:
         bool: True if URL is valid, False otherwise
@@ -217,68 +452,6 @@ def validate_webhook_url(influxdb3_local, service: str, url: str, task_id: str) 
         return False
 
 
-def parse_senders(influxdb3_local, args: dict, task_id: str) -> dict:
-    """
-    Parse and validate sender configurations from input arguments.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        args (dict): Input arguments containing:
-            - "senders": dot-separated list of sender types (e.g., "slack.http").
-            - For each sender, its own required keys (see AVAILABLE_SENDERS).
-        task_id (str): Unique task identifier used for logging context.
-
-    Returns:
-        dict: A mapping `{sender_type: {key: value}}` for each valid sender.
-              For example:
-                {
-                  "slack": {
-                    "slack_webhook_url": "https://hooks.slack.com/...",
-                    "slack_headers": "..."
-                  },
-                  "sms": { ... }
-                }
-
-    Raises:
-        Exception: If no valid senders are found after parsing.
-    """
-    senders_config: defaultdict = defaultdict(dict)
-
-    senders: str | list = args.get("senders")
-    if args["use_config_file"]:
-        if not isinstance(senders, list):
-            raise Exception(
-                f"[{task_id}] 'senders' must be a list when using config file"
-            )
-    else:
-        senders = senders.split(".")
-
-    for sender in senders:
-        if sender not in AVAILABLE_SENDERS:
-            influxdb3_local.warn(f"[{task_id}] Invalid sender type: {sender}")
-            continue
-        for key in AVAILABLE_SENDERS[sender]:
-            if key not in args and not any(ex in key for ex in EXCLUDED_KEYWORDS):
-                influxdb3_local.warn(
-                    f"[{task_id}] Required key '{key}' missing for sender '{sender}'"
-                )
-                senders_config.pop(sender, None)
-                break
-            if "url" in key and not validate_webhook_url(
-                influxdb3_local, sender, args[key], task_id
-            ):
-                senders_config.pop(sender, None)
-                break
-
-            if key not in args:
-                continue
-            senders_config[sender][key] = args[key]
-
-    if not senders_config:
-        raise Exception(f"[{task_id}] No valid senders configured")
-    return senders_config
-
-
 def interpolate_notification_text(text: str, row_data: dict) -> str:
     """
     Replace variables in notification text with actual values from row data.
@@ -295,7 +468,7 @@ def interpolate_notification_text(text: str, row_data: dict) -> str:
 
 def send_notification(
     influxdb3_local, port: int, path: str, token: str, payload: dict, task_id: str
-) -> None:
+) -> bool:
     """
     Send a JSON POST to the given InfluxDB 3 webhook endpoint, with up to
     3 retry attempts and randomized backoff delays between attempts.
@@ -308,8 +481,8 @@ def send_notification(
         payload (dict): Dict to serialize as JSON in the POST body.
         task_id (str): Unique task identifier.
 
-    Raises:
-        requests.RequestException: If all retries fail or a non-2xx response is received.
+    Returns:
+        bool: True when the alert was accepted, False when every attempt failed.
     """
     url: str = f"http://localhost:{port}/api/v3/engine/{path}"
     headers: dict = {
@@ -328,7 +501,7 @@ def send_notification(
             influxdb3_local.info(
                 f"[{task_id}] Alert sent to notification plugin with results: {resp.json()['results']}"
             )
-            break
+            return True
         except requests.RequestException as e:
             influxdb3_local.warn(
                 f"[{task_id}] [Attempt {attempt}/{max_retries}] Error sending alert to notification plugin: {e}"
@@ -344,120 +517,46 @@ def send_notification(
                     f"[{task_id}] Failed to send alert to notification plugin after {max_retries} attempts: {e}"
                 )
 
+    return False
 
-def parse_port_override(args: dict, task_id: str) -> int:
+
+def resolve_shared_tags(
+    influxdb3_local, forecast_measurement: str, actual_measurement: str, task_id: str
+) -> list[str]:
     """
-    Parse and validate 'port_override' from args (default 8181).
+    Return the tags present in both measurements, sorted for stable cache keys.
 
     Args:
-        args (dict): Runtime argument's dict.
+        influxdb3_local: InfluxDB client instance.
+        forecast_measurement (str): Measurement holding forecasted values.
+        actual_measurement (str): Measurement holding actual values.
         task_id (str): Unique task identifier.
 
     Returns:
-        int: Validated port number between 1 and 65535.
-
-    Raises:
-        Exception if invalid or out of range.
+        list[str]: Tag names usable for matching both series.
     """
-    raw: str | int = args.get("port_override", 8181)
-    try:
-        port = int(raw)
-    except (ValueError, TypeError):
-        raise Exception(f"[{task_id}] 'port_override' must be an integer, got '{raw}'")
-    if not (1 <= port <= 65535):
-        raise Exception(
-            f"[{task_id}] 'port_override' {port} is out of valid range 1–65535"
+    forecast_tags: set = set(get_tag_names(influxdb3_local, forecast_measurement))
+    actual_tags: set = set(get_tag_names(influxdb3_local, actual_measurement))
+
+    only_in_one: set = forecast_tags ^ actual_tags
+    if only_in_one:
+        influxdb3_local.warn(
+            f"[{task_id}] Ignoring tags missing from one of the measurements: "
+            f"{', '.join(sorted(only_in_one))}"
         )
-    return port
+
+    shared: list = sorted(forecast_tags & actual_tags)
+    if not shared:
+        influxdb3_local.info(
+            f"[{task_id}] No tags shared by '{forecast_measurement}' and "
+            f"'{actual_measurement}', matching on time only"
+        )
+    return shared
 
 
-def parse_time_duration(raw: str, task_id: str) -> timedelta:
-    """
-    Convert a duration string (e.g., "5m", "2h") into a timedelta.
-
-    Args:
-        raw (str): Duration with unit suffix.
-        task_id (str): Unique task identifier (for errors).
-
-    Returns:
-        timedelta.
-
-    Raises:
-        Exception if format is invalid or number conversion fails.
-    """
-    units: dict = {
-        "s": "seconds",
-        "min": "minutes",
-        "h": "hours",
-        "d": "days",
-        "w": "weeks",
-    }
-    num_part, unit_part = "", ""
-    for u in sorted(units.keys(), key=len, reverse=True):
-        if raw.endswith(u):
-            num_part = raw[: -len(u)]
-            unit_part = u
-            break
-    if not num_part or unit_part not in units:
-        raise Exception(f"[{task_id}] Invalid duration '{raw}'")
-    try:
-        val = int(num_part)
-    except ValueError:
-        raise Exception(f"[{task_id}] Invalid number in duration '{raw}'")
-    return timedelta(**{units[unit_part]: val})
-
-
-def get_all_measurements(influxdb3_local) -> list[str]:
-    """
-    Retrieves a list of all tables of type 'BASE TABLE' from the current InfluxDB database.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-
-    Returns:
-        list[str]: List of table names (e.g., ["cpu", "memory", "disk"]).
-    """
-    result: list = influxdb3_local.query("SHOW TABLES")
-    return [
-        row["table_name"] for row in result if row.get("table_type") == "BASE TABLE"
-    ]
-
-
-def parse_float(float_str_val: str, task_id: str) -> float:
-    if float_str_val[0] == float_str_val[-1] and float_str_val[0] in ("'", '"'):
-        float_val: str = float_str_val[1:-1]
-    else:
-        float_val = float_str_val
-
-    try:
-        return float(float_val)
-    except ValueError:
-        raise Exception(f"[{task_id}] Invalid float value: '{float_val}'")
-
-
-def get_tag_names(influxdb3_local, measurement: str, task_id: str) -> list[str]:
-    """
-    Retrieve all tag column names (type Dictionary(Int32, Utf8)) for a measurement.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        measurement (str): Name of the measurement to inspect.
-        task_id (str): Unique task identifier.
-
-    Returns:
-        List of tag names (strings). Empty list if none found.
-    """
-    query: str = """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = $measurement
-          AND data_type = 'Dictionary(Int32, Utf8)'
-    """
-    res: list = influxdb3_local.query(query, {"measurement": measurement})
-    if not res:
-        influxdb3_local.info(f"[{task_id}] No tags found for '{measurement}'")
-        return []
-    return [row["column_name"] for row in res]
+def format_tags(row: pd.Series, tags: list[str]) -> str:
+    """Render the tag values of a row as a comma-separated list."""
+    return ", ".join(f"{tag}={row.get(tag, 'None')}" for tag in tags)
 
 
 def generate_cache_key(
@@ -469,12 +568,12 @@ def generate_cache_key(
     Args:
         measurement (str): Measurement name.
         field (str): Field name under test.
-        threshold_level (str): One of "INFO", "WARN", "ERROR".
+        threshold_level (str): One of THRESHOLD_LEVELS.
         tags (list[str]): Tag column names to include.
         row (pd.Series): A row of data (from pandas DataFrame), used to pull tag values.
 
     Returns:
-        str: Key like "cpu:temp:host=server1:region=us-west"
+        str: Key like "cpu:temp:WARN:host=server1:region=us-west"
     """
     key: str = f"{measurement}:{field}:{threshold_level}"
     for tag in sorted(tags):
@@ -483,460 +582,425 @@ def generate_cache_key(
     return key
 
 
-def parse_error_thresholds(
-    influxdb3_local, args: dict, task_id: str
-) -> dict[str, float]:
-    """
-    Parses a string of error thresholds into a dictionary mapping severity
-        levels to threshold values or uses values from a config file.
-
-    Args:
-        influxdb3_local: An InfluxDB 3 logger instance for logging warnings.
-        args (dict): A dictionary containing the `error_thresholds` key with a string value
-            specifying thresholds in the format "level-threshold:level-threshold" (e.g., "INFO-10:WARN-20.5").
-        task_id (str): A unique identifier for the task, included in warning and error messages.
-
-    Returns:
-        dict[str, float]: A dictionary mapping severity levels (e.g., "INFO", "WARN") to their
-            corresponding threshold values as floats.
-
-    Raises:
-        Exception: If no valid thresholds are parsed from the input string, with a message
-            including the `task_id` and a description of the error.
-
-    Example:
-        args = {"error_thresholds": "INFO-10:WARN-'20.5':ERROR-30"}
-        parse_error_thresholds(influxdb3_local, args, "task123")
-        {'INFO': 10.0, 'WARN': 20.5, 'ERROR': 30.0}
-    """
-    threshold_input: str | dict = args["error_thresholds"]
-    thresholds: dict = {}
-
-    if args["use_config_file"]:
-        if isinstance(threshold_input, dict):
-            return threshold_input
-        else:
-            raise Exception(
-                f"[{task_id}] Invalid format of error_threshold, expected a dictionary, got '{type(threshold_input)}'"
-            )
-
-    parts = threshold_input.split(":")
-    for part in parts:
-        if not "-" in part:
-            influxdb3_local.warn(
-                f"[{task_id}] Invalid format of error_threshold, part {part} should be of form <level>-<threshold>"
-            )
-            continue
-        level, thresh_str = part.split("-")
-        if level not in ["INFO", "WARN", "ERROR", "CRITICAL"]:
-            influxdb3_local.warn(
-                f"[{task_id}] Invalid format of error_threshold, {level} is not a valid level"
-            )
-            continue
-        if thresh_str[0] == thresh_str[-1] and thresh_str[0] in ("'", '"'):
-            thresh_str = thresh_str[1:-1]
-        try:
-            thresholds[level] = float(thresh_str)
-        except ValueError:
-            influxdb3_local.warn(
-                f"[{task_id}] Invalid format of error_threshold, part {part} should be of form <level>-<int/float>"
-            )
-            continue
-
-    if not thresholds:
-        raise Exception(
-            f"[{task_id}] Invalid format of error_threshold, no valid thresholds found"
-        )
-
-    return thresholds
-
-
-def generate_query(
+def query_series(
+    influxdb3_local,
     measurement: str,
     field: str,
     tags: list[str],
     start_time: datetime,
     end_time: datetime,
-) -> str:
+    task_id: str,
+) -> pd.DataFrame | None:
     """
-    Generate an InfluxDB query to select time, a specified field, and optional tags from a measurement within a time range.
-
-    Args:
-        measurement (str): Name of the InfluxDB measurement (table).
-        field (str): Name of the field to query.
-        start_time (datetime): Start of the time range (inclusive).
-        end_time (datetime): End of the time range (exclusive).
-        tags (list[str], optional): List of tag names to include in the SELECT clause. Defaults to None.
+    Query one measurement window and return it as a frame.
 
     Returns:
-        str: Formatted InfluxDB query string.
+        pd.DataFrame | None: The queried rows, or None when there is nothing usable.
     """
-    # If tags is None or empty, default to selecting only time and field
-    select_clause = f'time, "{field}"'
-    if tags:
-        # Add tags to the SELECT clause, ensuring proper escaping
-        select_clause += ", " + ", ".join([f'"{tag}"' for tag in tags])
+    rows: list = query_window(
+        influxdb3_local,
+        measurement,
+        start=start_time.isoformat(),
+        end=end_time.isoformat(),
+        columns=["time", field, *tags],
+    )
+    if not rows:
+        influxdb3_local.info(
+            f"[{task_id}] No data in {measurement}.{field} from {start_time} to {end_time}"
+        )
+        return None
 
-    return f"SELECT {select_clause} FROM '{measurement}' WHERE time >= '{start_time.isoformat()}' AND time < '{end_time.isoformat()}' ORDER BY time"
+    df: pd.DataFrame = pd.DataFrame(rows)
+    if "time" not in df.columns or field not in df.columns:
+        influxdb3_local.error(
+            f"[{task_id}] Query results for '{measurement}' are missing 'time' or '{field}'"
+        )
+        return None
+
+    influxdb3_local.info(f"[{task_id}] Retrieved {len(df)} rows from '{measurement}'")
+    return df
+
+
+def align_frames(
+    influxdb3_local,
+    df_forecast: pd.DataFrame,
+    df_actual: pd.DataFrame,
+    tags: list[str],
+    rounding_freq: str,
+    task_id: str,
+) -> pd.DataFrame | None:
+    """
+    Round timestamps and inner-join the forecast frame with the actual frame.
+
+    Rows sharing a key are collapsed to the earliest one, because duplicate keys
+    would join into a cross product of unrelated points.
+
+    Returns:
+        pd.DataFrame | None: Matched rows, or None when nothing overlaps.
+    """
+    for df in (df_forecast, df_actual):
+        df["time"] = pd.to_datetime(df["time"], unit="ns")
+        if rounding_freq:
+            df["time"] = df["time"].dt.round(rounding_freq)
+
+    keys: list = ["time", *tags]
+    forecast_rows, actual_rows = len(df_forecast), len(df_actual)
+    df_forecast = df_forecast.sort_values("time").drop_duplicates(
+        subset=keys, keep="first"
+    )
+    df_actual = df_actual.sort_values("time").drop_duplicates(subset=keys, keep="first")
+    collapsed_forecast: int = forecast_rows - len(df_forecast)
+    collapsed_actual: int = actual_rows - len(df_actual)
+    if collapsed_forecast or collapsed_actual:
+        influxdb3_local.info(
+            f"[{task_id}] Collapsed {collapsed_forecast} forecast and {collapsed_actual} "
+            f"actual rows sharing a rounded timestamp"
+        )
+
+    merged: pd.DataFrame = pd.merge(
+        df_forecast[[*keys, "forecast"]],
+        df_actual[[*keys, "actual"]],
+        on=keys,
+        how="inner",
+    )
+
+    matched_rows: int = len(merged)
+    merged = merged.dropna(subset=["forecast", "actual"])
+    incomplete_rows: int = matched_rows - len(merged)
+    if incomplete_rows:
+        influxdb3_local.info(
+            f"[{task_id}] Skipped {incomplete_rows} matched rows without both values"
+        )
+
+    if merged.empty:
+        influxdb3_local.error(f"[{task_id}] No overlapping timestamps after merge")
+        return None
+
+    influxdb3_local.info(f"[{task_id}] Merged dataset has {len(merged)} rows")
+    return merged
+
+
+def compute_error(
+    influxdb3_local, merged: pd.DataFrame, error_metric: str, task_id: str
+) -> pd.DataFrame | None:
+    """
+    Add a per-timestamp "error" column for the configured metric.
+
+    Returns:
+        pd.DataFrame | None: The frame with an "error" column, or None when the
+            metric is undefined for every row.
+    """
+    if error_metric == "mape":
+        usable: pd.Series = merged["actual"] != 0
+    elif error_metric == "smape":
+        usable = (merged["forecast"].abs() + merged["actual"].abs()) != 0
+    else:
+        usable = pd.Series(True, index=merged.index)
+
+    undefined_rows: int = int((~usable).sum())
+    if undefined_rows:
+        influxdb3_local.warn(
+            f"[{task_id}] Skipping {undefined_rows} rows where {error_metric.upper()} "
+            f"is undefined because its denominator is zero"
+        )
+        merged = merged[usable]
+    if merged.empty:
+        influxdb3_local.error(
+            f"[{task_id}] No rows left to evaluate {error_metric.upper()}"
+        )
+        return None
+
+    merged = merged.copy()
+    difference: pd.Series = merged["forecast"] - merged["actual"]
+    if error_metric == "mse":
+        merged["error"] = difference**2
+    elif error_metric == "mape":
+        merged["error"] = difference.abs() / merged["actual"].abs() * 100
+    elif error_metric == "smape":
+        merged["error"] = (
+            200 * difference.abs() / (merged["forecast"].abs() + merged["actual"].abs())
+        )
+    else:
+        # per timestamp the root of the squared difference is the absolute difference
+        merged["error"] = difference.abs()
+    return merged
 
 
 def process_scheduled_call(
     influxdb3_local, call_time: datetime, args: dict | None = None
 ):
     """
-    Scheduler trigger to evaluate forecast‐error metrics and alert on elevated model error.
+    Scheduler trigger to evaluate forecast-error metrics and alert on elevated model error.
 
-    Compares two time series (forecast vs. actual) over a rolling window, computes a per‐timestamp
-    error metric (MSE/MAE/RMSE), and triggers notifications if any computed error exceeds a threshold.
+    Matches forecast and actual values over a rolling window, computes a per-timestamp
+    error metric, and notifies for every point that reaches a configured threshold.
 
     Args:
         influxdb3_local: InfluxDB client for queries, caching, and logging.
         call_time (datetime): UTC timestamp at which this scheduled function runs.
         args (dict):
             Required:
-              - "forecast_measurement" (str): Measurement name where to get forecast data.
-              - "actual_measurement" (str): Measurement name where to get actual data.
-              - "forecast_field" (str): Column name in forecast results (numeric).
-              - "actual_field" (str): Column name in actual results (numeric).
-              - "error_metric" (str): One of ["mse", "mae", "rmse"].
-              - "error_thresholds" (str): Colon-separated list of <level>-<threshold> pairs.
-              - "window" (str): Duration string for lookback (e.g., "1h", "30m").
+              - "forecast_measurement" (str): Measurement holding forecast data.
+              - "actual_measurement" (str): Measurement holding actual data.
+              - "forecast_field" (str): Numeric field with forecasted values.
+              - "actual_field" (str): Numeric field with actual values.
+              - "error_metric" (str): One of mse, mae, rmse, mape, smape.
+              - "error_thresholds" (str): Colon-separated <level>-<threshold> pairs.
+              - "window" (str): Positive duration for the lookback (e.g., "1h").
               - "senders" (str): Dot-separated list of notification channels.
             Optional:
-              - "min_condition_duration" (str): If provided (e.g., "5m"), anomaly must persist
-                   for at least that duration before alerting.
-              - "rounding_freq" (str): If provided (e.g., "1s"), timestamps are rounded to nearest
-                   multiple of this duration.
-              - "notification_text" (str): Template for alert, with variables:
-                   $measurement, $field, $timestamp, $error, $metric, $tags.
-                   Defaults to "Forecast error alert in $measurement.$field at $timestamp: $metric=$error. Tags: $tags".
+              - "min_condition_duration" (str): Time an anomaly must persist before
+                   alerting (default "0s").
+              - "rounding_freq" (str): Pandas frequency for timestamp rounding.
+              - "max_notifications_per_run" (int): Notification cap per run (default 20).
+              - "notification_text" (str): Template with variables $measurement, $level,
+                   $field, $error, $metric, $tags, $timestamp.
               - "notification_path" (str): Notification plugin path (default "notify").
               - "port_override" (int): HTTP port for notification plugin (default 8181).
-              - "influxdb3_auth_token" (str): API v3 token (or via ENV var INFLUXDB3_AUTH_TOKEN).
-              - "config_file_path": (str), path to config file to override args.
+              - "influxdb3_auth_token" (str): API v3 token (or via INFLUXDB3_AUTH_TOKEN).
+              - "config_file_path" (str): Path to a TOML config replacing the args.
 
     Exceptions:
         All exceptions are caught and logged via influxdb3_local.error.
     """
     task_id: str = str(uuid.uuid4())
-    influxdb3_local.info(f"[{task_id}] Forecast error check started at {call_time} with args: {args}")
+    influxdb3_local.info(f"[{task_id}] Forecast error check started at {call_time}")
 
-    # Override args with config file if specified
-    if args:
-        if path := args.get("config_file_path", None):
-            if not path.endswith(".toml"):
-                influxdb3_local.error(
-                    f"[{task_id}] Invalid config file format: expected a .toml file"
-                )
-                return
-            try:
-                plugin_dir_var: str | None = os.getenv("PLUGIN_DIR", None)
-                if plugin_dir_var:
-                    file_path = Path(plugin_dir_var) / path
-                else:
-                    # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-                    #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-                    #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-                    candidates: list[str] = []
-                    if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                        candidates.append(influxdb3_plugin_dir)
-                    if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                        candidates.append(str(Path(virtual_env).parent))
-
-                    resolved = None
-                    for base in candidates:
-                        candidate = Path(base) / path
-                        if candidate.exists():
-                            resolved = candidate
-                            break
-
-                    if resolved is None:
-                        candidates_str = ", ".join(candidates) if candidates else "none available"
-                        influxdb3_local.error(
-                            f"[{task_id}] PLUGIN_DIR env var not set and config file path "
-                            f"'{path}' was not found via fallbacks (tried: {candidates_str})"
-                        )
-                        return
-                    file_path = resolved
-                influxdb3_local.info(f"[{task_id}] Reading config file {file_path}")
-                with open(file_path, "rb") as f:
-                    args = tomllib.load(f)
-                    args["use_config_file"] = True
-                influxdb3_local.info(f"[{task_id}] New args content: {args}")
-            except Exception:
-                influxdb3_local.error(f"[{task_id}] Failed to read config file")
-                return
-        else:
-            args["use_config_file"] = False
-
-    # Validate required arguments
-    required_keys: list = [
-        "forecast_measurement",
-        "actual_measurement",
-        "forecast_field",
-        "actual_field",
-        "error_metric",
-        "error_thresholds",
-        "window",
-        "senders",
-    ]
-    if not args or any(key not in args for key in required_keys):
-        influxdb3_local.error(
-            f"[{task_id}] Missing some of the required arguments: {', '.join(required_keys)}"
-        )
+    config: dict | None = _load_config(influxdb3_local, args, task_id)
+    if config is None:
         return
 
     try:
-        # Parse common config
-        actual_measurement: str = args.get("actual_measurement")
-        forecast_measurement: str = args.get("forecast_measurement")
-        forecast_field: str = args["forecast_field"]
-        actual_field: str = args["actual_field"]
-        error_metric: str = args["error_metric"].lower()
-        influxdb3_local.info(
-            f"[{task_id}] Configuration parsed - Forecast: {forecast_measurement}.{forecast_field}, Actual: {actual_measurement}.{actual_field}, Metric: {error_metric}"
+        forecast_measurement: str = config["forecast_measurement"]
+        actual_measurement: str = config["actual_measurement"]
+        tables: list = get_table_names(influxdb3_local)
+        for measurement in (forecast_measurement, actual_measurement):
+            if measurement not in tables:
+                influxdb3_local.error(
+                    f"[{task_id}] Measurement '{measurement}' not found"
+                )
+                return
+
+        forecast_field: str = config["forecast_field"]
+        actual_field: str = config["actual_field"]
+        error_metric: str = config["error_metric"]
+
+        error_thresholds: dict = parse_error_thresholds(
+            influxdb3_local, config, task_id
         )
-        if error_metric not in ("mse", "mae", "rmse", "mape", "smape"):
-            influxdb3_local.error(
-                f"[{task_id}] Unsupported error_metric '{error_metric}'; use mse|mae|rmse|mape|smape"
-            )
+        if not error_thresholds:
+            influxdb3_local.error(f"[{task_id}] No valid error thresholds configured")
             return
 
-        error_thresholds: dict = parse_error_thresholds(influxdb3_local, args, task_id)
-        window_td: timedelta = parse_time_duration(args["window"], task_id)
-        rounding_freq: str | None = args.get("rounding_freq", None)
-        influxdb3_local.info(
-            f"[{task_id}] Thresholds configured: {error_thresholds}, Window: {window_td}, Rounding: {rounding_freq}"
-        )
+        window: timedelta = config["window"]
+        rounding_freq: str = config["rounding_freq"]
+        min_condition_duration: timedelta = config["min_condition_duration"]
+        if min_condition_duration >= window:
+            influxdb3_local.warn(
+                f"[{task_id}] min_condition_duration={min_condition_duration} is not shorter "
+                f"than window={window}, an anomaly can never persist long enough to alert"
+            )
 
-        # Notification & sender config
-        senders_config: dict = parse_senders(influxdb3_local, args, task_id)
-        tags: list = get_tag_names(influxdb3_local, actual_measurement, task_id)
-        port_override: int = parse_port_override(args, task_id)
-        notification_path: str = args.get("notification_path", "notify")
-        influxdb3_local.info(
-            f"[{task_id}] Notification setup - Senders: {list(senders_config.keys())}, Tags: {tags}, Path: {notification_path}"
-        )
-        notification_tpl: str = args.get(
-            "notification_text",
-            "[$level] Forecast error alert in $measurement.$field: $metric=$error. Tags: $tags",
-        )
-        min_condition_duration: timedelta = parse_time_duration(
-            args.get("min_condition_duration", "0s"), task_id
-        )
-        influxdb3_auth_token: str | None = args.get("influxdb3_auth_token") or os.getenv(
-            "INFLUXDB3_AUTH_TOKEN"
+        max_notifications_per_run: int = config["max_notifications_per_run"]
+        senders_config: dict = parse_senders(influxdb3_local, config, task_id)
+        notification_path: str = config["notification_path"]
+        notification_text: str = config["notification_text"]
+        port_override: int = config["port_override"]
+        influxdb3_auth_token: str = (
+            config.get("influxdb3_auth_token")
+            or os.getenv("INFLUXDB3_AUTH_TOKEN")
+            or ""
         )
         if not influxdb3_auth_token:
             influxdb3_local.error(f"[{task_id}] Missing influxdb3_auth_token")
             return
 
-        # Determine time window
-        end_time: datetime = call_time.replace(tzinfo=timezone.utc)
-        start_time: datetime = end_time - window_td
-        influxdb3_local.info(f"[{task_id}] Querying data from {start_time} to {end_time}")
-
-        # Execute forecast query
-        forecast_query: str = generate_query(
-            forecast_measurement, forecast_field, tags, start_time, end_time
+        tags: list = resolve_shared_tags(
+            influxdb3_local, forecast_measurement, actual_measurement, task_id
         )
-        influxdb3_local.info(f"[{task_id}] Executing forecast query: {forecast_query[:100]}...")
-        forecast_results: list = influxdb3_local.query(forecast_query)
-        influxdb3_local.info(f"[{task_id}] Forecast query returned {len(forecast_results)} rows")
-        if not forecast_results:
-            influxdb3_local.info(
-                f"[{task_id}] No forecast data returned from {start_time} to {end_time}"
-            )
-            return
-
-        # Execute actual query
-        actual_query: str = generate_query(
-            actual_measurement, actual_field, tags, start_time, end_time
-        )
-        influxdb3_local.info(f"[{task_id}] Executing actual query: {actual_query[:100]}...")
-        actual_results: list = influxdb3_local.query(actual_query)
-        influxdb3_local.info(f"[{task_id}] Actual query returned {len(actual_results)} rows")
-        if not actual_results:
-            influxdb3_local.info(
-                f"[{task_id}] No actual data returned from {start_time} to {end_time}"
-            )
-            return
-
-        # Load into DataFrames
-        df_fore: pd.DataFrame = pd.DataFrame(forecast_results)
-        df_act: pd.DataFrame = pd.DataFrame(actual_results)
-
-        if "time" not in df_fore.columns or forecast_field not in df_fore.columns:
-            influxdb3_local.error(
-                f"[{task_id}] forecast_query results missing 'time' or '{forecast_field}'"
-            )
-            return
-        if "time" not in df_act.columns or actual_field not in df_act.columns:
-            influxdb3_local.error(
-                f"[{task_id}] actual_query results missing 'time' or '{actual_field}'"
-            )
-            return
-
-        # Extract tags columns to save their values
-        tag_columns: list = [
-            col for col in df_act.columns if col not in {"time", actual_field}
-        ]
-
-        # Rename fields
-        df_fore = df_fore.rename(columns={forecast_field: "forecast"})
-        df_act = df_act.rename(columns={actual_field: "actual"})
-
-        # Parse timestamps and round to nearest second for alignment
-        if rounding_freq is None:
-            df_fore["time"] = pd.to_datetime(df_fore["time"], unit="ns")
-            df_act["time"] = pd.to_datetime(df_act["time"], unit="ns")
-        else:
-            influxdb3_local.info(f"[{task_id}] Converting timestamps with rounding={rounding_freq}")
-            try:
-                df_fore["time"] = pd.to_datetime(df_fore["time"], unit="ns").dt.round(
-                    rounding_freq
-                )
-                df_act["time"] = pd.to_datetime(df_act["time"], unit="ns").dt.round(
-                    rounding_freq
-                )
-            except Exception as e:
-                influxdb3_local.error(
-                    f"[{task_id}] Error rounding timestamps: {str(e)}"
-                )
-                return
-
-        merge_columns: list = ["time"] + tag_columns
-        fore_columns: list = merge_columns + ["forecast"]
-        act_columns: list = merge_columns + ["actual"]
-
-        # Merge on time (inner join)
-        merged: pd.DataFrame = pd.merge(
-            df_fore[fore_columns],
-            df_act[act_columns],
-            on=merge_columns,
-            how="inner",
-        )
-        if merged.empty:
-            influxdb3_local.error(f"[{task_id}] No overlapping timestamps after merge")
-            return
-        influxdb3_local.info(f"[{task_id}] Merged dataset has {len(merged)} rows")
-
-        # Compute error per row
-        influxdb3_local.info(f"[{task_id}] Computing {error_metric.upper()} error metric for {len(merged)} data points")
-        if error_metric == "mse":
-            merged["error"] = (merged["forecast"] - merged["actual"]) ** 2
-        elif error_metric == "mae":
-            merged["error"] = (merged["forecast"] - merged["actual"]).abs()
-        elif error_metric == "rmse":
-            merged["error"] = ((merged["forecast"] - merged["actual"]) ** 2) ** 0.5
-        elif error_metric == "mape":
-            # Handle division by zero - skip rows where actual is 0
-            zero_mask = merged["actual"] == 0
-            if zero_mask.any():
-                zero_count = zero_mask.sum()
-                influxdb3_local.warn(
-                    f"[{task_id}] Skipping {zero_count} rows with actual=0 for MAPE calculation"
-                )
-                merged = merged[~zero_mask]
-                if merged.empty:
-                    influxdb3_local.error(f"[{task_id}] All actual values are 0, cannot compute MAPE")
-                    return
-            merged["error"] = (merged["forecast"] - merged["actual"]).abs() / merged["actual"].abs() * 100
-        else:  # smape
-            # SMAPE: 200 * |forecast - actual| / (|forecast| + |actual|)
-            # Handle division by zero - skip rows where both forecast and actual are 0
-            denominator = merged["forecast"].abs() + merged["actual"].abs()
-            zero_mask = denominator == 0
-            if zero_mask.any():
-                zero_count = zero_mask.sum()
-                influxdb3_local.warn(
-                    f"[{task_id}] Skipping {zero_count} rows with both forecast=0 and actual=0 for SMAPE calculation"
-                )
-                merged = merged[~zero_mask]
-                if merged.empty:
-                    influxdb3_local.error(f"[{task_id}] All forecast and actual values are 0, cannot compute SMAPE")
-                    return
-                denominator = merged["forecast"].abs() + merged["actual"].abs()
-            merged["error"] = 200 * (merged["forecast"] - merged["actual"]).abs() / denominator
-
-        # Log error statistics
-        error_stats = {
-            "mean": merged["error"].mean(),
-            "median": merged["error"].median(),
-            "min": merged["error"].min(),
-            "max": merged["error"].max()
-        }
         influxdb3_local.info(
-            f"[{task_id}] Error statistics - Mean: {error_stats['mean']:.4f}, Median: {error_stats['median']:.4f}, Min: {error_stats['min']:.4f}, Max: {error_stats['max']:.4f}"
+            f"[{task_id}] Configuration completed: {forecast_measurement}.{forecast_field} "
+            f"vs {actual_measurement}.{actual_field}, metric={error_metric}, window={window}, "
+            f"thresholds={error_thresholds}, tags={tags}, senders={list(senders_config)}"
         )
-        influxdb3_local.info(f"[{task_id}] Evaluating thresholds for metric {error_metric.upper()}: {error_thresholds}")
 
-        for threshold_level, error_threshold in error_thresholds.items():
+        end_time: datetime = (
+            call_time if call_time.tzinfo else call_time.replace(tzinfo=timezone.utc)
+        )
+        start_time: datetime = end_time - window
+        df_forecast: pd.DataFrame | None = query_series(
+            influxdb3_local,
+            forecast_measurement,
+            forecast_field,
+            tags,
+            start_time,
+            end_time,
+            task_id,
+        )
+        if df_forecast is None:
+            return
+        df_actual: pd.DataFrame | None = query_series(
+            influxdb3_local,
+            actual_measurement,
+            actual_field,
+            tags,
+            start_time,
+            end_time,
+            task_id,
+        )
+        if df_actual is None:
+            return
+
+        merged: pd.DataFrame | None = align_frames(
+            influxdb3_local,
+            df_forecast.rename(columns={forecast_field: "forecast"}),
+            df_actual.rename(columns={actual_field: "actual"}),
+            tags,
+            rounding_freq,
+            task_id,
+        )
+        if merged is None:
+            return
+
+        merged = compute_error(influxdb3_local, merged, error_metric, task_id)
+        if merged is None:
+            return
+
+        errors: pd.Series = merged["error"]
+        influxdb3_local.info(
+            f"[{task_id}] {error_metric.upper()} over {len(merged)} points - "
+            f"mean: {errors.mean():.4f}, median: {errors.median():.4f}, "
+            f"min: {errors.min():.4f}, max: {errors.max():.4f}"
+        )
+
+        merged = merged.sort_values("time")
+        window_start: pd.Timestamp = (
+            pd.Timestamp(start_time).tz_convert("UTC").tz_localize(None)
+        )
+        sent_notifications: int = 0
+        failed_notifications: int = 0
+        suppressed_notifications: int = 0
+
+        # severe levels first so the notification cap is not spent on the lowest one
+        for threshold_level, error_threshold in sorted(
+            error_thresholds.items(), key=lambda item: item[1], reverse=True
+        ):
             merged["is_outlier"] = merged["error"] >= error_threshold
-            outlier_count: int = merged[merged["is_outlier"] == True].shape[0]
-            if outlier_count > 0:
-                influxdb3_local.info(
-                    f"[{task_id}] {threshold_level}: {error_metric.upper()} threshold ({error_threshold}) exceeded for {outlier_count}/{len(merged)} data points"
-                )
-            else:
-                influxdb3_local.info(
-                    f"[{task_id}] {threshold_level} threshold ({error_threshold}) - no violations detected"
-                )
+            influxdb3_local.info(
+                f"[{task_id}] {threshold_level} threshold {error_threshold}: "
+                f"{int(merged['is_outlier'].sum())}/{len(merged)} points reach it"
+            )
 
-            merged = merged.sort_values("time")  # Sort by time
             for _, row in merged.iterrows():
-                row_time: datetime = row["time"]
-                is_outlier: bool = row["is_outlier"]
+                row_time: pd.Timestamp = row["time"]
                 cache_key: str = generate_cache_key(
                     actual_measurement, actual_field, threshold_level, tags, row
                 )
-                tag_str: str = ", ".join(f"{t}={row.get(t, 'None')}" for t in tags)
+                alert_key: str = f"{cache_key}:last_alert"
+                tag_str: str = format_tags(row, tags)
+                series_label: str = (
+                    f"{actual_measurement}.{actual_field} (tags: {tag_str})"
+                )
 
-                if is_outlier:
-                    start_iso: str = influxdb3_local.cache.get(cache_key, default="")
-                    if not start_iso:
-                        influxdb3_local.cache.put(cache_key, row_time.isoformat())
+                last_alert: str = influxdb3_local.cache.get(alert_key, default="")
+                if last_alert and row_time <= pd.Timestamp(last_alert):
+                    continue
+
+                pending_since: str = influxdb3_local.cache.get(cache_key, default="")
+                if pending_since and pd.Timestamp(pending_since) < window_start:
+                    influxdb3_local.cache.delete(cache_key)
+                    pending_since = ""
+                alert_reason: str | None = None
+
+                if row["is_outlier"]:
+                    if not pending_since:
                         if min_condition_duration > timedelta(0):
+                            influxdb3_local.cache.put(cache_key, row_time.isoformat())
                             influxdb3_local.info(
-                                f"[{task_id}] Error threshold exceeded in {actual_measurement}.{actual_field} for row {cache_key}, but waiting for {min_condition_duration}"
+                                f"[{task_id}] {threshold_level} error started in {series_label}, "
+                                f"waiting for {min_condition_duration}"
                             )
                             continue
+                        alert_reason = (
+                            f"{threshold_level} alert triggered - {error_metric.upper()}: "
+                            f"{row['error']:.4f} (threshold: {error_threshold}) for {series_label}"
+                        )
                     else:
-                        start_dt: datetime = datetime.fromisoformat(start_iso)
-                        elapsed: timedelta = row_time - start_dt
-                        if elapsed >= min_condition_duration:
-                            payload: dict = {
-                                "notification_text": interpolate_notification_text(
-                                    notification_tpl,
-                                    {
-                                        "level": threshold_level,
-                                        "measurement": actual_measurement,
-                                        "field": actual_field,
-                                        "error": row["error"],
-                                        "metric": error_metric,
-                                        "tags": tag_str,
-                                    },
-                                ),
-                                "senders_config": senders_config,
-                            }
-                            influxdb3_local.error(
-                                f"[{task_id}] {threshold_level} alert triggered - {error_metric.upper()}: {row['error']:.4f} (threshold: {error_threshold}) for {cache_key}"
-                            )
-                            send_notification(
-                                influxdb3_local,
-                                port_override,
-                                notification_path,
-                                influxdb3_auth_token,
-                                payload,
-                                task_id,
-                            )
-                            influxdb3_local.cache.put(cache_key, "")
-                        else:
+                        elapsed: timedelta = (
+                            row_time - pd.Timestamp(pending_since)
+                        ).to_pytimedelta()
+                        if elapsed < min_condition_duration:
                             influxdb3_local.info(
-                                f"[{task_id}] Error above threshold in {actual_measurement}.{actual_field} for row {cache_key}, duration {elapsed} < {min_condition_duration}, deferring alert"
+                                f"[{task_id}] {threshold_level} error in {series_label} lasted "
+                                f"{elapsed} < {min_condition_duration}, deferring alert"
                             )
+                            continue
+                        alert_reason = (
+                            f"{threshold_level} alert triggered after {elapsed} - "
+                            f"{error_metric.upper()}: {row['error']:.4f} "
+                            f"(threshold: {error_threshold}) for {series_label}"
+                        )
+                elif pending_since:
+                    influxdb3_local.cache.delete(cache_key)
+                    influxdb3_local.info(
+                        f"[{task_id}] {threshold_level} error cleared in {series_label}"
+                    )
+
+                if alert_reason is None:
+                    continue
+
+                if (
+                    sent_notifications + failed_notifications
+                    >= max_notifications_per_run
+                ):
+                    suppressed_notifications += 1
                 else:
-                    influxdb3_local.cache.put(cache_key, "")
+                    payload: dict = {
+                        "notification_text": interpolate_notification_text(
+                            notification_text,
+                            {
+                                "level": threshold_level,
+                                "measurement": actual_measurement,
+                                "field": actual_field,
+                                "error": row["error"],
+                                "metric": error_metric,
+                                "tags": tag_str,
+                                "timestamp": row_time.isoformat(),
+                            },
+                        ),
+                        "senders_config": senders_config,
+                    }
+                    influxdb3_local.error(f"[{task_id}] {alert_reason}")
+                    delivered: bool = send_notification(
+                        influxdb3_local,
+                        port_override,
+                        notification_path,
+                        influxdb3_auth_token,
+                        payload,
+                        task_id,
+                    )
+                    if not delivered:
+                        # leave the state untouched so a later run can alert again
+                        failed_notifications += 1
+                        continue
+                    sent_notifications += 1
+
+                influxdb3_local.cache.delete(cache_key)
+                influxdb3_local.cache.put(alert_key, row_time.isoformat())
+
+        if failed_notifications:
+            influxdb3_local.warn(
+                f"[{task_id}] {failed_notifications} notifications could not be delivered, "
+                f"the next run will alert on them again"
+            )
+        if suppressed_notifications:
+            influxdb3_local.warn(
+                f"[{task_id}] Suppressed {suppressed_notifications} notifications after "
+                f"reaching max_notifications_per_run={max_notifications_per_run}"
+            )
+        influxdb3_local.info(
+            f"[{task_id}] Forecast error check completed: {sent_notifications} notifications sent"
+        )
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")

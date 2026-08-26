@@ -20,34 +20,41 @@ forecast_field = "your_forecast_field"  # e.g., "predicted_temp", "forecast_valu
 actual_field = "your_actual_field"  # e.g., "temp", "actual_value"
 
 # Error metric to compute
-# Specify one of: "mse" (mean squared error), "mae" (mean absolute error), "rmse" (root mean squared error),
-# "mape" (mean absolute percentage error), "smape" (symmetric mean absolute percentage error)
+# Specify one of: "mse" (squared error), "mae" (absolute error), "rmse" (root of the squared error),
+# "mape" (percentage error), "smape" (symmetric percentage error)
+# The metric is computed per timestamp, so "rmse" gives the same value as "mae"
 error_metric = "your_error_metric"  # e.g., "mse", "mae", "rmse", "mape", "smape"
 
 # Time window for analysis
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
-window = "your_window"  # e.g., "10m", "1h"
+# Format: <number><unit>, where unit is us, ms, s (seconds), min (minutes), h (hours), d (days), w (weeks)
+window = "your_window"  # e.g., "10min", "1h"
 
 # Notification channels
 # Specify a dot-separated list of notification channels (strings)
 senders = ["your_channel"]  # e.g., ["slack"], ["slack", "discord"], ["http"]
 
 # Thresholds for anomaly levels
-# Dictionary mapping anomaly levels (strings) to threshold values (floats)
+# Table mapping levels (INFO, WARN, ERROR, CRITICAL) to threshold values above 0
+# Every level is evaluated on its own, so a point above several thresholds alerts once per level
 error_thresholds = {INFO = 1.0, WARN = 2.0, ERROR = 3.0, CRITICAL = 4.0}
 
 
 ########## Optional Parameters ##########
 # Minimum duration for an anomaly condition before notifying
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
-#min_condition_duration = "your_duration"  # e.g., "5m", "1h"
+# Format: <number><unit>, where unit is us, ms, s (seconds), min (minutes), h (hours), d (days), w (weeks)
+# Defaults to "0s": the first point above a threshold alerts immediately
+#min_condition_duration = "your_duration"  # e.g., "5min", "1h"
 
-# Timestamp rounding frequency
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
-#rounding_freq = "your_rounding_freq"  # e.g., "1s", "10m"
+# Timestamp rounding frequency used to match forecast rows to actual rows
+# Specify a fixed pandas frequency; omit for no rounding
+#rounding_freq = "your_rounding_freq"  # e.g., "1s", "500ms", "5min", "1h"
+
+# Maximum number of notifications sent by a single run
+# Specify an integer >= 1; defaults to 20
+#max_notifications_per_run = 20  # e.g., 50
 
 # Template for notification messages
-# Use variables: $measurement, $level, $field, $error, $metric, $tags
+# Use variables: $measurement, $level, $field, $error, $metric, $tags, $timestamp
 #notification_text = "your_notification_template"  # e.g., "[$level] Forecast error in $measurement.$field: $metric=$error. Tags: $tags"
 
 # Custom URL path for notification sender plugin

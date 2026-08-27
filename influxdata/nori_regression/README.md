@@ -165,7 +165,7 @@ influxdb3 create trigger \
 
 - **InfluxDB 3 Core or Enterprise**, version 3.8.2 or later, with the Processing Engine enabled
   (`influxdb3 serve --plugin-dir /path/to/plugins`).
-- **Python packages**: `influxdata-plugin-utils>=0.2.0`, `requests`.
+- **Python packages**: `influxdata-plugin-utils>=0.3.0`, `requests`.
 - A **Nori API key** from the [Synthefy console](https://console.synthefy.com/), reachable from the
   InfluxDB host over HTTPS.
 

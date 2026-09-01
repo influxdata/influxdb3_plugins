@@ -9,7 +9,7 @@
         {"name": "start_time", "example": "2026-01-01T00:00:00Z", "description": "ISO start of a fixed window instead of a trailing one. With skip_existing left on, a schedule over a fixed window backfills and then stops calling the gateway.", "required": false},
         {"name": "end_time", "example": "2026-02-01T00:00:00Z", "description": "ISO end of a fixed window. Given alone, the window starts one `window` earlier.", "required": false},
         {"name": "tags", "example": "site:A", "description": "Filter to a single series. Format: key:val key2:val2 (space-separated pairs, single value per key). A token without ':' is rejected. Required if the window holds more than one series.", "required": false},
-        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Current slugs: synthefy/nori-30m (default, ~29M params) and synthefy/nori-6m (cheaper and faster to cold-start). The bare 'synthefy/nori' slug is retired. Your API key must be granted the slug.", "required": false},
+        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call, defaulting to synthefy/nori-30m. The current list of models and their slugs is at https://docs.synthefy.com/nori/quickstart#models. The bare 'synthefy/nori' slug is retired. Your API key must be granted the slug.", "required": false},
         {"name": "output_measurement", "example": "sensors_regressed", "description": "Where to write predictions. Default: <measurement>_regressed.", "required": false},
         {"name": "target_database", "example": "predictions", "description": "Write predictions to this database instead of the trigger's own.", "required": false},
         {"name": "dry_run", "example": "false", "description": "If true, log predictions but do not write them.", "required": false},
@@ -94,6 +94,11 @@ API_KEY_HEADER = "X-Nori-Api-Key"
 # `synthefy/nori` slug was retired and now returns 404, so it is rejected with a pointed message.
 DEFAULT_MODEL_SLUG = "synthefy/nori-30m"
 RETIRED_MODEL_SLUGS = {"synthefy/nori"}
+
+# Which models exist, and their sizes, is Synthefy's to publish and changes when they release one.
+# This plugin names only its default and points at the vendor's list, so a new variant does not
+# make the plugin's documentation wrong.
+MODEL_LIST_URL = "https://docs.synthefy.com/nori/quickstart#models"
 
 # Gateway faults worth another attempt: 408/409/425 (transient conflicts), 429 (per-key rate limit,
 # 50/min) and every 5xx (a cold start can 503, or 500 once). A 4xx outside that set is a permanent
@@ -327,8 +332,8 @@ def _normalize_config(cfg) -> dict:
     model = str(cfg.get("model") or DEFAULT_MODEL_SLUG).strip()
     if model in RETIRED_MODEL_SLUGS:
         raise ConfigError(
-            f"model slug {model!r} is retired and no longer routes. Use 'synthefy/nori-30m' "
-            f"(~29M parameters) or 'synthefy/nori-6m' (cheaper, faster cold start)."
+            f"model slug {model!r} is retired and no longer routes. Use {DEFAULT_MODEL_SLUG!r} "
+            f"or another current slug, listed at {MODEL_LIST_URL}."
         )
 
     try:

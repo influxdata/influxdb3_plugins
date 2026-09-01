@@ -107,7 +107,7 @@ because every string form splits on whitespace. Name such a column from a TOML a
 | `max_predict_rows` | integer | `5000` | Cap on rows predicted per run; the most recent rows are kept and the rest wait for a later run. |
 | `max_read_rows` | integer | `50000` | Ceiling on rows read from InfluxDB in one run, applied as a `LIMIT` on the query. The most recent rows are read, and a truncated read is logged with a warning. This bounds the plugin's memory: a row costs roughly 0.7 KB while it is held, so the default is about 35 MB. |
 | `predict_batch_size` | integer | `1000` | Rows per gateway call. Each batch re-sends the training context and is billed separately, so a larger value costs less. |
-| `request_timeout` | string | `300s` | Timeout for one gateway call. A cold start has been measured at 60-130 seconds, so keep this well above that. |
+| `request_timeout` | string | `300s` | Timeout for one gateway call. A model that has scaled to zero cold-starts on the first request, measured between roughly one and four minutes depending on the variant, so keep this well above the warm response time. |
 | `max_retries` | integer | `3` | Maximum attempts per gateway call and per write. `1` disables retry. |
 | `config_file_path` | string | *(none)* | Path to a TOML file supplying every parameter, relative to `PLUGIN_DIR`. Cannot be combined with other inline arguments or a request body. |
 
@@ -414,15 +414,15 @@ ORDER BY 1 DESC
 
 ## Supported models
 
-The `model` argument is the Nori gateway slug your API key is granted:
+The `model` argument is the Nori gateway slug your API key is granted. The plugin defaults to
+`synthefy/nori-30m`.
 
-| Slug | Parameters | Notes |
-|---|---|---|
-| `synthefy/nori-30m` | ~29M | The default, and the variant Synthefy's own documentation recommends. Priced higher and slower to cold-start (measured at ~125s). |
-| `synthefy/nori-6m` | ~6M | Cheaper per request and faster to cold-start (measured at ~69s). |
+Synthefy publishes the current models, their sizes and their slugs at
+[docs.synthefy.com/nori/quickstart#models](https://docs.synthefy.com/nori/quickstart#models). That list is the authoritative one:
+it changes when Synthefy releases a variant, and a slug not on it will not route.
 
-Which one predicts better depends on your data; try both with `dry_run=true` before committing a
-schedule to one.
+Which model predicts better depends on your data, and the larger ones cost more per request and
+take longer to cold-start. Try a couple with `dry_run=true` before committing a schedule to one.
 
 The bare `synthefy/nori` slug has been retired and no longer routes; the plugin rejects it with a
 pointed message rather than letting the gateway answer `404`. One API key from the
@@ -526,9 +526,9 @@ names `time`/`y`.
 
 #### Cold-start latency and timeouts
 
-The models scale to zero, so the first request after an idle period is slow: about 69 seconds for
-`synthefy/nori-6m` and 125 seconds for `synthefy/nori-30m` in measurement, and it can return a
-`503` or a non-JSON body from the fronting proxy once.
+The models scale to zero, so the first request after an idle period is slow: measurements have
+ranged from roughly one minute to nearly four, with the larger variants slower, and it can return
+a `503` or a non-JSON body from the fronting proxy once.
 
 **Solution:** the default `request_timeout` of `300s` and `max_retries` of `3` are set to absorb
 this; a `503`, a `429` and a connection error are retried with backoff. A read timeout is **not**

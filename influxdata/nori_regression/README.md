@@ -60,8 +60,8 @@ The Nori gateway API key is a secret and is **never** read from trigger argument
 body (both are logged). It is resolved, in order:
 
 1. a non-empty `X-Nori-Api-Key: <key>` request header (HTTP trigger only), then
-2. the `NORI_API_KEY` environment variable set on the InfluxDB host (required for the scheduled
-   trigger).
+2. the `SYNTHEFY_NORI_API_KEY` environment variable set on the InfluxDB host (required for the
+   scheduled trigger).
 
 The key is intentionally **not** accepted in the `Authorization` header: InfluxDB parses
 `Authorization` for its own request authorization, so a key placed there never reaches the plugin.
@@ -84,6 +84,7 @@ InfluxDB host. It must be an `https://` URL; plain `http://` is accepted only fo
 | `measurement` | string | required | Source measurement (table) to read from. |
 | `field` | string | required | The numeric field to predict. The plugin trains on the rows where it is present and predicts the rows where it is null. |
 | `feature_fields` | string | required | Numeric feature columns (X) used to predict `field`, **space-separated** (for example `temp humidity`). Use spaces, not commas (`--trigger-arguments` splits argument pairs on commas) and not dots (a field name may contain a `.`). |
+| `model` | string | required | The Nori gateway slug to call. There is no default: the slug selects a priced model, so the plugin will not choose one for you. See [Supported models](#supported-models). Trigger argument only. |
 
 A column name that contains a space cannot be expressed in `feature_fields` as a trigger argument,
 because every string form splits on whitespace. Name such a column from a TOML array
@@ -97,7 +98,6 @@ because every string form splits on whitespace. Name such a column from a TOML a
 | `start_time` | string | *(none)* | ISO 8601 start of a fixed window. Given alone, the window ends now. |
 | `end_time` | string | *(none)* | ISO 8601 end of a fixed window. Given alone, the window starts one `window` earlier. |
 | `tags` | string | *(none)* | Filter to a single series. Format: `key:val key2:val2` (space-separated pairs, one value per key). A token without a `:` is rejected. Required when the window holds more than one series. |
-| `model` | string | `synthefy/nori-30m` | The Nori gateway slug to call. See [Supported models](#supported-models). |
 | `output_measurement` | string | `<measurement>_regressed` | Measurement to write predictions to. Must differ from `measurement`. |
 | `target_database` | string | *(trigger db)* | Write predictions to a different database. |
 | `dry_run` | boolean | `false` | Log the first few predictions and return them all, without writing anything. |
@@ -107,7 +107,7 @@ because every string form splits on whitespace. Name such a column from a TOML a
 | `max_predict_rows` | integer | `5000` | Cap on rows predicted per run; the most recent rows are kept and the rest wait for a later run. |
 | `max_read_rows` | integer | `50000` | Ceiling on rows read from InfluxDB in one run, applied as a `LIMIT` on the query. The most recent rows are read, and a truncated read is logged with a warning. This bounds the plugin's memory: a row costs roughly 0.7 KB while it is held, so the default is about 35 MB. |
 | `predict_batch_size` | integer | `1000` | Rows per gateway call. Each batch re-sends the training context and is billed separately, so a larger value costs less. |
-| `request_timeout` | string | `300s` | Timeout for one gateway call. A cold start has been measured at 60-130 seconds, so keep this well above that. |
+| `request_timeout` | string | `300s` | Timeout for one gateway call. A model that has scaled to zero cold-starts on the first request, measured between roughly one and four minutes depending on the variant, so keep this well above the warm response time. |
 | `max_retries` | integer | `3` | Maximum attempts per gateway call and per write. `1` disables retry. |
 | `config_file_path` | string | *(none)* | Path to a TOML file supplying every parameter, relative to `PLUGIN_DIR`. Cannot be combined with other inline arguments or a request body. |
 
@@ -185,7 +185,7 @@ influxdb3 create trigger \
 3. Set the Nori gateway key on the InfluxDB host, so the scheduled trigger can read it:
 
    ```bash
-   export NORI_API_KEY="<your Nori API key>"
+   export SYNTHEFY_NORI_API_KEY="<your Nori API key>"
    ```
 
 ### Data requirements
@@ -273,7 +273,7 @@ influxdb3 create trigger \
   --database mydb \
   --path "gh:influxdata/nori_regression/nori_regression.py" \
   --trigger-spec "every:15m" \
-  --trigger-arguments measurement=sensors,field=pressure,feature_fields="temp humidity",tags=site:A,min_history=3 \
+  --trigger-arguments measurement=sensors,field=pressure,feature_fields="temp humidity",tags=site:A,model=synthefy/nori-30m,min_history=3 \
   nori_example
 ```
 
@@ -305,7 +305,7 @@ Call the HTTP endpoint (exposed at `/api/v3/engine/<path>`), passing the Nori ke
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/nori_regress \
-  -H "X-Nori-Api-Key: $NORI_API_KEY" \
+  -H "X-Nori-Api-Key: $SYNTHEFY_NORI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"measurement":"sensors","field":"pressure","feature_fields":["temp","humidity"],"tags":{"site":"A"}}'
 ```
@@ -335,7 +335,7 @@ The top-level `status` is one of `success`, `partial`, `skipped`, `dry_run` or `
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/nori_regress \
-  -H "X-Nori-Api-Key: $NORI_API_KEY" \
+  -H "X-Nori-Api-Key: $SYNTHEFY_NORI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"measurement":"sensors","field":"pressure","feature_fields":["temp","humidity"],"tags":{"site":"A"},"start_time":"2026-01-01T00:00:00Z","end_time":"2026-02-01T00:00:00Z"}'
 ```
@@ -347,7 +347,7 @@ reads the `window` before it.
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/nori_regress \
-  -H "X-Nori-Api-Key: $NORI_API_KEY" \
+  -H "X-Nori-Api-Key: $SYNTHEFY_NORI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"measurement":"sensors","field":"pressure","feature_fields":["temp","humidity"],"tags":{"site":"A"},"dry_run":true}'
 ```
@@ -414,15 +414,16 @@ ORDER BY 1 DESC
 
 ## Supported models
 
-The `model` argument is the Nori gateway slug your API key is granted:
+The `model` argument is the Nori gateway slug your API key is granted. It is **required**: the
+slug selects a priced model, so the plugin will not choose one on your behalf. Synthefy's own
+client and local package take the same position.
 
-| Slug | Parameters | Notes |
-|---|---|---|
-| `synthefy/nori-30m` | ~29M | The default, and the variant Synthefy's own documentation recommends. Priced higher and slower to cold-start (measured at ~125s). |
-| `synthefy/nori-6m` | ~6M | Cheaper per request and faster to cold-start (measured at ~69s). |
+Synthefy publishes the current models, their sizes and their slugs at
+[docs.synthefy.com/nori/quickstart#models](https://docs.synthefy.com/nori/quickstart#models). That list is the authoritative one:
+it changes when Synthefy releases a variant, and a slug not on it will not route.
 
-Which one predicts better depends on your data; try both with `dry_run=true` before committing a
-schedule to one.
+Which model predicts better depends on your data, and the larger ones cost more per request and
+take longer to cold-start. Try a couple with `dry_run=true` before committing a schedule to one.
 
 The bare `synthefy/nori` slug has been retired and no longer routes; the plugin rejects it with a
 pointed message rather than letting the gateway answer `404`. One API key from the
@@ -469,8 +470,8 @@ caller-facing message with the full detail in `processing_engine_logs`.
 
 The plugin cannot find a Nori gateway key.
 
-**Solution:** set `NORI_API_KEY` on the InfluxDB host, or pass an `X-Nori-Api-Key: <key>` header
-when calling the HTTP trigger (see
+**Solution:** set `SYNTHEFY_NORI_API_KEY` on the InfluxDB host, or pass an
+`X-Nori-Api-Key: <key>` header when calling the HTTP trigger (see
 [Authentication](#authentication-for-the-nori-gateway)). An empty header value is ignored and the
 environment variable is used instead.
 
@@ -526,9 +527,9 @@ names `time`/`y`.
 
 #### Cold-start latency and timeouts
 
-The models scale to zero, so the first request after an idle period is slow: about 69 seconds for
-`synthefy/nori-6m` and 125 seconds for `synthefy/nori-30m` in measurement, and it can return a
-`503` or a non-JSON body from the fronting proxy once.
+The models scale to zero, so the first request after an idle period is slow: measurements have
+ranged from roughly one minute to nearly four, with the larger variants slower, and it can return
+a `503` or a non-JSON body from the fronting proxy once.
 
 **Solution:** the default `request_timeout` of `300s` and `max_retries` of `3` are set to absorb
 this; a `503`, a `429` and a connection error are retried with backoff. A read timeout is **not**

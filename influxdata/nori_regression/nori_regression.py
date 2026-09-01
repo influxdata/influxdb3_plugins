@@ -9,7 +9,7 @@
         {"name": "start_time", "example": "2026-01-01T00:00:00Z", "description": "ISO start of a fixed window instead of a trailing one. With skip_existing left on, a schedule over a fixed window backfills and then stops calling the gateway.", "required": false},
         {"name": "end_time", "example": "2026-02-01T00:00:00Z", "description": "ISO end of a fixed window. Given alone, the window starts one `window` earlier.", "required": false},
         {"name": "tags", "example": "site:A", "description": "Filter to a single series. Format: key:val key2:val2 (space-separated pairs, single value per key). A token without ':' is rejected. Required if the window holds more than one series.", "required": false},
-        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Current slugs: synthefy/nori-30m (default, ~29M params) and synthefy/nori-6m (cheaper and faster to cold-start). The bare 'synthefy/nori' slug is retired. Your API key must be granted the slug.", "required": false},
+        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Required: there is no default, because the slug selects a priced model. The current list of models and their slugs is at https://docs.synthefy.com/nori/quickstart#models. The bare 'synthefy/nori' slug is retired. Your API key must be granted the slug.", "required": true},
         {"name": "output_measurement", "example": "sensors_regressed", "description": "Where to write predictions. Default: <measurement>_regressed.", "required": false},
         {"name": "target_database", "example": "predictions", "description": "Write predictions to this database instead of the trigger's own.", "required": false},
         {"name": "dry_run", "example": "false", "description": "If true, log predictions but do not write them.", "required": false},
@@ -32,7 +32,7 @@
         {"name": "start_time", "example": "2026-01-01T00:00:00Z", "description": "ISO start of the window. May also be in the request body. Given alone, the window ends now.", "required": false},
         {"name": "end_time", "example": "2026-02-01T00:00:00Z", "description": "ISO end of the window. May also be in the request body. Given alone, the window starts one `window` earlier.", "required": false},
         {"name": "dry_run", "example": "false", "description": "If true, log predictions but do not write them. May also be in the request body.", "required": false},
-        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Trigger argument only: it selects a billed model, so the request body cannot override it.", "required": false},
+        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Required, and a trigger argument only: it selects a billed model, so there is no default and the request body cannot override it.", "required": true},
         {"name": "output_measurement", "example": "sensors_regressed", "description": "Where to write predictions. Trigger argument only: the request body cannot override a write target.", "required": false},
         {"name": "target_database", "example": "predictions", "description": "Write predictions to this database instead of the trigger's own. Trigger argument only: the request body cannot override a write target.", "required": false},
         {"name": "min_history", "example": "50", "description": "Minimum labeled rows required to train. Trigger argument only.", "required": false},
@@ -80,17 +80,30 @@ from influxdata_plugin_utils.write import write_data
 DEFAULT_GATEWAY_URL = "https://inference.baseten.co/predict"
 GATEWAY_URL_ENV_VAR = "NORI_GATEWAY_URL"
 
-# The key is a SECRET: it is read from the NORI_API_KEY environment variable on the InfluxDB host,
-# or (HTTP trigger only) from an incoming X-Nori-Api-Key request header. It is NEVER read from
-# trigger args or the request body (both are logged), and never from the incoming `Authorization`
-# header (InfluxDB consumes that header for its own request authorization).
-API_KEY_ENV_VAR = "NORI_API_KEY"
+# The key is a SECRET: it is read from the SYNTHEFY_NORI_API_KEY environment variable on the
+# InfluxDB host, or (HTTP trigger only) from an incoming X-Nori-Api-Key request header. It is NEVER
+# read from trigger args or the request body (both are logged), and never from the incoming
+# `Authorization` header (InfluxDB consumes that header for its own request authorization).
+#
+# The name carries the vendor prefix because an InfluxDB host runs plugins from several authors:
+# an unprefixed NORI_API_KEY says nothing about whose service it authenticates against.
+API_KEY_ENV_VAR = "SYNTHEFY_NORI_API_KEY"
 API_KEY_HEADER = "X-Nori-Api-Key"
 
 # Slugs name their parameter count so the model behind a slug never silently changes. The bare
 # `synthefy/nori` slug was retired and now returns 404, so it is rejected with a pointed message.
-DEFAULT_MODEL_SLUG = "synthefy/nori-30m"
+# There is no default model. Synthefy's own client and local package both require an explicit
+# size and raise rather than pick one, because a variant is a priced choice: selecting one on the
+# operator's behalf spends their money and pins them to a slug they never named. This plugin
+# follows that. The slug below is only the example shown in help text and suggested when a retired
+# slug is used.
+EXAMPLE_MODEL_SLUG = "synthefy/nori-30m"
 RETIRED_MODEL_SLUGS = {"synthefy/nori"}
+
+# Which models exist, and their sizes, is Synthefy's to publish and changes when they release one.
+# This plugin names only its default and points at the vendor's list, so a new variant does not
+# make the plugin's documentation wrong.
+MODEL_LIST_URL = "https://docs.synthefy.com/nori/quickstart#models"
 
 # Gateway faults worth another attempt: 408/409/425 (transient conflicts), 429 (per-key rate limit,
 # 50/min) and every 5xx (a cold start can 503, or 500 once). A 4xx outside that set is a permanent
@@ -120,8 +133,9 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 # that STARTS WITH "@": @format and @jinja interpolate `env`, @read_file reads the host filesystem,
 # @get reads other settings. Every one of dynaconf's ~30 tokens begins with this single character,
 # and nothing else triggers them (a leading space or a doubled @ is inert), so refusing a leading
-# "@" is a complete guard. Without it a request body of {"measurement": "@format {env[NORI_API_KEY]}"}
-# comes back resolved in the error message - the plugin's own secret, handed to the caller.
+# "@" is a complete guard. Without it a request body of
+# {"measurement": "@format {env[SYNTHEFY_NORI_API_KEY]}"} comes back resolved in the error
+# message - the plugin's own secret, handed to the caller.
 DYNACONF_TOKEN_PREFIX = "@"
 
 # Parameters an earlier revision accepted. They are rejected by name rather than ignored, so an
@@ -186,7 +200,7 @@ VALIDATORS: list = [
     Validator("field", default="", cast=str),
     Validator("feature_fields", default="", cast=parse_delimited_list),
     Validator("window", default="30d", cast=parse_timedelta),
-    Validator("model", default=DEFAULT_MODEL_SLUG, cast=str),
+    Validator("model", default="", cast=str),
     Validator("dry_run", default=False, cast=parse_bool),
     Validator("skip_existing", default=True, cast=parse_bool),
     Validator("min_history", default=50, gte=1, cast=int),
@@ -320,11 +334,17 @@ def _normalize_config(cfg) -> dict:
             f"feature_fields cannot include the target field or 'time': {reserved}"
         )
 
-    model = str(cfg.get("model") or DEFAULT_MODEL_SLUG).strip()
+    model = str(cfg.get("model") or "").strip()
+    if not model:
+        raise ConfigError(
+            "`model` is required: the Nori gateway slug to call, for example "
+            f"{EXAMPLE_MODEL_SLUG!r}. There is no default, because the slug selects a priced "
+            f"model. The current slugs are listed at {MODEL_LIST_URL}."
+        )
     if model in RETIRED_MODEL_SLUGS:
         raise ConfigError(
-            f"model slug {model!r} is retired and no longer routes. Use 'synthefy/nori-30m' "
-            f"(~29M parameters) or 'synthefy/nori-6m' (cheaper, faster cold start)."
+            f"model slug {model!r} is retired and no longer routes. Use {EXAMPLE_MODEL_SLUG!r} "
+            f"or another current slug, listed at {MODEL_LIST_URL}."
         )
 
     try:
@@ -648,7 +668,7 @@ def _gateway_url() -> str:
 
 def _get_api_key(request_headers=None) -> str:
     """Resolve the gateway key: a non-empty X-Nori-Api-Key header wins (HTTP trigger), else the
-    NORI_API_KEY environment variable.
+    SYNTHEFY_NORI_API_KEY environment variable.
 
     An empty or non-string header value falls through to the environment rather than winning it: a
     header sent with no value used to suppress the fallback and send `Api-Key ` with no key at all.

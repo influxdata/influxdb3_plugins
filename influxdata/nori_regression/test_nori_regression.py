@@ -7,6 +7,7 @@ and a fake `requests` module, so no engine and no network are needed.
 """
 
 import json
+import re
 import math
 import os
 import sys
@@ -24,7 +25,12 @@ BASE_ARGS = {
     "measurement": "sensors",
     "field": "pressure",
     "feature_fields": "temp humidity",
+    "model": "synthefy/nori-30m",
 }
+
+# `model` is accepted as a trigger argument only, so a request body carries everything but it.
+MODEL_ARG = {"model": BASE_ARGS["model"]}
+BASE_BODY = {k: v for k, v in BASE_ARGS.items() if k != "model"}
 
 SENSOR_SCHEMA = [
     {"column_name": "time", "data_type": "Timestamp(Nanosecond, None)"},
@@ -238,11 +244,11 @@ def test_every_validator_key_is_declared():
 @pytest.mark.parametrize(
     "body",
     [
-        {"measurement": "@format {env[NORI_API_KEY]}"},
+        {"measurement": "@format {env[SYNTHEFY_NORI_API_KEY]}"},
         {"field": "@read_file /etc/passwd"},
-        {"measurement": "@jinja {{env.NORI_API_KEY}}"},
+        {"measurement": "@jinja {{env.SYNTHEFY_NORI_API_KEY}}"},
         {"measurement": "@get other"},
-        {"feature_fields": ["@format {env[NORI_API_KEY]}", "temp"]},
+        {"feature_fields": ["@format {env[SYNTHEFY_NORI_API_KEY]}", "temp"]},
         {"tags": {"site": "@read_file /etc/passwd"}},
         {"window": "@json [1]"},
     ],
@@ -267,14 +273,14 @@ def test_an_at_sign_that_is_not_a_leading_token_is_allowed(value):
     The guard is deliberately stricter than dynaconf at the boundary: any leading '@' is refused,
     including forms dynaconf would treat as inert, so the rule stays one sentence long.
     """
-    cfg = nr._load_config({}, {**BASE_ARGS, "measurement": value})
+    cfg = nr._load_config(MODEL_ARG, {**BASE_BODY, "measurement": value})
     assert cfg["measurement"] == value
 
 
 def test_the_leak_does_not_survive_end_to_end(monkeypatch):
     monkeypatch.setenv(nr.API_KEY_ENV_VAR, "SECRET-KEY-abc123")
     local = FakeLocal({"information_schema": SENSOR_SCHEMA})
-    result, _ = _http(local, {"measurement": "@format {env[NORI_API_KEY]}"})
+    result, _ = _http(local, {"measurement": "@format {env[SYNTHEFY_NORI_API_KEY]}"})
     assert result["status"] == "failed"
     assert "SECRET-KEY-abc123" not in json.dumps(result)
 
@@ -337,7 +343,7 @@ def test_a_removed_parameter_is_rejected_not_ignored(key):
 
 def test_request_body_may_set_query_shape_keys_the_trigger_left_open():
     cfg = nr._load_config(
-        {},
+        MODEL_ARG,
         {
             "measurement": "other",
             "field": "flow",
@@ -370,7 +376,8 @@ def test_a_trigger_argument_pins_its_value_against_the_body(key):
 
 def test_explicit_null_in_body_falls_back_to_the_default():
     cfg = nr._load_config({"measurement": "sensors", "field": "pressure",
-                           "feature_fields": "temp humidity"}, {"window": None})
+                           "feature_fields": "temp humidity",
+                           "model": "synthefy/nori-30m"}, {"window": None})
     assert cfg["window"] == timedelta(days=30)
 
 
@@ -392,6 +399,7 @@ def test_toml_config_supplies_every_parameter(tmp_path):
         'measurement = "sensors"\n'
         'field = "pressure"\n'
         'feature_fields = ["air temp", "humidity"]\n'
+        'model = "synthefy/nori-30m"\n'
         'window = "7d"\n'
         "min_history = 10\n"
     )
@@ -406,7 +414,8 @@ def test_toml_config_supplies_every_parameter(tmp_path):
 def test_toml_config_cannot_be_combined_with_inline_arguments(tmp_path):
     """"Supplies all parameters" has to be enforced, or the inline ones vanish in silence."""
     path = tmp_path / "cfg.toml"
-    path.write_text('measurement = "sensors"\nfield = "pressure"\nfeature_fields = ["temp"]\n')
+    path.write_text('measurement = "sensors"\nfield = "pressure"\n'
+                    'feature_fields = ["temp"]\nmodel = "synthefy/nori-30m"\n')
     with pytest.raises(nr.ConfigError, match="cannot be combined with the inline"):
         nr._load_config({"config_file_path": str(path), "window": "99d"})
 
@@ -478,7 +487,7 @@ def test_feature_fields_are_deduplicated_in_order():
 
 def test_defaults():
     cfg = cfg_for()
-    assert cfg["model"] == nr.DEFAULT_MODEL_SLUG == "synthefy/nori-30m"
+    assert cfg["model"] == BASE_ARGS["model"]  # named by the caller; the plugin has no default
     assert cfg["output_measurement"] == "sensors_regressed"
     assert cfg["window"] == timedelta(days=30)
     assert cfg["skip_existing"] is True
@@ -512,6 +521,31 @@ def test_non_string_header_values_do_not_crash(monkeypatch):
     assert nr._get_api_key({"X-Nori-Api-Key": []}) == "from-env"
     assert nr._get_api_key({"X-Nori-Api-Key": 1234}) == "from-env"
     assert nr._get_api_key({b"binary": b"key"}) == "from-env"
+
+
+def test_model_is_required(monkeypatch):
+    """There is no default model: the slug selects a priced variant, so the plugin refuses to pick
+    one, the same way Synthefy's own client and local package do."""
+    args = {k: v for k, v in BASE_ARGS.items() if k != "model"}
+    with pytest.raises(nr.ConfigError, match="`model` is required"):
+        nr._load_config(args, {})
+
+
+def test_an_empty_model_is_treated_as_missing(monkeypatch):
+    with pytest.raises(nr.ConfigError, match="`model` is required"):
+        nr._load_config({**BASE_ARGS, "model": "   "}, {})
+
+
+def test_the_model_requirement_names_the_published_list():
+    args = {k: v for k, v in BASE_ARGS.items() if k != "model"}
+    with pytest.raises(nr.ConfigError, match=re.escape(nr.MODEL_LIST_URL)):
+        nr._load_config(args, {})
+
+
+def test_the_api_key_environment_variable_is_vendor_prefixed():
+    """The name is part of the plugin's public contract: operators set it on the InfluxDB host and
+    the error message names it, so it must not drift silently."""
+    assert nr.API_KEY_ENV_VAR == "SYNTHEFY_NORI_API_KEY"
 
 
 def test_no_key_anywhere_is_a_config_error():
@@ -1279,9 +1313,11 @@ def _http(local, body, args=None, headers=None, script=None):
     """Drive process_request. By default the trigger carries no arguments and the body supplies
     everything, which is the documented on-demand shape (a trigger argument pins its value)."""
     if args is None:
+        # `model` is a trigger argument only (it selects a priced model), so it goes to the
+        # trigger side even when the body supplies everything else.
+        args = {"model": BASE_ARGS["model"]}
         if isinstance(body, dict):
-            body = {**BASE_ARGS, **body}
-        args = {}
+            body = {**{k: v for k, v in BASE_ARGS.items() if k != "model"}, **body}
     fake = FakeRequests(script or [])
     original = nr.requests
     nr.requests = fake

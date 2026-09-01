@@ -60,8 +60,8 @@ The Nori gateway API key is a secret and is **never** read from trigger argument
 body (both are logged). It is resolved, in order:
 
 1. a non-empty `X-Nori-Api-Key: <key>` request header (HTTP trigger only), then
-2. the `NORI_API_KEY` environment variable set on the InfluxDB host (required for the scheduled
-   trigger).
+2. the `SYNTHEFY_NORI_API_KEY` environment variable set on the InfluxDB host (required for the
+   scheduled trigger).
 
 The key is intentionally **not** accepted in the `Authorization` header: InfluxDB parses
 `Authorization` for its own request authorization, so a key placed there never reaches the plugin.
@@ -185,7 +185,7 @@ influxdb3 create trigger \
 3. Set the Nori gateway key on the InfluxDB host, so the scheduled trigger can read it:
 
    ```bash
-   export NORI_API_KEY="<your Nori API key>"
+   export SYNTHEFY_NORI_API_KEY="<your Nori API key>"
    ```
 
 ### Data requirements
@@ -305,7 +305,7 @@ Call the HTTP endpoint (exposed at `/api/v3/engine/<path>`), passing the Nori ke
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/nori_regress \
-  -H "X-Nori-Api-Key: $NORI_API_KEY" \
+  -H "X-Nori-Api-Key: $SYNTHEFY_NORI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"measurement":"sensors","field":"pressure","feature_fields":["temp","humidity"],"tags":{"site":"A"}}'
 ```
@@ -335,7 +335,7 @@ The top-level `status` is one of `success`, `partial`, `skipped`, `dry_run` or `
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/nori_regress \
-  -H "X-Nori-Api-Key: $NORI_API_KEY" \
+  -H "X-Nori-Api-Key: $SYNTHEFY_NORI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"measurement":"sensors","field":"pressure","feature_fields":["temp","humidity"],"tags":{"site":"A"},"start_time":"2026-01-01T00:00:00Z","end_time":"2026-02-01T00:00:00Z"}'
 ```
@@ -347,7 +347,7 @@ reads the `window` before it.
 
 ```bash
 curl -X POST http://localhost:8181/api/v3/engine/nori_regress \
-  -H "X-Nori-Api-Key: $NORI_API_KEY" \
+  -H "X-Nori-Api-Key: $SYNTHEFY_NORI_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"measurement":"sensors","field":"pressure","feature_fields":["temp","humidity"],"tags":{"site":"A"},"dry_run":true}'
 ```
@@ -469,8 +469,8 @@ caller-facing message with the full detail in `processing_engine_logs`.
 
 The plugin cannot find a Nori gateway key.
 
-**Solution:** set `NORI_API_KEY` on the InfluxDB host, or pass an `X-Nori-Api-Key: <key>` header
-when calling the HTTP trigger (see
+**Solution:** set `SYNTHEFY_NORI_API_KEY` on the InfluxDB host, or pass an
+`X-Nori-Api-Key: <key>` header when calling the HTTP trigger (see
 [Authentication](#authentication-for-the-nori-gateway)). An empty header value is ignored and the
 environment variable is used instead.
 

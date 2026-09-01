@@ -238,11 +238,11 @@ def test_every_validator_key_is_declared():
 @pytest.mark.parametrize(
     "body",
     [
-        {"measurement": "@format {env[NORI_API_KEY]}"},
+        {"measurement": "@format {env[SYNTHEFY_NORI_API_KEY]}"},
         {"field": "@read_file /etc/passwd"},
-        {"measurement": "@jinja {{env.NORI_API_KEY}}"},
+        {"measurement": "@jinja {{env.SYNTHEFY_NORI_API_KEY}}"},
         {"measurement": "@get other"},
-        {"feature_fields": ["@format {env[NORI_API_KEY]}", "temp"]},
+        {"feature_fields": ["@format {env[SYNTHEFY_NORI_API_KEY]}", "temp"]},
         {"tags": {"site": "@read_file /etc/passwd"}},
         {"window": "@json [1]"},
     ],
@@ -274,7 +274,7 @@ def test_an_at_sign_that_is_not_a_leading_token_is_allowed(value):
 def test_the_leak_does_not_survive_end_to_end(monkeypatch):
     monkeypatch.setenv(nr.API_KEY_ENV_VAR, "SECRET-KEY-abc123")
     local = FakeLocal({"information_schema": SENSOR_SCHEMA})
-    result, _ = _http(local, {"measurement": "@format {env[NORI_API_KEY]}"})
+    result, _ = _http(local, {"measurement": "@format {env[SYNTHEFY_NORI_API_KEY]}"})
     assert result["status"] == "failed"
     assert "SECRET-KEY-abc123" not in json.dumps(result)
 
@@ -512,6 +512,12 @@ def test_non_string_header_values_do_not_crash(monkeypatch):
     assert nr._get_api_key({"X-Nori-Api-Key": []}) == "from-env"
     assert nr._get_api_key({"X-Nori-Api-Key": 1234}) == "from-env"
     assert nr._get_api_key({b"binary": b"key"}) == "from-env"
+
+
+def test_the_api_key_environment_variable_is_vendor_prefixed():
+    """The name is part of the plugin's public contract: operators set it on the InfluxDB host and
+    the error message names it, so it must not drift silently."""
+    assert nr.API_KEY_ENV_VAR == "SYNTHEFY_NORI_API_KEY"
 
 
 def test_no_key_anywhere_is_a_config_error():

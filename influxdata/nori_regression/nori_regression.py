@@ -80,11 +80,14 @@ from influxdata_plugin_utils.write import write_data
 DEFAULT_GATEWAY_URL = "https://inference.baseten.co/predict"
 GATEWAY_URL_ENV_VAR = "NORI_GATEWAY_URL"
 
-# The key is a SECRET: it is read from the NORI_API_KEY environment variable on the InfluxDB host,
-# or (HTTP trigger only) from an incoming X-Nori-Api-Key request header. It is NEVER read from
-# trigger args or the request body (both are logged), and never from the incoming `Authorization`
-# header (InfluxDB consumes that header for its own request authorization).
-API_KEY_ENV_VAR = "NORI_API_KEY"
+# The key is a SECRET: it is read from the SYNTHEFY_NORI_API_KEY environment variable on the
+# InfluxDB host, or (HTTP trigger only) from an incoming X-Nori-Api-Key request header. It is NEVER
+# read from trigger args or the request body (both are logged), and never from the incoming
+# `Authorization` header (InfluxDB consumes that header for its own request authorization).
+#
+# The name carries the vendor prefix because an InfluxDB host runs plugins from several authors:
+# an unprefixed NORI_API_KEY says nothing about whose service it authenticates against.
+API_KEY_ENV_VAR = "SYNTHEFY_NORI_API_KEY"
 API_KEY_HEADER = "X-Nori-Api-Key"
 
 # Slugs name their parameter count so the model behind a slug never silently changes. The bare
@@ -120,8 +123,9 @@ MAX_BODY_BYTES = 10 * 1024 * 1024
 # that STARTS WITH "@": @format and @jinja interpolate `env`, @read_file reads the host filesystem,
 # @get reads other settings. Every one of dynaconf's ~30 tokens begins with this single character,
 # and nothing else triggers them (a leading space or a doubled @ is inert), so refusing a leading
-# "@" is a complete guard. Without it a request body of {"measurement": "@format {env[NORI_API_KEY]}"}
-# comes back resolved in the error message - the plugin's own secret, handed to the caller.
+# "@" is a complete guard. Without it a request body of
+# {"measurement": "@format {env[SYNTHEFY_NORI_API_KEY]}"} comes back resolved in the error
+# message - the plugin's own secret, handed to the caller.
 DYNACONF_TOKEN_PREFIX = "@"
 
 # Parameters an earlier revision accepted. They are rejected by name rather than ignored, so an
@@ -648,7 +652,7 @@ def _gateway_url() -> str:
 
 def _get_api_key(request_headers=None) -> str:
     """Resolve the gateway key: a non-empty X-Nori-Api-Key header wins (HTTP trigger), else the
-    NORI_API_KEY environment variable.
+    SYNTHEFY_NORI_API_KEY environment variable.
 
     An empty or non-string header value falls through to the environment rather than winning it: a
     header sent with no value used to suppress the fallback and send `Api-Key ` with no key at all.

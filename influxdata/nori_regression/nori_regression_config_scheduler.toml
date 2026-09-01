@@ -24,10 +24,11 @@ feature_fields = ["temp", "humidity"]
 # Filter to a single series. A run must resolve to one series; the plugin fails if the window
 # holds more. Default: no filter.
 #tags = { site = "A" }
-# Nori gateway slug. Defaults to "synthefy/nori-30m"; the current models and their slugs are
+# Nori gateway slug. REQUIRED: there is no default, because the slug selects a priced model.
+# The current models and their slugs are
 # listed at https://docs.synthefy.com/nori/quickstart#models
 # The bare "synthefy/nori" slug is retired.
-#model = "synthefy/nori-30m"
+model = "synthefy/nori-30m"
 # Measurement to write predictions to. Default: "<measurement>_regressed".
 #output_measurement = "sensors_regressed"
 # Write predictions to another database. Default: the trigger's database.

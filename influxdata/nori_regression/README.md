@@ -84,6 +84,7 @@ InfluxDB host. It must be an `https://` URL; plain `http://` is accepted only fo
 | `measurement` | string | required | Source measurement (table) to read from. |
 | `field` | string | required | The numeric field to predict. The plugin trains on the rows where it is present and predicts the rows where it is null. |
 | `feature_fields` | string | required | Numeric feature columns (X) used to predict `field`, **space-separated** (for example `temp humidity`). Use spaces, not commas (`--trigger-arguments` splits argument pairs on commas) and not dots (a field name may contain a `.`). |
+| `model` | string | required | The Nori gateway slug to call. There is no default: the slug selects a priced model, so the plugin will not choose one for you. See [Supported models](#supported-models). Trigger argument only. |
 
 A column name that contains a space cannot be expressed in `feature_fields` as a trigger argument,
 because every string form splits on whitespace. Name such a column from a TOML array
@@ -97,7 +98,6 @@ because every string form splits on whitespace. Name such a column from a TOML a
 | `start_time` | string | *(none)* | ISO 8601 start of a fixed window. Given alone, the window ends now. |
 | `end_time` | string | *(none)* | ISO 8601 end of a fixed window. Given alone, the window starts one `window` earlier. |
 | `tags` | string | *(none)* | Filter to a single series. Format: `key:val key2:val2` (space-separated pairs, one value per key). A token without a `:` is rejected. Required when the window holds more than one series. |
-| `model` | string | `synthefy/nori-30m` | The Nori gateway slug to call. See [Supported models](#supported-models). |
 | `output_measurement` | string | `<measurement>_regressed` | Measurement to write predictions to. Must differ from `measurement`. |
 | `target_database` | string | *(trigger db)* | Write predictions to a different database. |
 | `dry_run` | boolean | `false` | Log the first few predictions and return them all, without writing anything. |
@@ -273,7 +273,7 @@ influxdb3 create trigger \
   --database mydb \
   --path "gh:influxdata/nori_regression/nori_regression.py" \
   --trigger-spec "every:15m" \
-  --trigger-arguments measurement=sensors,field=pressure,feature_fields="temp humidity",tags=site:A,min_history=3 \
+  --trigger-arguments measurement=sensors,field=pressure,feature_fields="temp humidity",tags=site:A,model=synthefy/nori-30m,min_history=3 \
   nori_example
 ```
 
@@ -414,8 +414,9 @@ ORDER BY 1 DESC
 
 ## Supported models
 
-The `model` argument is the Nori gateway slug your API key is granted. The plugin defaults to
-`synthefy/nori-30m`.
+The `model` argument is the Nori gateway slug your API key is granted. It is **required**: the
+slug selects a priced model, so the plugin will not choose one on your behalf. Synthefy's own
+client and local package take the same position.
 
 Synthefy publishes the current models, their sizes and their slugs at
 [docs.synthefy.com/nori/quickstart#models](https://docs.synthefy.com/nori/quickstart#models). That list is the authoritative one:

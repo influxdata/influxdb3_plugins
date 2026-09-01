@@ -9,7 +9,7 @@
         {"name": "start_time", "example": "2026-01-01T00:00:00Z", "description": "ISO start of a fixed window instead of a trailing one. With skip_existing left on, a schedule over a fixed window backfills and then stops calling the gateway.", "required": false},
         {"name": "end_time", "example": "2026-02-01T00:00:00Z", "description": "ISO end of a fixed window. Given alone, the window starts one `window` earlier.", "required": false},
         {"name": "tags", "example": "site:A", "description": "Filter to a single series. Format: key:val key2:val2 (space-separated pairs, single value per key). A token without ':' is rejected. Required if the window holds more than one series.", "required": false},
-        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call, defaulting to synthefy/nori-30m. The current list of models and their slugs is at https://docs.synthefy.com/nori/quickstart#models. The bare 'synthefy/nori' slug is retired. Your API key must be granted the slug.", "required": false},
+        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Required: there is no default, because the slug selects a priced model. The current list of models and their slugs is at https://docs.synthefy.com/nori/quickstart#models. The bare 'synthefy/nori' slug is retired. Your API key must be granted the slug.", "required": true},
         {"name": "output_measurement", "example": "sensors_regressed", "description": "Where to write predictions. Default: <measurement>_regressed.", "required": false},
         {"name": "target_database", "example": "predictions", "description": "Write predictions to this database instead of the trigger's own.", "required": false},
         {"name": "dry_run", "example": "false", "description": "If true, log predictions but do not write them.", "required": false},
@@ -32,7 +32,7 @@
         {"name": "start_time", "example": "2026-01-01T00:00:00Z", "description": "ISO start of the window. May also be in the request body. Given alone, the window ends now.", "required": false},
         {"name": "end_time", "example": "2026-02-01T00:00:00Z", "description": "ISO end of the window. May also be in the request body. Given alone, the window starts one `window` earlier.", "required": false},
         {"name": "dry_run", "example": "false", "description": "If true, log predictions but do not write them. May also be in the request body.", "required": false},
-        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Trigger argument only: it selects a billed model, so the request body cannot override it.", "required": false},
+        {"name": "model", "example": "synthefy/nori-30m", "description": "The Nori gateway slug to call. Required, and a trigger argument only: it selects a billed model, so there is no default and the request body cannot override it.", "required": true},
         {"name": "output_measurement", "example": "sensors_regressed", "description": "Where to write predictions. Trigger argument only: the request body cannot override a write target.", "required": false},
         {"name": "target_database", "example": "predictions", "description": "Write predictions to this database instead of the trigger's own. Trigger argument only: the request body cannot override a write target.", "required": false},
         {"name": "min_history", "example": "50", "description": "Minimum labeled rows required to train. Trigger argument only.", "required": false},
@@ -92,7 +92,12 @@ API_KEY_HEADER = "X-Nori-Api-Key"
 
 # Slugs name their parameter count so the model behind a slug never silently changes. The bare
 # `synthefy/nori` slug was retired and now returns 404, so it is rejected with a pointed message.
-DEFAULT_MODEL_SLUG = "synthefy/nori-30m"
+# There is no default model. Synthefy's own client and local package both require an explicit
+# size and raise rather than pick one, because a variant is a priced choice: selecting one on the
+# operator's behalf spends their money and pins them to a slug they never named. This plugin
+# follows that. The slug below is only the example shown in help text and suggested when a retired
+# slug is used.
+EXAMPLE_MODEL_SLUG = "synthefy/nori-30m"
 RETIRED_MODEL_SLUGS = {"synthefy/nori"}
 
 # Which models exist, and their sizes, is Synthefy's to publish and changes when they release one.
@@ -195,7 +200,7 @@ VALIDATORS: list = [
     Validator("field", default="", cast=str),
     Validator("feature_fields", default="", cast=parse_delimited_list),
     Validator("window", default="30d", cast=parse_timedelta),
-    Validator("model", default=DEFAULT_MODEL_SLUG, cast=str),
+    Validator("model", default="", cast=str),
     Validator("dry_run", default=False, cast=parse_bool),
     Validator("skip_existing", default=True, cast=parse_bool),
     Validator("min_history", default=50, gte=1, cast=int),
@@ -329,10 +334,16 @@ def _normalize_config(cfg) -> dict:
             f"feature_fields cannot include the target field or 'time': {reserved}"
         )
 
-    model = str(cfg.get("model") or DEFAULT_MODEL_SLUG).strip()
+    model = str(cfg.get("model") or "").strip()
+    if not model:
+        raise ConfigError(
+            "`model` is required: the Nori gateway slug to call, for example "
+            f"{EXAMPLE_MODEL_SLUG!r}. There is no default, because the slug selects a priced "
+            f"model. The current slugs are listed at {MODEL_LIST_URL}."
+        )
     if model in RETIRED_MODEL_SLUGS:
         raise ConfigError(
-            f"model slug {model!r} is retired and no longer routes. Use {DEFAULT_MODEL_SLUG!r} "
+            f"model slug {model!r} is retired and no longer routes. Use {EXAMPLE_MODEL_SLUG!r} "
             f"or another current slug, listed at {MODEL_LIST_URL}."
         )
 

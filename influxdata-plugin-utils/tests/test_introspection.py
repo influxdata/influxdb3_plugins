@@ -20,6 +20,10 @@ class FakeCache:
         self.values[key] = value
         self.ttls[key] = ttl_seconds
 
+    def delete(self, key):
+        self.ttls.pop(key, None)
+        return self.values.pop(key, None) is not None
+
 
 class FakeInfluxDB:
     def __init__(self, responder):

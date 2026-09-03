@@ -12,6 +12,7 @@ __all__ = [
     "get_table_names",
     "get_tag_names",
     "get_field_names",
+    "get_schema",
     "query_window",
 ]
 
@@ -70,6 +71,7 @@ def get_table_names(
             _cache_key("shared:tables", database),
             producer,
             ttl_seconds=ttl_seconds,
+            cache_empty=False,
         )
     return producer()
 
@@ -103,6 +105,7 @@ def get_tag_names(
             _cache_key(f"shared:tags:{table}", database),
             producer,
             ttl_seconds=ttl_seconds,
+            cache_empty=False,
         )
     return producer()
 
@@ -140,7 +143,51 @@ def get_field_names(
 
     if use_cache:
         key = _cache_key(f"shared:fields:{table}:{int(numeric_only)}", database)
-        return cached(influxdb3_local, key, producer, ttl_seconds=ttl_seconds)
+        return cached(
+            influxdb3_local, key, producer, ttl_seconds=ttl_seconds, cache_empty=False
+        )
+    return producer()
+
+
+def get_schema(
+    influxdb3_local,
+    table: str,
+    *,
+    exclude_time: bool = True,
+    database: str | None = None,
+    use_cache: bool = True,
+    ttl_seconds: int | None = 3600,
+    refresh: bool = False,
+) -> dict:
+    """Return ``{column_name: data_type}`` for a table.
+
+    With ``exclude_time=False`` the ``time`` column is included. ``refresh=True``
+    re-reads the catalog and replaces the cached entry, for callers that noticed
+    a column the cache does not know.
+    """
+
+    def producer() -> dict:
+        query = (
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_name = $table"
+        )
+        rows = _query(influxdb3_local, query, {"table": table}, database=database)
+        return {
+            row["column_name"]: row.get("data_type", "")
+            for row in rows
+            if not (exclude_time and row["column_name"] == "time")
+        }
+
+    if use_cache:
+        key = _cache_key(f"shared:schema:{table}:{int(exclude_time)}", database)
+        return cached(
+            influxdb3_local,
+            key,
+            producer,
+            ttl_seconds=ttl_seconds,
+            refresh=refresh,
+            cache_empty=False,
+        )
     return producer()
 
 

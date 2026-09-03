@@ -6,8 +6,6 @@ read the server's filesystem or environment. See
 https://github.com/influxdata/influxdb3_plugins/issues/134.
 """
 
-import tomllib
-
 import pytest
 
 from influxdata_plugin_utils.config import Validator, load_plugin_config

@@ -8,13 +8,14 @@ Modules:
     write          - LineBuilder builders and resilient write_data
 """
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 from . import cache, config, introspection, parsing, write
 from .cache import cached
 from .config import Validator, load_plugin_config, resolve_path, resolve_plugin_dir
 from .introspection import (
     get_field_names,
+    get_schema,
     get_table_names,
     get_tag_names,
     query_window,
@@ -47,6 +48,7 @@ __all__ = [
     "resolve_path",
     "resolve_plugin_dir",
     "get_field_names",
+    "get_schema",
     "get_table_names",
     "get_tag_names",
     "query_window",

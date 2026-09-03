@@ -1,0 +1,28 @@
+manifest_schema_version = "1.2"
+
+[plugin]
+name = "geo_enrichment"
+version = "0.1.0"
+description = "Resolves lat/lon into location attributes — country and city, a zone or site you define, or a grid cell — merged into the source rows or written to a target table. HTTP endpoint backfills history."
+triggers = ["process_writes", "process_request"]
+homepage = "https://www.influxdata.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/geo_enrichment"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/geo_enrichment/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!geo_enrichment.py",
+]
+
+[dependencies]
+database_version = ">=3.8.2"
+python = [
+  "influxdata-plugin-utils>=0.4.0",
+  "reverse_geocode",
+  "shapely",
+  "jsonpath-ng",
+  "h3",
+  "pygeohash",
+  "s2sphere",
+  "scipy",
+]

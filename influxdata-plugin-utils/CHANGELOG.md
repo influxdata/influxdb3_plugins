@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-03
+
+### Added
+
+- `introspection.get_schema(influxdb3_local, table)` returns
+  `{column_name: data_type}` from one `information_schema` query.
+- `cache.cached()` gains two parameters: `refresh` replaces a stored entry, and
+  `cache_empty=False` leaves a falsy result unstored. Combined, a refresh that
+  produces an empty value drops the entry, so a table dropped between reads
+  leaves neither its old schema cached nor an empty one that would never be
+  retried. Every introspection lookup passes `cache_empty=False`, so an empty
+  answer is retried rather than remembered; `get_schema()` also forwards
+  `refresh`, letting a caller re-read a schema on seeing an unknown column.
+
 ## [0.3.1] - 2026-08-03
 
 ### Changed

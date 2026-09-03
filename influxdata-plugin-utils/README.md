@@ -19,9 +19,9 @@ pip install -e influxdata-plugin-utils
 | Module          | What it provides                                                                                                            |
 |-----------------|-----------------------------------------------------------------------------------------------------------------------------|
 | `config`        | `load_plugin_config(args, validators)` (dynaconf-backed), `resolve_plugin_dir()`, `resolve_path()`, re-exported `Validator` |
-| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `query_window()` with optional `database=`                    |
+| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `get_schema()`, `query_window()` with optional `database=`     |
 | `parsing`       | `parse_timedelta()`, `parse_timestamp_ns()`, `parse_int()`, `parse_bool()`, `parse_delimited_list()`, `parse_key_value()`   |
-| `cache`         | `cached(influxdb3_local, key, producer, ttl_seconds=3600)`                                                                  |
+| `cache`         | `cached(influxdb3_local, key, producer, ttl_seconds=3600, refresh=False, cache_empty=True)`                                 |
 | `write`         | `build_line()`, `build_line_typed()`, `add_field_with_type()`, `write_data()`, `BatchLines`                                 |
 
 ## Config: precedence

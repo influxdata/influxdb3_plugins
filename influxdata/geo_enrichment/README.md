@@ -716,7 +716,6 @@ influxdb3 query --database mydb \
 - `geo_enrichment_config_data_writes.toml` — annotated configuration template
 - `manifest.toml` — plugin manifest
 - `requirements.txt` — runtime dependencies
-- `requirements-dev.txt` — test dependencies (`pytest` plus every optional package)
 - `test_geo_enrichment.py` — pytest suite, runs without a live InfluxDB 3 server
 - `README.md` — this documentation
 

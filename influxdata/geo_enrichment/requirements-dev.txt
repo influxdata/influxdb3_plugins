@@ -1,9 +1,0 @@
-pytest
-influxdata-plugin-utils>=0.4.0
-reverse_geocode
-shapely
-jsonpath-ng
-h3
-pygeohash
-s2sphere
-scipy

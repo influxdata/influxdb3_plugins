@@ -1,0 +1,188 @@
+# Geo Enrichment Plugin Data Write Configuration Template
+# Copy this file to your PLUGIN_DIR and reference it with
+#   --trigger-arguments config_file_path=geo_enrichment_config_data_writes.toml
+# Example: if the file is at /plugins/configs/geo_enrichment_config_data_writes.toml, use
+#   config_file_path=configs/geo_enrichment_config_data_writes.toml
+
+########## Required Parameters ##########
+# Source tables to enrich; rows from other tables in the batch are ignored
+# An array, or a space-separated string
+source_measurements = ["your_measurement"]  # e.g., ["gps", "fleet_pos"], "gps fleet_pos"
+
+# Which resolver attributes to write and under what column names
+# A table of attribute = "column", or a space-separated "attribute:column" string.
+# An array of pairs is rejected. The available attributes depend on the strategy:
+# see the per-strategy sections below
+output_columns = { attribute = "your_column" }  # e.g., { country_code = "geo_country", city = "geo_city" }
+
+
+########## Optional Parameters ##########
+# How the attributes are written
+# "field" merges them into the source row; "tag" changes the row identity and
+# therefore requires target_measurement. Defaults to "field"
+#output_mode = "field"  # e.g., "tag"
+
+# Destination table
+# Omit to enrich the source table in place, which needs output_mode="field"
+#target_measurement = "your_target_measurement"  # e.g., "gps_located"
+
+# Destination database
+# Defaults to the trigger's database
+#target_database = "your_target_database"  # e.g., "analytics"
+
+# Value written when a coordinate cannot be resolved
+# distance_m is a float column and reports -1 instead. Defaults to "UNKNOWN"
+#unknown_value = "UNKNOWN"  # e.g., "n/a"
+
+
+########## Coordinate Input ##########
+# Configure exactly one input mode. Columns may be tags or fields.
+
+# Separate latitude and longitude columns, as numbers or strings
+# Default mode; defaults to "lat" and "lon"
+#lat_field = "lat"  # e.g., "latitude"
+#lon_field = "lon"  # e.g., "longitude"
+
+# Positive divisor applied to both coordinates after they are read: 557558000
+# with coord_scale = 1e7 becomes 55.7558. Applies to every input mode below, so
+# leave it at 1 unless the columns really hold scaled integers. Defaults to 1
+#coord_scale = 1  # e.g., 1e7, or 10000000 written out
+
+# Single column holding both coordinates, instead of the pair above
+#point_field = "your_point_column"  # e.g., "position"
+# How to read it: "lat_lon", "lon_lat", "wkt" (POINT(lon lat)) or "geojson"
+# Defaults to "lat_lon"
+#point_format = "lat_lon"  # e.g., "wkt"
+
+# Column holding a geohash string, decoded to the cell center
+#geohash_field = "your_geohash_column"  # e.g., "gh"
+
+# Column holding an H3 index, decoded to the cell center
+#h3_field = "your_h3_column"  # e.g., "h3"
+
+
+########## Resolution Strategy ##########
+# Which question the plugin answers:
+#   "builtin" - what settlement is this point near? No reference file needed
+#   "polygon" - which of my zones is this point in? Needs reference_file
+#   "nearest" - which of my sites is this point at? Needs reference_file
+#   "grid"    - which cell of a global grid is this point in? No reference file
+# Defaults to "builtin"
+#strategy = "builtin"  # e.g., "polygon"
+
+# --- strategy = "builtin" ---
+# Attributes: country_code, country, state, city, population, distance_m
+# Consider only places at least this populous, 0 or more; raising it coarsens the
+# answer, and set too high it returns a distant metropolis. Defaults to 0
+#min_population = 0  # e.g., 10000
+
+# --- strategy = "polygon" or "nearest": the reference file ---
+# Zones or sites, a .geojson, .json or .csv file under PLUGIN_DIR or an absolute path
+# The format decides how the file is read, the strategy decides how a point is
+# matched against it: either strategy accepts either format
+#reference_file = "your_reference_file"  # e.g., "data/zones.geojson", "data/sites.csv"
+
+# Python codec name for a CSV reference file
+# The default reads UTF-8 with or without a byte-order mark, which covers Excel
+# exports. GeoJSON is always UTF-8. Defaults to "utf-8-sig"
+#reference_encoding = "utf-8-sig"  # e.g., "cp1251"
+
+# Coordinate columns of a CSV reference file
+# Detected from lat/latitude and lon/lng/long/longitude when omitted, ignoring case
+#reference_lat_column = "your_latitude_column"  # e.g., "y_coord"
+#reference_lon_column = "your_longitude_column"  # e.g., "x_coord"
+
+# WKT geometry column of a CSV reference file, an alternative to the pair above
+# Detected from geometry or wkt when omitted
+#reference_geometry_column = "your_geometry_column"  # e.g., "shape"
+
+# --- strategy = "polygon" ---
+# Attributes: whatever the reference file supplies
+# Which zone wins when a point is inside several: "smallest" (most specific),
+# "largest" (most general), "first" (file order) or "priority". Defaults to "smallest"
+#overlap_policy = "smallest"  # e.g., "priority"
+
+# Attribute ranked when overlap_policy = "priority" and read only by that policy,
+# named like an output_columns entry
+#priority_attribute = "your_priority_attribute"  # e.g., "rank"
+
+# --- strategy = "nearest" ---
+# Attributes: whatever the reference file supplies, plus distance_m
+# How many closest sites to describe, 1 or more; above 1 every output column
+# repeats per rank with a "_2", "_3" suffix. Defaults to 1
+#nearest_count = 1  # e.g., 3
+
+# --- strategy = "builtin" or "nearest" ---
+# Meters, above 0. Points farther than this from the resolved place are unresolved
+# Defaults to 1000 for "nearest" and to no limit for "builtin", where the distance
+# is measured to a city center. There is no "no limit" keyword: pass a value larger
+# than half the Earth's circumference
+#max_radius_m = 1000  # e.g., 20000000
+
+# --- strategy = "grid" ---
+# Attribute: cell
+# Grid to use: "h3" (hexagons), "geohash" (rectangles) or "s2" (spherical quads)
+# Defaults to "h3"
+#grid_type = "h3"  # e.g., "geohash"
+# Cell size, ranged by grid type: h3 0-15, geohash 1-12, s2 0-30
+# Defaults to 7 for h3, 6 for geohash, 9 for s2
+# Each finer step multiplies the distinct values the column can take
+#grid_precision = 7  # e.g., 9
+
+
+########## Caching ##########
+# Decimal places a coordinate is rounded to before it becomes a cache key, 0 to 9
+# 4 is about 11 m, the size of consumer GPS noise. Defaults to 4
+#quantize_decimals = 4  # e.g., 5
+
+# How many distinct rounded coordinates are remembered before least-recently-used
+# entries are evicted, 1 or more. Defaults to 100000
+#cache_size = 100000  # e.g., 500000
+
+
+########## HTTP Backfill ##########
+# Read only by the HTTP endpoint; a write trigger ignores them.
+# The request body wins over anything set here, so a value below is the default
+# for every call that does not name its own.
+
+# Window to backfill, RFC 3339, given together
+# start is inclusive, end exclusive. Omit both to cover the whole table
+#start = "2026-08-01T00:00:00Z"
+#end = "2026-08-29T00:00:00Z"
+
+# Rows read per page; values below 1 are raised to 1. Defaults to 1000
+#batch_size = 1000  # e.g., 5000
+
+# Re-resolve rows that hold unknown_value, instead of skipping them
+# Use after widening max_radius_m. Defaults to false
+#retry_unknown = false
+
+# Re-resolve every row in the window whatever it currently holds
+# Use after redrawing a zone. Defaults to false
+#force = false
+
+
+###### Example: Create Trigger Using This Config ######
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --plugin-filename geo_enrichment.py \
+#   --trigger-spec "table:your_measurement" \
+#   --trigger-arguments config_file_path=geo_enrichment_config_data_writes.toml \
+#   your_trigger_name
+
+###### Example: Use This Config For An HTTP Backfill ######
+# By default the endpoint takes its whole configuration from the request body.
+# Naming this file in the body switches that off: the configuration is then read
+# from the file alone, and any body field naming a plugin parameter is ignored.
+# The five backfill fields are the exception — the body always wins over the
+# file for those, so a fixed setup can be named once and the window varied here.
+#
+# curl -X POST "http://localhost:8181/api/v3/engine/your_request_path" \
+#   -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
+#   -H "Content-Type: application/json" \
+#   -d '{
+#     "config_file_path": "geo_enrichment_config_data_writes.toml",
+#     "start": "2026-08-01T00:00:00Z",
+#     "end": "2026-08-29T00:00:00Z",
+#     "retry_unknown": true
+#   }'

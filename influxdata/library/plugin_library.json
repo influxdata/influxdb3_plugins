@@ -405,6 +405,17 @@
                 "required_libraries": ["influxdata-plugin-utils>=0.3.0"],
                 "last_update": "2026-08-22",
                 "trigger_types_supported": ["scheduler"]
+            },
+            {
+                "name": "Geo Enrichment",
+                "path": "influxdata/geo_enrichment/geo_enrichment.py",
+                "description": "[BETA] Resolves lat/lon into location attributes - country and city, a zone or site you define, or a grid cell - merged into the source rows or written to a target table. Includes an HTTP endpoint for backfilling history.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/geo_enrichment/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdata-plugin-utils>=0.4.0", "reverse_geocode", "shapely", "jsonpath-ng", "h3", "pygeohash", "s2sphere", "scipy"],
+                "last_update": "2026-09-02",
+                "trigger_types_supported": ["data_writes", "http"]
             }
         ]
     }

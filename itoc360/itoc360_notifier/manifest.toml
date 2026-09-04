@@ -1,0 +1,19 @@
+manifest_schema_version = "1.3"
+
+[plugin]
+name = "itoc360_notifier"
+version = "0.1.0"
+description = "Evaluates threshold checks on a scheduled interval and sends ALERT and RESOLVE events to ITOC360 incident management. Emits a deterministic check identity per tag combination so ITOC360 deduplicates and auto-resolves alerts correctly."
+triggers = ["process_scheduled_call"]
+homepage = "https://itoc360.com/"
+repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/itoc360/itoc360_notifier"
+documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/itoc360/itoc360_notifier/README.md"
+exclude = [
+  ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
+  ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "*.py", "!itoc360_notifier.py",
+]
+
+[dependencies]
+database_version = ">=3.0.0"
+python = ["requests"]

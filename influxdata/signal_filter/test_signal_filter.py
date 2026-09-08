@@ -291,25 +291,31 @@ def test_toml_relative_path_virtual_env_fallback(tmp_path, monkeypatch):
     assert sf.parse_config({"config_file_path": "cfg.toml"}).fc2 == 3.0
 
 
+def test_affix_none_writes_into_the_source_field():
+    """A blank argument reads as unset, so "none" is how you ask for no affix."""
+    assert sf.parse_config({"fc2": "5", "field_suffix": ""}).field_suffix == "_filtered"
+
+    in_place = sf.parse_config({"fc2": "5", "field_suffix": "none"})
+    assert in_place.field_suffix == ""
+    assert sf.resolve_output_field(in_place, "value") == "value"
+    assert sf.loop_hazard_fields(in_place) == ["value"]
+
+
 def test_loop_hazard_detection():
-    hazard = sf.parse_config({"fc2": "5", "field_suffix": ""})
-    assert sf.loop_hazard_fields(hazard) == ["value"]
+    # the trigger reads the field the filter writes back
+    same_name = {"fc2": "5", "input_fields": "value_filtered", "output_field": "value"}
+    assert sf.loop_hazard_fields(sf.parse_config(same_name)) == ["value_filtered"]
     assert sf.loop_hazard_fields(sf.parse_config({"fc2": "5"})) == []
-    other_db = sf.parse_config(
-        {"fc2": "5", "field_suffix": "", "output_target_database": "elsewhere"}
-    )
+    other_db = sf.parse_config({**same_name, "output_target_database": "elsewhere"})
     assert sf.loop_hazard_fields(other_db) == []
     other_meas = sf.parse_config(
-        {"fc2": "5", "field_suffix": "", "input_measurement": "signal",
-         "output_measurement": "signal_out"}
+        {**same_name, "input_measurement": "signal", "output_measurement": "signal_out"}
     )
     assert sf.loop_hazard_fields(other_meas) == []
     # output_measurement set but input unrestricted: rows in the output
     # measurement still loop back, so the hazard stands.
-    all_tables = sf.parse_config(
-        {"fc2": "5", "field_suffix": "", "output_measurement": "signal_out"}
-    )
-    assert sf.loop_hazard_fields(all_tables) == ["value"]
+    all_tables = sf.parse_config({**same_name, "output_measurement": "signal_out"})
+    assert sf.loop_hazard_fields(all_tables) == ["value_filtered"]
 
 
 # ---------------------------------------------------------------------------
@@ -739,8 +745,12 @@ def test_config_error_logged_not_raised():
 
 def test_loop_hazard_warning_emitted():
     local = FakeLocal()
-    run(local, make_rows(uniform_times(20), [1.0] * 20), args={**BASE_ARGS, "field_suffix": ""})
-    assert any("write loop" in w for w in local.warns)
+    run(
+        local,
+        make_rows(uniform_times(20), [1.0] * 20, field="value_filtered"),
+        args={**BASE_ARGS, "input_fields": "value_filtered", "output_field": "value"},
+    )
+    assert any("replace the source samples" in w for w in local.warns)
 
 
 def test_summary_logged():

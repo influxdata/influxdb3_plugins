@@ -73,14 +73,14 @@ and configure the plugin.
 
 ### Output parameters
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `output_target_database` | string | *(trigger db)* | Database to write filtered output to. |
-| `output_measurement` | string | *(source table)* | Measurement to write filtered output to. |
-| `output_field` | string | *(source field)* | Base name override for the output field. Only valid when a single input field is configured. |
-| `field_prefix` | string | *(empty)* | Prefix for the output field name. |
-| `field_suffix` | string | `_filtered` | Suffix for the output field name. |
-| `config_file_path` | string | — | Path to a TOML file supplying all parameters; mutually exclusive with inline arguments. Relative paths resolve against `PLUGIN_DIR`. |
+| Parameter                | Type   | Default          | Description                                                                                                                          |
+|--------------------------|--------|------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `output_target_database` | string | *(trigger db)*   | Database to write filtered output to.                                                                                                |
+| `output_measurement`     | string | *(source table)* | Measurement to write filtered output to.                                                                                             |
+| `output_field`           | string | *(source field)* | Base name override for the output field. Only valid when a single input field is configured.                                         |
+| `field_prefix`           | string | *(empty)*        | Prefix for the output field name. `none` means no prefix; an empty value counts as unset.                                            |
+| `field_suffix`           | string | `_filtered`      | Suffix for the output field name. `none` writes into the source field, replacing its samples; an empty value counts as unset.        |
+| `config_file_path`       | string | —                | Path to a TOML file supplying all parameters; mutually exclusive with inline arguments. Relative paths resolve against `PLUGIN_DIR`. |
 
 The final output field name is `{field_prefix}{output_field or source_field}{field_suffix}`
 — by default, `value` becomes `value_filtered`. The raw input field is never copied
@@ -303,12 +303,18 @@ Manual mode needs no sample rate — the coefficients are already digital.
 
 Writing the output into the source measurement re-fires this trigger. This is
 safe by default: re-fired rows carry only the output field, the input field is
-null on them, and null values produce no samples. **However**, if your overrides
-resolve the output field to the *same name* as the input field in the same
-measurement and database (for example `field_suffix=""` with no `output_field`),
-the output feeds the filter again and grows without bound. The plugin logs a
-prominent warning in that configuration — change `field_suffix`, `output_field`,
-`output_measurement`, or `output_target_database` to break the cycle.
+null on them, and null values produce no samples.
+
+If your overrides resolve the output field to the *same name* as the input
+field in the same measurement and database — `field_suffix=none` with no
+`field_prefix`, or `input_fields=value_filtered` with `output_field=value` —
+the filtered values land on the source field at the same timestamps and
+**replace the source samples**, which cannot be undone. The re-fire that
+follows is dropped by the out-of-order guard (the samples are at or before the
+last processed timestamp), so it costs one extra empty invocation rather than
+running away. The plugin logs a prominent warning in that configuration; set
+`output_field`, `field_suffix`, `output_measurement`, or
+`output_target_database` to write elsewhere.
 
 ## Code overview
 

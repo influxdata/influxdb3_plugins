@@ -5,7 +5,10 @@ from unittest.mock import Mock, patch
 
 # Note: The module is named "import" which is a Python keyword
 # We need to use importlib to import it
+import builtins
 import importlib
+
+builtins.LineBuilder = getattr(builtins, "LineBuilder", object)
 import_module = importlib.import_module("import")
 
 _parse_url_with_port_inference = import_module._parse_url_with_port_inference

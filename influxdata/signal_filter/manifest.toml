@@ -2,7 +2,7 @@ manifest_schema_version = "1.3"
 
 [plugin]
 name = "signal_filter"
-version = "0.2.0"
+version = "0.3.0"
 description = "Applies streaming digital IIR filters to numeric fields"
 triggers = ["process_writes"]
 homepage = "https://www.influxdata.com/"

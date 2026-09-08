@@ -458,7 +458,7 @@ def test_resolve_toml_parse_error(monkeypatch, tmp_path):
 
 def test_resolve_toml_missing_file(monkeypatch, tmp_path):
     monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(ValueError, match="Cannot read config file"):
         _resolve_config({"config_file_path": "definitely_not_here.toml"}, mode="wal")
 
 
@@ -503,9 +503,10 @@ def test_resolve_validates_identifier_field():
         _resolve_config({"fields": "status method-name"}, mode="wal")
 
 
-def test_resolve_rejects_empty_output_suffix():
-    with pytest.raises(ValueError, match="output_suffix"):
-        _resolve_config({"fields": "status", "output_suffix": ""}, mode="wal")
+def test_resolve_empty_output_suffix_falls_back_to_the_default():
+    """A blank value counts as not provided, so the validator default applies."""
+    cfg = _resolve_config({"fields": "status", "output_suffix": ""}, mode="wal")
+    assert cfg.output_suffix == "_valuecounts"
 
 
 from valuecounter import _series_key

@@ -113,13 +113,13 @@
         {
             "name": "field_prefix",
             "example": "flt_",
-            "description": "Prefix for the output field name. Defaults to ''.",
+            "description": "Prefix for the output field name. Use 'none' for no prefix; an empty value counts as unset. Defaults to ''.",
             "required": false
         },
         {
             "name": "field_suffix",
             "example": "_filtered",
-            "description": "Suffix for the output field name. Defaults to '_filtered'.",
+            "description": "Suffix for the output field name. Use 'none' to write into the source field, replacing its samples; an empty value counts as unset. Defaults to '_filtered'.",
             "required": false
         },
         {
@@ -186,6 +186,7 @@ CACHE_KEY_FMT = "signal_filter:{table}:{field}:{series_hash}"
 
 DEFAULT_INPUT_FIELDS = ("value",)
 DEFAULT_FIELD_SUFFIX = "_filtered"
+NO_AFFIX = "none"
 
 _DESIGN_CACHE = {}  # (design key) -> (sos ndarray, coeff_hash)
 
@@ -421,9 +422,15 @@ def parse_config(args):
         if merged.get("output_measurement")
         else None,
         output_field=str(output_field) if output_field else None,
-        field_prefix=str(merged.get("field_prefix", "")),
-        field_suffix=str(merged.get("field_suffix", DEFAULT_FIELD_SUFFIX)),
+        field_prefix=_resolve_affix(merged.get("field_prefix", "")),
+        field_suffix=_resolve_affix(merged.get("field_suffix", DEFAULT_FIELD_SUFFIX)),
     )
+
+
+def _resolve_affix(value):
+    """``none`` asks for no affix; an empty argument is read as unset upstream."""
+    text = str(value)
+    return "" if text.strip().lower() == NO_AFFIX else text
 
 
 def resolve_output_field(cfg, input_field):
@@ -674,9 +681,9 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
     for field in loop_hazard_fields(cfg):
         influxdb3_local.warn(
             f"[{task_id}] signal_filter: output field for '{field}' resolves to the same "
-            "name in the same measurement and database; this feeds the filter its own "
-            "output (unbounded write loop). Set field_suffix/output_field/"
-            "output_measurement to break the cycle."
+            "name in the same measurement and database; the filtered values replace the "
+            "source samples at the same timestamps. Set output_field, field_suffix, "
+            "output_measurement or output_target_database to write elsewhere."
         )
 
     stats = {

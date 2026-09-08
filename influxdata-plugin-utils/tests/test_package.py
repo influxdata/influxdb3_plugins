@@ -4,7 +4,7 @@ import importlib
 
 import influxdata_plugin_utils as pkg
 
-SUBMODULES = ("cache", "config", "introspection", "parsing", "write")
+SUBMODULES = ("cache", "config", "introspection", "parsing", "request", "write")
 
 
 def test_version_is_valid_pep440():

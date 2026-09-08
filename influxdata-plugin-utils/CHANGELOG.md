@@ -7,10 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-09-03
+## [0.4.0] - 2026-09-08
 
 ### Added
 
+- `request` module for `process_request` plugins: `parse_json_body()`,
+  `parse_request_headers()` and `parse_query_parameters()` turn one raw runtime
+  input into a dict ready for `load_plugin_config`.
+- All three take `names` (one name, a sequence, or a `{source: config_key}`
+  dict to rename). The body and query parsers also take an `unknown` policy:
+  `"ignore"` drops the rest, `"reject"` names a bounded sample of them back to
+  the caller. For headers `names` is required and unnamed headers are always
+  dropped, since every request carries some. Only header names become config
+  keys (`X-Api-Key` -> `x_api_key`); body and query names are kept as written.
+  A top-level value that arrives empty is dropped, so a validator default
+  applies.
+- Headers and query parameters are read from a mapping or from a sequence of
+  name/value pairs, as byte-level and ASGI runtimes deliver them; a repeated
+  name reads as its first value, or as every value with `multi=True`. Two header
+  spellings that fold onto one config key are refused: `X-Api-Key` and
+  `x_api_key` are separate headers on the wire, so whichever the runtime listed
+  first would otherwise win silently.
+- `parse_json_body()` caps the body at 10 MiB, accepts a leading byte order
+  mark, and rejects a body that is not JSON text, bytes or a dict, is not a
+  JSON object, or is nested too deeply. Every function raises `ValueError`, so a
+  plugin can answer a bad request from one `except` clause.
+- `config.merge_config_layers(base, *overlays)` merges layers in increasing
+  precedence, dropping values that arrive empty; `0`, `False` and `[]` are
+  kept. `pinned=[...]` names keys an overlay may not change once `base` sets
+  them, compared as the settings store keeps them; `on_conflict` chooses
+  between raising and keeping the `base` value.
 - `introspection.get_schema(influxdb3_local, table)` returns
   `{column_name: data_type}` from one `information_schema` query.
 - `cache.cached()` gains two parameters: `refresh` replaces a stored entry, and
@@ -20,6 +46,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retried. Every introspection lookup passes `cache_empty=False`, so an empty
   answer is retried rather than remembered; `get_schema()` also forwards
   `refresh`, letting a caller re-read a schema on seeing an unknown column.
+
+### Changed
+
+- `config.load_plugin_config` — bad input always raises `ValueError`, in line
+  with the rest of the package. A validator rejection surfaced as dynaconf's
+  `ValidationError` and an unreadable TOML file as `OSError`; both are now
+  `ValueError`, keeping the original message.
+
+### Security
+
+- `config.load_plugin_config` — drop layer keys that name a dynaconf option:
+  they share the settings store with config keys, so a request body could
+  reach them. `AUTO_CAST_FOR_DYNACONF` switched `@` token substitution back on
+  and reopened
+  [#134](https://github.com/influxdata/influxdb3_plugins/issues/134), letting
+  `@format {env[...]}` read the host's environment and `@read_file` its
+  filesystem; `dynaconf_include` and `default_settings_paths` made the loader
+  read a file of the sender's choosing; `dynaboxify` turned every nested table
+  into a plain dict.
+- `config.load_plugin_config` — pin `AUTO_CAST_FOR_DYNACONF`,
+  `DOTTED_LOOKUP_FOR_DYNACONF` and `MERGE_ENABLED_FOR_DYNACONF` to `False`,
+  after the settings object is built as well: dynaconf reads its options from
+  the process environment too, and that value wins over a constructor
+  argument. With dotted lookup off, a key such as `measurement.sub` is stored
+  literally instead of replacing `measurement`; read a nested value as
+  `cfg.section["key"]` rather than `cfg.get("section.key")`.
+- `config.load_plugin_config` — each layer drops its own blank values, matching
+  `merge_config_layers`, so a blank means "not set here": a blank trigger
+  argument lets a validator default apply instead of shadowing it, and a blank
+  in the TOML file no longer erases the argument underneath it.
 
 ## [0.3.1] - 2026-08-03
 
@@ -81,7 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `write` — `build_line`, `build_line_typed`, `add_field_with_type`,
   `write_data` (batching + retry), `BatchLines`.
 
-[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.1...HEAD
+[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.4.0...HEAD
+[0.4.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.1...utils-v0.4.0
 [0.3.1]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.0...utils-v0.3.1
 [0.3.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.2.0...utils-v0.3.0
 [0.2.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.1.0...utils-v0.2.0

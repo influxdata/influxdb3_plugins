@@ -9,11 +9,6 @@ left out, so a validator default applies. Nested values pass through untouched.
 
 ``unknown`` needs ``names`` to act on, since without it every key is accepted.
 It defaults to ``"ignore"``; ``"reject"`` names the refused keys back to them.
-
-Headers differ on both counts: ``names`` is required and there is no ``unknown``,
-because every request carries headers no plugin would name. A query string, by
-contrast, was written for this plugin. ``Authorization`` never arrives -- the
-engine authenticates with it and drops it -- so name your own header for a token.
 """
 
 import json
@@ -260,38 +255,49 @@ def parse_json_body(
     )
 
 
-def parse_request_headers(request_headers, names, *, multi: bool = False) -> dict:
-    """Read named request headers into config values.
+def parse_request_headers(
+    request_headers,
+    names=None,
+    *,
+    multi: bool = False,
+    unknown: str = "ignore",
+) -> dict:
+    """Read request headers into config values.
 
     Names are matched regardless of casing and hyphenation, and become config
-    keys (``X-Api-Key`` -> ``x_api_key``). Headers outside ``names`` are always
-    dropped. Two spellings of one name -- ``X-Api-Key`` and ``x_api_key`` are
-    separate headers on the wire -- are refused rather than resolved by the
-    order the runtime happens to deliver them in.
+    keys (``X-Api-Key`` -> ``x_api_key``). Two spellings of one name --
+    ``X-Api-Key`` and ``x_api_key`` are separate headers on the wire -- are
+    refused rather than resolved by the order the runtime delivers them in.
+    ``Authorization`` never arrives: the engine authenticates with it and drops
+    it, so a token needs a header of your own.
 
     Args:
         request_headers: Headers as delivered to ``process_request`` -- a
             mapping, or a sequence of name/value pairs.
         names: Headers to read -- one name, a sequence, or a
-            ``{header: config_key}`` dict to rename. Required, since a request
-            always carries headers that are not config.
+            ``{header: config_key}`` dict to rename. ``None`` reads every
+            header, including the ones a client sends on its own (``host``,
+            ``user-agent``, ...), so name the ones you want.
         multi: Return every value of a repeated header as a list instead of
             taking the first.
+        unknown: ``"ignore"`` drops headers outside ``names``; ``"reject"``
+            names them in the error, which turns away any request carrying a
+            header you did not name.
 
     Returns:
         Config values keyed by config key; empty header values are omitted.
 
     Raises:
-        ValueError: ``names`` is ``None``, the headers are of another shape, or
-            two of them fold onto one config key.
+        ValueError: The headers are of another shape, two of them fold onto one
+            config key, or one outside ``names`` arrived and
+            ``unknown="reject"``.
     """
-    if names is None:
-        raise ValueError("names is required: name the headers to read")
+    require_choice(unknown, _UNKNOWN_POLICIES, "unknown")
     selection = _build_selection(names, fold_case=True)
     return _select(
         _pairs(request_headers, "Request headers"),
         selection,
-        "ignore",
+        unknown,
         fold_case=True,
         multi=multi,
         layer="Request headers",

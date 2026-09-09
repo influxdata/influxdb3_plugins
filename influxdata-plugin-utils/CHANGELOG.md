@@ -14,14 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `request` module for `process_request` plugins: `parse_json_body()`,
   `parse_request_headers()` and `parse_query_parameters()` turn one raw runtime
   input into a dict ready for `load_plugin_config`.
-- All three take `names` (one name, a sequence, or a `{source: config_key}`
-  dict to rename). The body and query parsers also take an `unknown` policy:
-  `"ignore"` drops the rest, `"reject"` names a bounded sample of them back to
-  the caller. For headers `names` is required and unnamed headers are always
-  dropped, since every request carries some. Only header names become config
-  keys (`X-Api-Key` -> `x_api_key`); body and query names are kept as written.
-  A top-level value that arrives empty is dropped, so a validator default
-  applies.
+- All three take the same `names` selection (one name, a sequence, or a
+  `{source: config_key}` dict to rename; `None` reads every key) and the same
+  `unknown` policy: `"ignore"` drops the rest, `"reject"` names a bounded sample
+  of them back to the caller. Headers are worth naming explicitly, since a
+  client sends `host`, `user-agent` and friends on every request. Only header
+  names become config keys (`X-Api-Key` -> `x_api_key`); body and query names
+  are kept as written. A top-level value that arrives empty is dropped, so a
+  validator default applies.
 - Headers and query parameters are read from a mapping or from a sequence of
   name/value pairs, as byte-level and ASGI runtimes deliver them; a repeated
   name reads as its first value, or as every value with `multi=True`. Two header

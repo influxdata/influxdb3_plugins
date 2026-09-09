@@ -122,9 +122,29 @@ class TestParseRequestHeaders:
         headers = {"user-agent": "curl/8.5.0", "host": "localhost", "X-Api-Key": "secret"}
         assert parse_request_headers(headers, ["x-api-key"]) == {"x_api_key": "secret"}
 
-    def test_names_is_required(self):
-        with pytest.raises(ValueError, match="names is required"):
-            parse_request_headers({"user-agent": "curl/8.5.0"}, None)
+    def test_names_none_reads_every_header(self):
+        """Including the ones a client sends on its own, which is why you name them."""
+        headers = {"host": "localhost", "user-agent": "curl/8.5.0", "X-Api-Key": "s"}
+        assert parse_request_headers(headers) == {
+            "host": "localhost",
+            "user_agent": "curl/8.5.0",
+            "x_api_key": "s",
+        }
+
+    def test_unknown_reject_names_the_unnamed_headers(self):
+        """Which is every ordinary request, so it only suits a closed set."""
+        headers = {"host": "localhost", "X-Api-Key": "s"}
+        with pytest.raises(ValueError, match="Request headers may not set 'host'"):
+            parse_request_headers(headers, ["x-api-key"], unknown="reject")
+
+        assert parse_request_headers(headers, ["host", "x-api-key"], unknown="reject") == {
+            "host": "localhost",
+            "x_api_key": "s",
+        }
+
+    def test_invalid_unknown_policy_is_rejected(self):
+        with pytest.raises(ValueError, match="Invalid unknown"):
+            parse_request_headers({}, ["x-api-key"], unknown="bogus")
 
     def test_empty_value_counts_as_not_provided(self):
         assert parse_request_headers({"X-Api-Key": "  "}, ["x-api-key"]) == {}

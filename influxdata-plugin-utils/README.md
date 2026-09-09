@@ -99,10 +99,10 @@ def process_request(
 ```
 
 `names` accepts one name, a sequence of names, or a `{source: config_key}` dict
-that renames. It is required for headers, since every request also carries proxy
-and content headers that do not belong in a config object — those are always
-dropped. The engine consumes the `Authorization` header itself and does not pass
-it on, so a plugin that takes a token over HTTP needs a header of its own.
+that renames; `None` reads every key of the layer. Name them for headers: every
+client sends its own (`host`, `user-agent`, ...), and `unknown="reject"` refuses
+such a request for the same reason. `Authorization` never reaches the plugin —
+the engine authenticates with it — so a token needs a header of your own.
 
 Only header names are normalized into config keys (`X-Api-Key` → `x_api_key`),
 because their casing and hyphenation come from the protocol rather than from

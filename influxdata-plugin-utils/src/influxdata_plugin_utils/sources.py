@@ -22,6 +22,7 @@ from ._utils import as_text, is_blank, require_choice
 
 __all__ = [
     "KeySpec",
+    "is_toml_path",
     "parse_trigger_args",
     "parse_json_body",
     "parse_request_headers",
@@ -115,6 +116,11 @@ class KeySpec:
                 raise ValueError(f"rename looks up {key!r} more than once")
             folded[key] = target
         return folded
+
+
+def is_toml_path(path) -> bool:
+    """Does this path name a TOML file? What to do when it does not is the caller's call."""
+    return as_text(path).strip().lower().endswith(".toml")
 
 
 def header_key(name) -> str:
@@ -275,21 +281,34 @@ def parse_trigger_args(args, spec: KeySpec | None = None) -> dict:
                    source="Trigger arguments", coerce=False)
 
 
-def parse_toml(config_file_path, spec: KeySpec | None = None) -> dict:
+def parse_toml(
+    config_file_path,
+    spec: KeySpec | None = None,
+    *,
+    require_suffix: bool = True,
+) -> dict:
     """Read a TOML file, resolving a relative path against the plugin directory.
 
     Args:
         config_file_path: Path to the file; ``None`` or empty yields ``{}``.
         spec: Which of its keys become config values.
+        require_suffix: Refuse a path that does not name a ``.toml`` file,
+            before opening it.
 
     Returns:
         Config values, with TOML's own types preserved.
 
     Raises:
-        ValueError: The file cannot be read or is not valid TOML.
+        ValueError: The path is refused, or the file cannot be read or is not
+            valid TOML.
     """
     if not config_file_path:
         return {}
+    if require_suffix and not is_toml_path(config_file_path):
+        raise ValueError(
+            f"Invalid config file format: expected a .toml file, "
+            f"got {config_file_path!r}"
+        )
     try:
         with open(resolve_path(config_file_path), "rb") as config_file:
             table = tomllib.load(config_file)

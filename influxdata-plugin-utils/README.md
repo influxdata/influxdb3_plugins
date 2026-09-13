@@ -16,40 +16,151 @@ pip install -e influxdata-plugin-utils
 
 ## Modules
 
-| Module          | What it provides                                                                                                                                     |
-|-----------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `config`        | `load_plugin_config(args, validators)` (dynaconf-backed), `merge_config_layers()`, `resolve_plugin_dir()`, `resolve_path()`, re-exported `Validator` |
-| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `get_schema()`, `query_window()` with optional `database=`                              |
-| `parsing`       | `parse_timedelta()`, `parse_timestamp_ns()`, `parse_int()`, `parse_bool()`, `parse_delimited_list()`, `parse_key_value()`                            |
-| `request`       | `parse_json_body()`, `parse_request_headers()`, `parse_query_parameters()`                                                                           |
-| `cache`         | `cached(influxdb3_local, key, producer, ttl_seconds=3600, refresh=False, cache_empty=True)`                                                          |
-| `write`         | `build_line()`, `build_line_typed()`, `add_field_with_type()`, `write_data()`, `BatchLines`                                                          |
+| Module          | What it provides                                                                                                                             |
+|-----------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| `sources`       | `KeySpec`, `parse_trigger_args()`, `parse_toml()`, `parse_env()`, `parse_json_body()`, `parse_request_headers()`, `parse_query_parameters()` |
+| `config`        | `load_config()`, `load_plugin_config()`, `merge_config_layers()`, `Config`, `resolve_plugin_dir()`, `resolve_path()`                         |
+| `validation`    | `Validator`, `validate()`                                                                                                                    |
+| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `get_schema()`, `query_window()` with optional `database=`                      |
+| `parsing`       | `parse_timedelta()`, `parse_timestamp_ns()`, `parse_int()`, `parse_bool()`, `parse_delimited_list()`, `parse_key_value()`                    |
+| `cache`         | `cached(influxdb3_local, key, producer, ttl_seconds=3600, refresh=False, cache_empty=True)`                                                  |
+| `write`         | `build_line()`, `build_line_typed()`, `add_field_with_type()`, `write_data()`, `BatchLines`                                                  |
 
-Every module raises `ValueError` on bad input.
+The package has no dependencies, and every module raises `ValueError` on bad
+input, so a plugin answers a bad configuration from one `except` clause.
 
-## Config: precedence
+## Configuration
 
-`load_plugin_config` merges sources low → high: **env vars → engine `args` → TOML file**. A provided TOML config file overrides everything. Environment variables are read only when their exact names are passed via `env_keys=[...]`; nothing is read from the environment by default.
+Configuration reaches a plugin from several places: the trigger arguments, a
+TOML file, environment variables, and — for `process_request` plugins — the
+request body, its headers and its query string. Each of those is a **source**
+with its own parser, and each parser returns a plain dict.
 
-Keys are stored literally, dots included, so read a nested value as `cfg.section["key"]` rather than `cfg.get("section.key")`.
-
-Keys that name a dynaconf option are dropped from every layer — they would configure the loader instead of the plugin. Those are any key ending in `_FOR_DYNACONF`, any key starting with `DYNACONF`, and `DEFAULT_SETTINGS_PATHS`, `DYNABOXIFY`, `PROJECT_ROOT`, `RENAMED_VARS`, `SETTINGS_MODULE`. Do not use them as plugin parameters.
+`load_config` merges the dicts you give it and validates the result. The
+argument order is the precedence, lowest first.
 
 ```python
-from influxdata_plugin_utils.config import load_plugin_config, Validator
+from influxdata_plugin_utils.config import load_config
 from influxdata_plugin_utils.parsing import parse_timedelta
+from influxdata_plugin_utils.sources import (
+    KeySpec,
+    parse_env,
+    parse_json_body,
+    parse_query_parameters,
+    parse_request_headers,
+    parse_toml,
+    parse_trigger_args,
+)
+from influxdata_plugin_utils.validation import Validator
+
+BODY = KeySpec(allowlist=["measurement", "field", "window"], unknown="reject")
+QUERY = KeySpec(allowlist=["window"])
+HEADERS = KeySpec(allowlist=["x-api-key"], rename={"x-api-key": "api_key"})
+ENV = KeySpec(allowlist=["PLUGIN_API_KEY"], rename={"PLUGIN_API_KEY": "api_key"})
+
+VALIDATORS = [
+    Validator("measurement", required=True),
+    Validator("api_key", required=True),
+    Validator("window", default="1h", cast=parse_timedelta),
+    Validator("limit", default=1000, cast=int, gte=1, lte=10_000),
+]
+
+def process_request(
+    influxdb3_local, query_parameters, request_headers, request_body, args=None
+):
+    cfg = load_config(
+        parse_env(ENV),
+        parse_trigger_args(args),
+        parse_toml(args.get("config_file_path") if args else None),
+        parse_json_body(request_body, BODY),
+        parse_request_headers(request_headers, HEADERS),
+        parse_query_parameters(query_parameters, QUERY),
+        validators=VALIDATORS,
+    )
+    influxdb3_local.info(f"{cfg.measurement} window={cfg['window']}")
+```
+
+`load_plugin_config` covers three layers in a fixed order — the named
+environment variables, the trigger arguments, and the file at
+`config_file_path`:
+
+```python
+from influxdata_plugin_utils.config import load_plugin_config
 
 def process_scheduled_call(influxdb3_local, call_time, args):
-    cfg = load_plugin_config(
-        args,
-        validators=[
-            Validator("source_table", must_exist=True),
-            Validator("batch_size", default=1000, gte=1, lte=10000, cast=int),
-            Validator("window", default="5min", cast=parse_timedelta),
-        ],
-    )
-    influxdb3_local.info(f"{cfg.source_table} window={cfg.window}")
+    cfg = load_plugin_config(args, validators=VALIDATORS, env_keys=["PLUGIN_API_KEY"])
 ```
+
+Pass `source="args"` or `source="toml"` to use only one of the last two. Prefer
+`load_config` in new plugins: there the layers are ordinary arguments, so a
+plugin adds, reorders or drops any of them.
+
+### What a source contributes
+
+A `KeySpec` says which keys of a source become config values and under what
+names:
+
+```python
+KeySpec(allowlist=["measurement"], rename={"measurement": "table"}, unknown="reject")
+```
+
+- `allowlist` names the keys that pass, `denylist` the ones that do not;
+- `rename` maps a source key onto the config key it becomes;
+- `unknown` decides what happens to a refused key — `"ignore"` drops it,
+  `"reject"` names it in the error so the sender learns what was wrong.
+
+On a layer the caller controls, prefer `allowlist`: a parameter added to the
+plugin later stays unreachable until it is listed, where a `denylist` would let
+it through unnoticed.
+
+Header names are matched regardless of casing and hyphenation and become config
+keys (`X-Api-Key` → `x_api_key`). Everywhere else names are matched and kept
+exactly as written. `parse_env` requires an allowlist: the process environment
+belongs to the host and holds credentials, so nothing is read without being
+named. `Authorization` never reaches a plugin — the engine authenticates with
+it — so a token needs a header of your own.
+
+A value that arrives empty — a blank string, a JSON `null`, an unset variable —
+is left out of its layer, so a validator default applies instead and a blank in
+one layer does not erase the layer below it. `0`, `False` and `[]` are real
+values and are kept.
+
+### Holding a key against the request
+
+`merge_config_layers` merges without validating, and can hold chosen keys
+against the layers above them:
+
+```python
+merged = merge_config_layers(args, body, pinned=["measurement"])
+```
+
+A later layer that sets a pinned key raises; `on_conflict="ignore"` keeps the
+value already set instead. A pinned key nobody set stays open, so the same
+plugin works with or without a fixed measurement.
+
+### Validating
+
+A `Validator` describes one config key: the default it falls back to, the cast
+that turns it into a usable type, and the checks it must then pass.
+
+```python
+Validator("window", default="1h", cast=parse_timedelta, gt=timedelta(0), lte=timedelta(days=30))
+Validator("aggregate", default="mean", is_in=("mean", "min", "max", "count"))
+Validator("ripple", required=True, when=Validator("prototype", eq="cheby1"))
+```
+
+`required` asks for a usable value, so a key that arrives blank or `null`
+counts as unset. `when` applies a rule only while another one holds — and holds
+means the key is there and passes — while `condition` takes any predicate. The
+checks are `eq`, `ne`, `gt`, `gte`, `ge`, `lt`, `lte`, `le`,
+`identity`, `is_type_of`, `is_in`, `is_not_in`, `contains`, `cont`,
+`not_contains`, `len_eq`, `len_ne`, `len_min`, `len_max`, `startswith`,
+`endswith`, `not_startswith`, `not_endswith`, `regex` and `not_regex`. They are
+named explicitly, so a misspelled one is a `TypeError` where the rule is
+written.
+
+Validation runs once, over the merged values: defaults fill what no layer set,
+`cast` runs next, and the checks see the cast value.
 
 TOML becomes native — no manual string parsing:
 
@@ -58,77 +169,6 @@ source_table = "cpu"
 batch_size = 2000
 excluded_fields = ["usage_idle", "usage_guest"]
 ```
-
-## HTTP request layers
-
-`process_request` plugins receive configuration from the request itself. Each
-parser turns one raw input into a dict ready for `load_plugin_config`: `names`
-selects the keys a layer may contribute, and for the body and query string
-`unknown` decides what happens to the rest — dropped by default, or named back
-with `unknown="reject"`. A top-level
-value that arrives empty — a blank string, a JSON `null` — counts as "not
-provided" and is dropped, so the validator's default applies. Nested values are
-passed through untouched.
-
-```python
-from influxdata_plugin_utils.config import (
-    load_plugin_config,
-    merge_config_layers,
-)
-from influxdata_plugin_utils.request import (
-    parse_json_body,
-    parse_query_parameters,
-    parse_request_headers,
-)
-
-BODY_KEYS = {"measurement", "field", "window"}
-
-def process_request(
-    influxdb3_local, query_parameters, request_headers, request_body, args=None
-):
-    body = parse_json_body(request_body, BODY_KEYS)
-    query = parse_query_parameters(query_parameters, ["window"])
-    creds = parse_request_headers(
-        request_headers, {"source-token": "source_token"}
-    )
-    cfg = load_plugin_config(
-        merge_config_layers(args, body, creds, query),
-        validators=VALIDATORS,
-        source="args",
-    )
-```
-
-`names` accepts one name, a sequence of names, or a `{source: config_key}` dict
-that renames; `None` reads every key of the layer. Name them for headers: every
-client sends its own (`host`, `user-agent`, ...), and `unknown="reject"` refuses
-such a request for the same reason. `Authorization` never reaches the plugin —
-the engine authenticates with it — so a token needs a header of your own.
-
-Only header names are normalized into config keys (`X-Api-Key` → `x_api_key`),
-because their casing and hyphenation come from the protocol rather than from
-you. Body and query names are matched and kept exactly as written, so rename
-them yourself when you need to: `{"max-rows": "max_rows"}`.
-
-Headers and query parameters may arrive as a mapping or as name/value pairs. A
-repeated name reads as its first value, or as every value with `multi=True`.
-
-`merge_config_layers` takes the layers in increasing precedence, so by default a
-request overrides the trigger arguments. Values that arrive empty are dropped
-from every layer, and `load_plugin_config` drops them too, so a blank trigger
-argument lets a validator default apply instead of shadowing it.
-
-To keep one key out of a caller's reach, name it in `pinned`:
-
-```python
-merged = merge_config_layers(args, body, pinned=["measurement"])
-```
-
-An overlay that sets a pinned key raises; pass `on_conflict="ignore"` to keep
-the `base` value silently instead. A pinned key the trigger never set stays
-open, so the same plugin can be deployed with or without a fixed measurement.
-The pin covers the layers passed here and not a TOML file: under the default
-`source="merge"` the TOML layer outranks everything, so a plugin that accepts
-`config_file_path` from a request should load with `source="args"`.
 
 ## Write helpers
 

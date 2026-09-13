@@ -1,20 +1,22 @@
 """Shared helpers for InfluxDB 3 plugins.
 
 Modules:
-    config         - dynaconf-backed config loading, layer merging, validation
+    sources        - one parser per place configuration comes from
+    config         - layer merging, validation, configuration loading
+    validation     - declarative rules for config values
     introspection  - schema introspection and minimal time-window queries
     parsing        - duration / timestamp / int / bool / list / key=value parsers
-    request        - JSON body / header / query parsing for HTTP plugins
     cache          - TTL cache over influxdb3_local.cache
     write          - LineBuilder builders and resilient write_data
 """
 
 __version__ = "0.4.0"
 
-from . import cache, config, introspection, parsing, request, write
+from . import cache, config, introspection, parsing, sources, validation, write
 from .cache import cached
 from .config import (
-    Validator,
+    Config,
+    load_config,
     load_plugin_config,
     merge_config_layers,
     resolve_path,
@@ -35,7 +37,16 @@ from .parsing import (
     parse_timedelta,
     parse_timestamp_ns,
 )
-from .request import parse_json_body, parse_query_parameters, parse_request_headers
+from .sources import (
+    KeySpec,
+    parse_env,
+    parse_json_body,
+    parse_query_parameters,
+    parse_request_headers,
+    parse_toml,
+    parse_trigger_args,
+)
+from .validation import Validator, validate
 from .write import (
     BatchLines,
     add_field_with_type,
@@ -49,14 +60,25 @@ __all__ = [
     "config",
     "introspection",
     "parsing",
-    "request",
+    "sources",
+    "validation",
     "write",
     "cached",
-    "Validator",
+    "Config",
+    "load_config",
     "load_plugin_config",
     "merge_config_layers",
     "resolve_path",
     "resolve_plugin_dir",
+    "KeySpec",
+    "parse_env",
+    "parse_json_body",
+    "parse_query_parameters",
+    "parse_request_headers",
+    "parse_toml",
+    "parse_trigger_args",
+    "Validator",
+    "validate",
     "get_field_names",
     "get_schema",
     "get_table_names",
@@ -68,9 +90,6 @@ __all__ = [
     "parse_key_value",
     "parse_timedelta",
     "parse_timestamp_ns",
-    "parse_json_body",
-    "parse_query_parameters",
-    "parse_request_headers",
     "BatchLines",
     "add_field_with_type",
     "build_line",

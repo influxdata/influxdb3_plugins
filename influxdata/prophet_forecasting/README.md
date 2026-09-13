@@ -40,7 +40,7 @@ Set these parameters with `--trigger-arguments` when creating a scheduled trigge
 
 ### HTTP request parameters
 
-Send these parameters as JSON in the HTTP POST request body. Trigger arguments are not used by the HTTP endpoint; a JSON `null` means "not set", so the default applies.
+Send these parameters as JSON in the HTTP POST request body, which must be a JSON object of at most 10 MB. Trigger arguments are not used by the HTTP endpoint; a value that arrives empty — a JSON `null` or a blank string — counts as not set, so the default applies.
 
 | Parameter            | Type          | Default  | Description                                                                                        |
 |----------------------|---------------|----------|----------------------------------------------------------------------------------------------------|
@@ -108,7 +108,7 @@ For more information on using TOML configuration files, see the Using TOML Confi
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled.
 - **Python packages**:
-  - `influxdata-plugin-utils>=0.3.0` (configuration loading, parsing, and writing)
+  - `influxdata-plugin-utils>=0.4.0` (configuration loading, parsing, and writing)
   - `pandas` (for data manipulation; 2.x and 3.x are both supported)
   - `requests` (for HTTP requests)
   - `prophet` (for time series forecasting)

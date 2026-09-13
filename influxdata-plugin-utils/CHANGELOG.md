@@ -7,36 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-09-08
+## [0.4.0] - 2026-09-12
 
 ### Added
 
-- `request` module for `process_request` plugins: `parse_json_body()`,
-  `parse_request_headers()` and `parse_query_parameters()` turn one raw runtime
-  input into a dict ready for `load_plugin_config`.
-- All three take the same `names` selection (one name, a sequence, or a
-  `{source: config_key}` dict to rename; `None` reads every key) and the same
-  `unknown` policy: `"ignore"` drops the rest, `"reject"` names a bounded sample
-  of them back to the caller. Headers are worth naming explicitly, since a
-  client sends `host`, `user-agent` and friends on every request. Only header
-  names become config keys (`X-Api-Key` -> `x_api_key`); body and query names
-  are kept as written. A top-level value that arrives empty is dropped, so a
-  validator default applies.
-- Headers and query parameters are read from a mapping or from a sequence of
-  name/value pairs, as byte-level and ASGI runtimes deliver them; a repeated
-  name reads as its first value, or as every value with `multi=True`. Two header
-  spellings that fold onto one config key are refused: `X-Api-Key` and
-  `x_api_key` are separate headers on the wire, so whichever the runtime listed
-  first would otherwise win silently.
-- `parse_json_body()` caps the body at 10 MiB, accepts a leading byte order
-  mark, and rejects a body that is not JSON text, bytes or a dict, is not a
-  JSON object, or is nested too deeply. Every function raises `ValueError`, so a
-  plugin can answer a bad request from one `except` clause.
-- `config.merge_config_layers(base, *overlays)` merges layers in increasing
-  precedence, dropping values that arrive empty; `0`, `False` and `[]` are
-  kept. `pinned=[...]` names keys an overlay may not change once `base` sets
-  them, compared as the settings store keeps them; `on_conflict` chooses
-  between raising and keeping the `base` value.
+- `sources` module: one parser per place configuration comes from —
+  `parse_trigger_args()`, `parse_toml()`, `parse_env()`, `parse_json_body()`,
+  `parse_request_headers()` and `parse_query_parameters()`. Each reads one raw
+  input and returns a plain dict, so a plugin composes the layers it needs.
+- `sources.KeySpec` says which keys of a source become config values and under
+  what names: `allowlist`, `denylist`, `rename`, and an `unknown` policy that
+  either drops a refused key or names it back to whoever sent it. `parse_env`
+  requires an allowlist, since the process environment belongs to the host.
+- `config.load_config(*layers, validators=...)` merges the layers in the order
+  given — lowest precedence first — and validates the result once.
+- `config.merge_config_layers(*layers, pinned=...)` merges without validating
+  and can hold chosen keys against the layers above them, so a request cannot
+  move what the operator fixed.
+- `config.Config`, the validated configuration: a dict that also answers to
+  attribute access.
+- `validation` module: `Validator` and `validate()`. A rule carries a default,
+  a `cast`, and checks — 25 of them, from `gte` and `is_in` to `regex` — plus
+  `condition` for an arbitrary predicate and `when` to apply a rule only while
+  another one holds. A list, dict or set `default` is copied for each use, so
+  one rule's default cannot be changed through the values it fills in. Checks
+  are named explicitly, so a misspelled one is a `TypeError` where the rule is
+  written.
 - `introspection.get_schema(influxdb3_local, table)` returns
   `{column_name: data_type}` from one `information_schema` query.
 - `cache.cached()` gains two parameters: `refresh` replaces a stored entry, and
@@ -49,33 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `config.load_plugin_config` — bad input always raises `ValueError`, in line
-  with the rest of the package. A validator rejection surfaced as dynaconf's
-  `ValidationError` and an unreadable TOML file as `OSError`; both are now
-  `ValueError`, keeping the original message.
+- `config.load_plugin_config` reads the same three layers as before — the named
+  environment variables, the trigger arguments, the TOML file — and returns a
+  `Config`. A value that arrives empty is left out of its own layer, so a blank
+  trigger argument lets a validator default apply and a blank in the file no
+  longer erases the argument underneath it. Every failure is a `ValueError`,
+  including an unreadable file and a rejected value. It stays supported, and
+  `load_config` is the one to reach for in new plugins.
+- Configuration keys are stored as they arrive. Nothing in a layer is
+  interpreted, whatever a value spells, and a key is matched exactly as written
+  — except header names, which become config keys (`X-Api-Key` -> `x_api_key`)
+  because their spelling comes from the protocol.
 
-### Security
+### Removed
 
-- `config.load_plugin_config` — drop layer keys that name a dynaconf option:
-  they share the settings store with config keys, so a request body could
-  reach them. `AUTO_CAST_FOR_DYNACONF` switched `@` token substitution back on
-  and reopened
-  [#134](https://github.com/influxdata/influxdb3_plugins/issues/134), letting
-  `@format {env[...]}` read the host's environment and `@read_file` its
-  filesystem; `dynaconf_include` and `default_settings_paths` made the loader
-  read a file of the sender's choosing; `dynaboxify` turned every nested table
-  into a plain dict.
-- `config.load_plugin_config` — pin `AUTO_CAST_FOR_DYNACONF`,
-  `DOTTED_LOOKUP_FOR_DYNACONF` and `MERGE_ENABLED_FOR_DYNACONF` to `False`,
-  after the settings object is built as well: dynaconf reads its options from
-  the process environment too, and that value wins over a constructor
-  argument. With dotted lookup off, a key such as `measurement.sub` is stored
-  literally instead of replacing `measurement`; read a nested value as
-  `cfg.section["key"]` rather than `cfg.get("section.key")`.
-- `config.load_plugin_config` — each layer drops its own blank values, matching
-  `merge_config_layers`, so a blank means "not set here": a blank trigger
-  argument lets a validator default apply instead of shadowing it, and a blank
-  in the TOML file no longer erases the argument underneath it.
+- The `dynaconf` dependency. The package now has none.
 
 ## [0.3.1] - 2026-08-03
 

@@ -1470,10 +1470,6 @@ def process_scheduled_call(
     influxdb3_local.info(f"[{task_id}] Starting scheduled forecast at {call_time}")
 
     try:
-        config_file_path = (args or {}).get("config_file_path")
-        if config_file_path and not str(config_file_path).endswith(".toml"):
-            raise ForecastError("Invalid config file format: expected a .toml file")
-
         config: dict = load_scheduled_config(args)
         tag_values: dict = parse_tag_values(
             influxdb3_local, config["tag_values"], task_id

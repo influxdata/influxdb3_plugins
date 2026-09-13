@@ -39,6 +39,7 @@ from .parsing import (
 )
 from .sources import (
     KeySpec,
+    is_toml_path,
     parse_env,
     parse_json_body,
     parse_query_parameters,
@@ -71,6 +72,7 @@ __all__ = [
     "resolve_path",
     "resolve_plugin_dir",
     "KeySpec",
+    "is_toml_path",
     "parse_env",
     "parse_json_body",
     "parse_query_parameters",

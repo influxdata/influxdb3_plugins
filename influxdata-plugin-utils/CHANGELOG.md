@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what names: `allowlist`, `denylist`, `rename`, and an `unknown` policy that
   either drops a refused key or names it back to whoever sent it. `parse_env`
   requires an allowlist, since the process environment belongs to the host.
+- `sources.parse_toml` refuses a path that does not name a `.toml` file before
+  opening it; `require_suffix=False` lifts that for a config file named some
+  other way, and `sources.is_toml_path()` answers the same question on its own,
+  for a plugin that would rather report the path itself than raise.
 - `config.load_config(*layers, validators=...)` merges the layers in the order
   given — lowest precedence first — and validates the result once.
 - `config.merge_config_layers(*layers, pinned=...)` merges without validating
@@ -50,8 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Config`. A value that arrives empty is left out of its own layer, so a blank
   trigger argument lets a validator default apply and a blank in the file no
   longer erases the argument underneath it. Every failure is a `ValueError`,
-  including an unreadable file and a rejected value. It stays supported, and
-  `load_config` is the one to reach for in new plugins.
+  including an unreadable file and a rejected value, and a `config_file_path`
+  that does not name a `.toml` file is now refused before the file is opened.
+  It stays supported, and `load_config` is the one to reach for in new plugins.
 - Configuration keys are stored as they arrive. Nothing in a layer is
   interpreted, whatever a value spells, and a key is matched exactly as written
   — except header names, which become config keys (`X-Api-Key` -> `x_api_key`)

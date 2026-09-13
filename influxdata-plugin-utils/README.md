@@ -117,7 +117,9 @@ Header names are matched regardless of casing and hyphenation and become config
 keys (`X-Api-Key` → `x_api_key`). Everywhere else names are matched and kept
 exactly as written. `parse_env` requires an allowlist: the process environment
 belongs to the host and holds credentials, so nothing is read without being
-named. `Authorization` never reaches a plugin — the engine authenticates with
+named. `parse_toml` refuses a path that does not name a `.toml` file before
+opening it; pass `require_suffix=False` for a config file named some other way,
+and `is_toml_path()` answers the same question without reading anything. `Authorization` never reaches a plugin — the engine authenticates with
 it — so a token needs a header of your own.
 
 A value that arrives empty — a blank string, a JSON `null`, an unset variable —

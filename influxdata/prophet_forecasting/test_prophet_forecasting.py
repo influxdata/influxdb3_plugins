@@ -887,7 +887,7 @@ def test_http_null_means_not_set_and_body_is_not_a_file_path():
 @pytest.mark.parametrize(
     "request_body, expected",
     [
-        ("", "No request body provided"),
+        ("", "is required"),  # an empty body sets nothing, so a required value is missing
         ("not json", "Expecting value"),
         ('["a"]', "must be a JSON object"),
     ],

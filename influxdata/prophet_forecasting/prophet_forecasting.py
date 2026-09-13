@@ -373,8 +373,15 @@ import pandas as pd
 import requests
 from influxdata_plugin_utils.config import (
     Validator,
-    load_plugin_config,
+    load_config,
     resolve_plugin_dir,
+)
+from influxdata_plugin_utils.sources import (
+    KeySpec,
+    parse_env,
+    parse_json_body,
+    parse_toml,
+    parse_trigger_args,
 )
 from influxdata_plugin_utils.parsing import (
     parse_bool,
@@ -582,32 +589,68 @@ HTTP_VALIDATORS: list = COMMON_VALIDATORS + [
 ]
 
 
-def load_config(
-    args: dict | None, validators: list, *, source: str, env_keys=None
-) -> dict:
+NO_FILE_PATH = KeySpec(denylist=["config_file_path"])
+AUTH_TOKEN_ENV = KeySpec(allowlist=["INFLUXDB3_AUTH_TOKEN"])
+
+
+def load_http_config(request_body) -> dict:
     """
-    Load and validate the plugin configuration.
+    Load and validate the configuration an HTTP request carries.
 
     Args:
-        args (dict | None): Trigger arguments or the parsed HTTP request body.
-        validators (list): Validators for the entry point in use.
-        source (str): "toml" to read the file named by config_file_path, "args" otherwise.
-        env_keys (list[str] | None): Environment variables merged below the other layers.
+        request_body: The body as delivered to process_request.
 
     Returns:
         dict: Config values keyed by lower-case name.
 
     Raises:
-        ForecastError: If a required value is missing or a value fails to cast.
+        ForecastError: If the body cannot be read, a required value is missing,
+            or a value fails to cast.
     """
     try:
-        loaded = load_plugin_config(
-            args, validators=validators, env_keys=env_keys, source=source
+        loaded = load_config(
+            parse_json_body(request_body, NO_FILE_PATH),
+            validators=HTTP_VALIDATORS,
         )
     except Exception as e:
         raise ForecastError(f"Failed to load configuration: {e}") from e
 
-    return {key.lower(): value for key, value in loaded.as_dict().items()}
+    return {key.lower(): value for key, value in loaded.items()}
+
+
+def load_scheduled_config(args: dict | None) -> dict:
+    """
+    Load and validate the configuration a scheduled trigger runs on.
+
+    Reads the named environment variables, then either the TOML file at
+    config_file_path or the trigger arguments -- never both.
+
+    Args:
+        args (dict | None): Trigger arguments.
+
+    Returns:
+        dict: Config values keyed by lower-case name.
+
+    Raises:
+        ForecastError: If the file cannot be read, a required value is missing,
+            or a value fails to cast.
+    """
+    config_file_path = (args or {}).get("config_file_path")
+    try:
+        trigger_layer = (
+            parse_toml(config_file_path)
+            if config_file_path
+            else parse_trigger_args(args, NO_FILE_PATH)
+        )
+        loaded = load_config(
+            parse_env(AUTH_TOKEN_ENV),
+            trigger_layer,
+            validators=SCHEDULED_VALIDATORS,
+        )
+    except Exception as e:
+        raise ForecastError(f"Failed to load configuration: {e}") from e
+
+    return {key.lower(): value for key, value in loaded.items()}
 
 
 def quote_identifier(name: str) -> str:
@@ -1431,12 +1474,7 @@ def process_scheduled_call(
         if config_file_path and not str(config_file_path).endswith(".toml"):
             raise ForecastError("Invalid config file format: expected a .toml file")
 
-        config: dict = load_config(
-            args,
-            SCHEDULED_VALIDATORS,
-            source="toml" if config_file_path else "args",
-            env_keys=["INFLUXDB3_AUTH_TOKEN"],
-        )
+        config: dict = load_scheduled_config(args)
         tag_values: dict = parse_tag_values(
             influxdb3_local, config["tag_values"], task_id
         )
@@ -1543,21 +1581,8 @@ def process_request(
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Received forecasting request")
 
-    if not request_body:
-        influxdb3_local.error(f"[{task_id}] No request body provided.")
-        return {"message": f"[{task_id}] Error: No request body provided."}
-
     try:
-        data = json.loads(request_body)
-        if not isinstance(data, dict):
-            raise ForecastError("Request body must be a JSON object")
-
-        # an explicit JSON null means "not set", so the validator default applies
-        config: dict = load_config(
-            {key: value for key, value in data.items() if value is not None},
-            HTTP_VALIDATORS,
-            source="args",
-        )
+        config: dict = load_http_config(request_body)
         tag_values: dict = parse_tag_values(
             influxdb3_local, config["tag_values"], task_id
         )

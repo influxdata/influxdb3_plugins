@@ -233,20 +233,29 @@ class TestJsonBody:
 
 
 class TestRequestHeaders:
-    def test_a_name_matches_whatever_its_spelling(self):
+    def test_only_the_casing_of_a_name_is_folded(self):
+        """RFC 9110 makes casing meaningless; an underscore is a different header."""
         headers = {"X-Api-Key": "secret"}
-        for spelling in ("X-Api-Key", "x-api-key", "x_api_key"):
+        for spelling in ("X-Api-Key", "x-api-key", "X-API-KEY"):
             assert parse_request_headers(headers, KeySpec(allowlist=[spelling])) == {
-                "x_api_key": "secret"
+                "x-api-key": "secret"
             }
+        assert parse_request_headers(headers, KeySpec(allowlist=["x_api_key"])) == {}
+
+    def test_a_hyphen_and_an_underscore_are_separate_headers(self):
+        headers = [("x-api-key", "from-gateway"), ("x_api_key", "from-client")]
+        assert parse_request_headers(headers) == {
+            "x-api-key": "from-gateway",
+            "x_api_key": "from-client",
+        }
 
     def test_every_header_is_read_without_a_spec(self):
         """Including the ones a client sends on its own, which is why you name them."""
-        headers = {"host": "localhost", "user-agent": "curl/8.5.0", "X-Api-Key": "s"}
+        headers = {"host": "localhost", "User-Agent": "curl/8.5.0", "X-Api-Key": "s"}
         assert parse_request_headers(headers) == {
             "host": "localhost",
-            "user_agent": "curl/8.5.0",
-            "x_api_key": "s",
+            "user-agent": "curl/8.5.0",
+            "x-api-key": "s",
         }
 
     def test_a_spec_selects_and_renames(self):
@@ -263,25 +272,33 @@ class TestRequestHeaders:
     def test_an_empty_value_counts_as_not_provided(self):
         assert parse_request_headers({"X-Api-Key": "  "}) == {}
 
-    def test_a_repeated_header_reads_as_the_first_value_or_as_all(self):
+    def test_a_repeated_header_is_refused_unless_every_value_is_asked_for(self):
+        """Which value the plugin would get is otherwise the runtime's dict order."""
         headers = [("accept", "a"), ("x-api-key", "secret"), ("accept", "b")]
-        assert parse_request_headers(headers, KeySpec(allowlist=["accept"])) == {
-            "accept": "a"
+        spec = KeySpec(allowlist=["accept"])
+
+        with pytest.raises(ValueError, match="'accept' is set more than once"):
+            parse_request_headers(headers, spec)
+        assert parse_request_headers(headers, spec, multi=True) == {
+            "accept": ["a", "b"]
         }
-        assert parse_request_headers(
-            headers, KeySpec(allowlist=["accept"]), multi=True
-        ) == {"accept": ["a", "b"]}
 
-    def test_two_spellings_of_one_header_are_refused(self):
-        """Both reach the plugin; the winner would be the runtime's dict order."""
-        headers = {"x-api-key": "from-gateway", "x_api_key": "from-client"}
-        with pytest.raises(ValueError, match="same config key 'x_api_key'"):
-            parse_request_headers(headers, KeySpec(allowlist=["x-api-key"]))
+    def test_two_spellings_of_one_name_are_one_repeated_header(self):
+        """Casing carries no meaning, so these are one header sent twice."""
+        headers = [("X-Api-Key", "from-gateway"), ("X-API-KEY", "from-client")]
+        spec = KeySpec(allowlist=["x-api-key"])
 
-    def test_two_spellings_of_one_header_cannot_be_renamed_apart(self):
-        spec = KeySpec(rename={"x-api-key": "api_key", "x_api_key": "gateway_key"})
-        with pytest.raises(ValueError, match="rename looks up 'x_api_key' more than once"):
-            parse_request_headers({"X-Api-Key": "secret"}, spec)
+        with pytest.raises(ValueError, match="'x-api-key' is set more than once"):
+            parse_request_headers(headers, spec)
+        assert parse_request_headers(headers, spec, multi=True) == {
+            "x-api-key": ["from-gateway", "from-client"]
+        }
+
+    def test_two_names_renamed_onto_one_config_key_are_refused(self):
+        headers = {"X-Api-Key": "from-header", "api_key": "already-there"}
+        spec = KeySpec(rename={"x-api-key": "api_key"})
+        with pytest.raises(ValueError, match="same config key 'api_key'"):
+            parse_request_headers(headers, spec)
 
     @pytest.mark.parametrize(
         "headers", ["x-api-key: secret", 42, ["x-api-key"], [("a", "b", "c")]]

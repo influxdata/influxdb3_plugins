@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   move what the operator fixed.
 - `config.Config`, the validated configuration: a dict that also answers to
   attribute access.
+- `sources.parse_request_headers` folds only the casing of a header name, which
+  RFC 9110 makes meaningless; a name is otherwise kept as written, and `rename`
+  gives a key another name. A header the plugin asked for that arrives more than
+  once is refused rather than resolved by the runtime's dict order — `multi=True`
+  reads every value instead.
 - `validation` module: `Validator` and `validate()`. A rule carries a default,
   a `cast`, and checks — 25 of them, from `gte` and `is_in` to `regex` — plus
   `condition` for an arbitrary predicate and `when` to apply a rule only while
@@ -59,7 +64,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It stays supported, and `load_config` is the one to reach for in new plugins.
 - Configuration keys are stored as they arrive. Nothing in a layer is
   interpreted, whatever a value spells, and a key is matched exactly as written
-  — except header names, which become config keys (`X-Api-Key` -> `x_api_key`)
+  — except header names, which become lower-case config keys (`X-Api-Key` ->
+  `x-api-key`)
   because their spelling comes from the protocol.
 
 ### Removed

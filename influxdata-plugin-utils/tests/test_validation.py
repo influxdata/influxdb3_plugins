@@ -37,10 +37,6 @@ class TestPresence:
         with pytest.raises(ValueError, match="measurement is required"):
             validate({}, [Validator("measurement", required=True)])
 
-    def test_must_exist_is_the_same_rule(self):
-        with pytest.raises(ValueError, match="measurement is required"):
-            validate({}, [Validator("measurement", must_exist=True)])
-
     def test_a_default_satisfies_a_required_key(self):
         rule = Validator("measurement", required=True, default="cpu")
         assert validate({}, [rule]) == {"measurement": "cpu"}

@@ -124,8 +124,12 @@ def is_toml_path(path) -> bool:
 
 
 def header_key(name) -> str:
-    """Turn a protocol-level name into a config key: ``X-Api-Key`` -> ``x_api_key``."""
-    return as_text(name).strip().lower().replace("-", "_")
+    """Fold a header name to its config key: ``X-Api-Key`` -> ``x-api-key``.
+
+    Only the casing is folded, because only the casing is meaningless: RFC 9110
+    makes field names case-insensitive. ``rename`` gives the key another name.
+    """
+    return as_text(name).strip().lower()
 
 
 def _values_of(raw) -> list[str]:
@@ -185,11 +189,13 @@ def _select(
     fold_case: bool = False,
     coerce: bool = True,
     multi: bool = False,
+    reject_repeats: bool = False,
 ) -> dict:
     """Apply a spec to the pairs of one source.
 
     ``coerce`` turns protocol values into strings; body and file values keep
-    their own types.
+    their own types. ``reject_repeats`` refuses a key the source carries more
+    than once, for a source where a repeat is ambiguous rather than a list.
     """
     spec = spec.folded() if spec is not None and fold_case else spec
     allowed = (
@@ -219,13 +225,15 @@ def _select(
             values = _values_of(raw_value)
             if not values:
                 continue
-            _claim(spelled_by, target, key, source)
+            _claim(spelled_by, target, match, source)
             if multi:
                 selected.setdefault(target, []).extend(values)
             else:
+                if reject_repeats and target in selected:
+                    raise ValueError(f"{source}: {match!r} is set more than once")
                 selected.setdefault(target, values[0])
         elif not is_blank(raw_value):
-            _claim(spelled_by, target, key, source)
+            _claim(spelled_by, target, match, source)
             selected[target] = raw_value
 
     if refused_count:
@@ -426,12 +434,13 @@ def parse_request_headers(
 ) -> dict:
     """Read request headers.
 
-    Names are matched regardless of casing and hyphenation and become config
-    keys (``X-Api-Key`` -> ``x_api_key``). Two spellings of one name --
-    ``X-Api-Key`` and ``x_api_key`` are separate headers on the wire -- are
-    refused rather than resolved by the order the runtime delivers them in.
-    ``Authorization`` never arrives: the engine authenticates with it and drops
-    it, so a token needs a header of your own.
+    Names are matched regardless of casing, which RFC 9110 makes meaningless,
+    and become config keys spelled in lower case (``X-Api-Key`` ->
+    ``x-api-key``); ``rename`` gives a key another name. A header the plugin
+    asked for that arrives more than once is refused rather than resolved by
+    the order the runtime delivers it in -- ``multi`` reads every value
+    instead. ``Authorization`` never arrives: the engine authenticates with it
+    and drops it, so a token needs a header of your own.
 
     Args:
         request_headers: Headers as delivered to ``process_request`` -- a
@@ -439,15 +448,16 @@ def parse_request_headers(
         spec: Which of them become config values. Worth naming: a client sends
             headers of its own on every request (``host``, ``user-agent``, ...),
             and ``unknown="reject"`` turns such a request away.
-        multi: Return every value of a repeated header as a list instead of
-            taking the first.
+        multi: Read a header the request carries more than once as a list of
+            every value, instead of refusing it.
 
     Returns:
         Config values keyed by config key; empty header values are omitted.
 
     Raises:
-        ValueError: The headers are of another shape, two of them fold onto one
-            config key, or one is refused under ``unknown="reject"``.
+        ValueError: The headers are of another shape, one the plugin asked for
+            arrives more than once while ``multi`` is off, two of them land on
+            one config key, or one is refused under ``unknown="reject"``.
     """
     return _select(
         _pairs(request_headers, "Request headers"),
@@ -455,6 +465,7 @@ def parse_request_headers(
         source="Request headers",
         fold_case=True,
         multi=multi,
+        reject_repeats=True,
     )
 
 

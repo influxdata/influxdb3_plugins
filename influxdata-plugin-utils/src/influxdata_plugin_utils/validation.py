@@ -103,7 +103,6 @@ class Validator:
         self,
         *names: str,
         required: bool | None = None,
-        must_exist: bool | None = None,
         default=_MISSING,
         apply_default_on_none: bool = False,
         cast=None,
@@ -138,7 +137,7 @@ class Validator:
         if not names:
             raise ValueError("a validator needs at least one key name")
         self.names = names
-        self.required = bool(required or must_exist)
+        self.required = bool(required)
         self.default = default
         self.apply_default_on_none = apply_default_on_none
         self.cast = cast

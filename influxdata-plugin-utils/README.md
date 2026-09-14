@@ -113,9 +113,12 @@ On a layer the caller controls, prefer `allowlist`: a parameter added to the
 plugin later stays unreachable until it is listed, where a `denylist` would let
 it through unnoticed.
 
-Header names are matched regardless of casing and hyphenation and become config
-keys (`X-Api-Key` → `x_api_key`). Everywhere else names are matched and kept
-exactly as written. `parse_env` requires an allowlist: the process environment
+Header names are matched regardless of casing — RFC 9110 makes it meaningless —
+and become config keys spelled in lower case (`X-Api-Key` → `x-api-key`); use
+`rename` for a name of your own. A header the plugin asked for that arrives more
+than once is refused, since which value it would get is otherwise the runtime's
+dict order; `multi=True` reads every value instead. Everywhere else names are
+matched and kept exactly as written. `parse_env` requires an allowlist: the process environment
 belongs to the host and holds credentials, so nothing is read without being
 named. `parse_toml` refuses a path that does not name a `.toml` file before
 opening it; pass `require_suffix=False` for a config file named some other way,

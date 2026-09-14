@@ -659,7 +659,7 @@ def copy_series_rows(
 
 
 GAPFILL_VALIDATORS: list = [
-    Validator("source_measurement", must_exist=True),
+    Validator("source_measurement", required=True),
     Validator("interval", default="1s", cast=parse_timedelta),
     Validator(
         "method",

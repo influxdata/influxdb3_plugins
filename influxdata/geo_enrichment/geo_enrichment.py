@@ -1204,8 +1204,8 @@ def normalize_config(
         args,
         source=source,
         validators=[
-            Validator("source_measurements", must_exist=True),
-            Validator("output_columns", must_exist=True),
+            Validator("source_measurements", required=True),
+            Validator("output_columns", required=True),
             Validator("output_mode", default="field"),
             Validator("target_measurement", default=""),
             Validator("target_database", default=""),

@@ -238,7 +238,7 @@ def test_config_defaults_grid_precision_per_grid_type():
         ({"max_radius_m": "-0.5"}, "must be greater than 0"),
         ({"overlap_policy": "priority"}, "needs 'priority_attribute'"),
         ({"nearest_count": "2"}, "needs strategy='nearest'"),
-        ({"source_measurements": " "}, "'source_measurements' is empty"),
+        ({"source_measurements": " "}, "source_measurements is required"),
     ],
 )
 def test_config_rejects_contradictory_settings(overrides, reason):
@@ -713,7 +713,7 @@ def test_force_reresolves_rows_that_already_carry_values(resolver):
 @pytest.mark.parametrize(
     "body, reason",
     [
-        ({"source_measurements": " "}, "'source_measurements' is empty"),
+        ({"source_measurements": " "}, "source_measurements is required"),
         ({"start": "2026-01-01T00:00:00Z"}, "must be given together"),
         ({"batch_size": "many"}, "'batch_size' must be an integer"),
         ({"force": "yes please"}, "Invalid boolean"),

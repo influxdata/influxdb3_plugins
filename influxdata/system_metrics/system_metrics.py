@@ -52,8 +52,9 @@ import time
 import uuid
 
 import psutil
-from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.config import Validator, load_config
 from influxdata_plugin_utils.parsing import parse_bool, parse_int
+from influxdata_plugin_utils.sources import KeySpec, parse_toml, parse_trigger_args
 from influxdata_plugin_utils.write import build_line_typed, write_data
 
 _VALIDATORS = [
@@ -111,21 +112,18 @@ def _load_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
     """
     args = args or {}
     config_file_path = args.get("config_file_path")
-    if config_file_path and not str(config_file_path).endswith(".toml"):
-        influxdb3_local.error(
-            f"[{task_id}] Invalid config file format: expected a .toml file"
-        )
-        config_file_path = None
-
+    arg_layer = parse_trigger_args(args, KeySpec(denylist=["config_file_path"]))
     try:
-        loaded = load_plugin_config(args, validators=_VALIDATORS, source="args")
+        loaded = load_config(arg_layer, validators=_VALIDATORS)
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Failed to load configuration: {e}")
         return None
 
     if config_file_path:
         try:
-            loaded = load_plugin_config(args, validators=_VALIDATORS, source="merge")
+            loaded = load_config(
+                arg_layer, parse_toml(config_file_path), validators=_VALIDATORS
+            )
             influxdb3_local.info(
                 f"[{task_id}] Loaded configuration from {config_file_path}"
             )
@@ -135,7 +133,7 @@ def _load_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
                 f"Continuing with inline arguments"
             )
 
-    return {key.lower(): value for key, value in loaded.as_dict().items()}
+    return {key.lower(): value for key, value in loaded.items()}
 
 
 def _float_fields(**values) -> dict:

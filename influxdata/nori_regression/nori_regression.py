@@ -194,7 +194,7 @@ class GatewayError(PublicError):
 # --- Configuration ---------------------------------------------------------
 
 VALIDATORS: list = [
-    # No must_exist: a missing required value is reported by _normalize_config, which names the
+    # No required=True: a missing required value is reported by _normalize_config, which names the
     # parameter and what it is for instead of dynaconf's "... is required in env main".
     Validator("measurement", default="", cast=str),
     Validator("field", default="", cast=str),

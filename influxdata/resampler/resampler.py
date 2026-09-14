@@ -417,8 +417,8 @@ def process_scheduled_call(
         cfg = load_plugin_config(
             args,
             validators=[
-                Validator("measurement", must_exist=True),
-                Validator("target_measurement", must_exist=True),
+                Validator("measurement", required=True),
+                Validator("target_measurement", required=True),
                 Validator("interval", default="1s", cast=parse_timedelta),
                 Validator("window", default="10min", cast=parse_timedelta),
                 Validator("offset", default="0s", cast=parse_timedelta),

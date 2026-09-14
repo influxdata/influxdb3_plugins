@@ -115,15 +115,20 @@ it through unnoticed.
 
 Header names are matched regardless of casing — RFC 9110 makes it meaningless —
 and become config keys spelled in lower case (`X-Api-Key` → `x-api-key`); use
-`rename` for a name of your own. A header the plugin asked for that arrives more
-than once is refused, since which value it would get is otherwise the runtime's
-dict order; `multi=True` reads every value instead. Everywhere else names are
-matched and kept exactly as written. `parse_env` requires an allowlist: the process environment
-belongs to the host and holds credentials, so nothing is read without being
-named. `parse_toml` refuses a path that does not name a `.toml` file before
-opening it; pass `require_suffix=False` for a config file named some other way,
-and `is_toml_path()` answers the same question without reading anything. `Authorization` never reaches a plugin — the engine authenticates with
-it — so a token needs a header of your own.
+`rename` for a name of your own. Everywhere else names are matched and kept
+exactly as written.
+
+A header or query parameter the plugin asked for that arrives more than once is
+refused, since which value it would otherwise get is the order the runtime
+delivers them in; `multi=True` reads every value as a list instead.
+
+`parse_env` requires an allowlist: the process environment belongs to the host
+and holds credentials, so nothing is read without being named. `parse_toml`
+refuses a path that does not name a `.toml` file before opening it; pass
+`require_suffix=False` for a config file named some other way, and
+`is_toml_path()` answers the same question without reading anything.
+`Authorization` never reaches a plugin — the engine authenticates with it — so
+a token needs a header of your own.
 
 A value that arrives empty — a blank string, a JSON `null`, an unset variable —
 is left out of its layer, so a validator default applies instead and a blank in

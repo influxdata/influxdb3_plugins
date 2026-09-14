@@ -337,7 +337,10 @@ class TestQueryParameters:
         with pytest.raises(ValueError, match="Query parameters may not set 'action'"):
             parse_query_parameters(params, spec)
 
-    def test_a_repeated_parameter_reads_as_the_first_value_or_as_all(self):
+    def test_a_repeated_parameter_is_refused_unless_every_value_is_asked_for(self):
+        """Which value the plugin would get is otherwise the runtime's dict order."""
         params = [("table", "cpu"), ("table", "mem")]
-        assert parse_query_parameters(params) == {"table": "cpu"}
+
+        with pytest.raises(ValueError, match="'table' is set more than once"):
+            parse_query_parameters(params)
         assert parse_query_parameters(params, multi=True) == {"table": ["cpu", "mem"]}

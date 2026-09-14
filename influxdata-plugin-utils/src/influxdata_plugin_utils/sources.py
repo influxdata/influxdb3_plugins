@@ -477,24 +477,30 @@ def parse_query_parameters(
 ) -> dict:
     """Read query-string parameters.
 
+    A parameter the plugin asked for that arrives more than once is refused
+    rather than resolved by the order the runtime delivers it in -- ``multi``
+    reads every value instead.
+
     Args:
         query_parameters: Parameters as delivered to ``process_request`` -- a
             mapping, or a sequence of name/value pairs.
         spec: Which of them become config values. Names are matched and kept
             exactly as written, so rename what needs a different config key.
-        multi: Return every value of a repeated parameter as a list instead of
-            taking the first.
+        multi: Read a parameter the query string carries more than once as a
+            list of every value, instead of refusing it.
 
     Returns:
         Config values as strings; leave the typing to a validator ``cast``.
 
     Raises:
-        ValueError: The parameters are of another shape, or one is refused
-            under ``unknown="reject"``.
+        ValueError: The parameters are of another shape, one the plugin asked
+            for arrives more than once while ``multi`` is off, or one is
+            refused under ``unknown="reject"``.
     """
     return _select(
         _pairs(query_parameters, "Query parameters"),
         spec,
         source="Query parameters",
         multi=multi,
+        reject_repeats=True,
     )

@@ -32,9 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute access.
 - `sources.parse_request_headers` folds only the casing of a header name, which
   RFC 9110 makes meaningless; a name is otherwise kept as written, and `rename`
-  gives a key another name. A header the plugin asked for that arrives more than
-  once is refused rather than resolved by the runtime's dict order — `multi=True`
-  reads every value instead.
+  gives a key another name.
+- A header or query parameter the plugin asked for that arrives more than once
+  is refused rather than resolved by the order the runtime delivers them in —
+  `multi=True` reads every value as a list instead.
 - `validation` module: `Validator` and `validate()`. A rule carries a default,
   a `cast`, and checks — 25 of them, from `gte` and `is_in` to `regex` — plus
   `condition` for an arbitrary predicate and `when` to apply a rule only while

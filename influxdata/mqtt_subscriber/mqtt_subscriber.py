@@ -938,6 +938,7 @@ class MQTTConnectionManager:
         self.client = None
         self.message_queue: Queue = Queue()
         self.connected: bool = False
+        self.disconnected: bool = False
         self.subscribed_topics: set[str] = set()
         # Memory budget for queued payloads. Once exceeded, new messages are
         # dropped to bound the plugin's memory footprint between drains.
@@ -1206,7 +1207,8 @@ class MQTTConnectionManager:
 
     def disconnect(self):
         """Disconnect from MQTT broker"""
-        if self.client:
+        if self.client and not self.disconnected:
+            self.disconnected = True
             self.client.loop_stop()
             self.client.disconnect()
             self.connected = False
@@ -2093,6 +2095,15 @@ def process_scheduled_call(
 
         # Retrieve messages from queue
         messages: list = mqtt_client.get_messages()
+
+        # Stop receiving before the parse/write phase, then drain once more.
+        # A message that arrives after the drain above is PUBACKed by paho and then
+        # thrown away with the client, and QoS 1 never re-delivers it, so every
+        # publish landing in that tail window is lost. Disconnecting first makes the
+        # window microseconds wide, and the second drain collects whatever fell into
+        # it. Anything the broker still holds is re-delivered on the next cycle.
+        mqtt_client.disconnect()
+        messages.extend(mqtt_client.get_messages())
 
         # Fold per-topic drop counts (queue-bytes budget exhaustion) into stats.
         drops: dict[str, int] = mqtt_client.get_drop_counters()

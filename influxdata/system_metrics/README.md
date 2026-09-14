@@ -50,7 +50,7 @@ For more information on using TOML configuration files, see the Using TOML Confi
 ## Software Requirements
 
 - **InfluxDB 3 Core/Enterprise**: with the Processing Engine enabled.
-- **Python packages**: `influxdata-plugin-utils>=0.3.0`, `psutil`
+- **Python packages**: `influxdata-plugin-utils>=0.4.0`, `psutil`
 
 ### Installation steps
 
@@ -67,7 +67,7 @@ For more information on using TOML configuration files, see the Using TOML Confi
 2. Install required Python packages:
 
    ```bash
-   influxdb3 install package "influxdata-plugin-utils>=0.3.0"
+   influxdb3 install package "influxdata-plugin-utils>=0.4.0"
    influxdb3 install package psutil
    ```
 
@@ -270,7 +270,7 @@ Network interface statistics:
 **Solution**: Install the required packages:
 
 ```bash
-influxdb3 install package "influxdata-plugin-utils>=0.3.0"
+influxdb3 install package "influxdata-plugin-utils>=0.4.0"
 influxdb3 install package psutil
 ```
 

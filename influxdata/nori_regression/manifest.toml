@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "nori_regression"
-version = "0.1.0"
+version = "0.1.1"
 description = "Predict a numeric InfluxDB 3 field from other columns with Synthefy's Nori in-context tabular regression model, via the Synthefy inference gateway. Imputes rows where the target field is null."
 triggers = ["process_scheduled_call", "process_request"]
 homepage = "https://www.influxdata.com/"

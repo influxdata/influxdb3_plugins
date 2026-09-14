@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "geo_enrichment"
-version = "0.1.0"
+version = "0.1.1"
 description = "Resolves lat/lon into location attributes — country and city, a zone or site you define, or a grid cell — merged into the source rows or written to a target table. HTTP endpoint backfills history."
 triggers = ["process_writes", "process_request"]
 homepage = "https://www.influxdata.com/"

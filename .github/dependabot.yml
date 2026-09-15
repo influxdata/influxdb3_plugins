@@ -1,0 +1,18 @@
+# Keeps the SHA-pinned actions under .github/workflows current. Dependabot
+# updates the SHA and the trailing "# vX.Y.Z" comment together.
+#
+# pypa/gh-action-pypi-publish is kept out of the group so its bump arrives as
+# its own PR: the twine and packaging pins in the workflows' "Install build
+# tooling" steps must be bumped with it.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - pypa/gh-action-pypi-publish

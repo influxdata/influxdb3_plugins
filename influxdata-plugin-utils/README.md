@@ -176,13 +176,20 @@ Validator("ripple", required=True, when=Validator("prototype", eq="cheby1"))
 
 `required` asks for a usable value, so a key that arrives blank or `null`
 counts as unset. `when` applies a rule only while another one holds — and holds
-means the key is there and passes — while `condition` takes any predicate. The
-checks are `eq`, `ne`, `gt`, `gte`, `ge`, `lt`, `lte`, `le`,
-`identity`, `is_type_of`, `is_in`, `is_not_in`, `contains`, `cont`,
-`not_contains`, `len_eq`, `len_ne`, `len_min`, `len_max`, `startswith`,
-`endswith`, `not_startswith`, `not_endswith`, `regex` and `not_regex`. They are
-named explicitly, so a misspelled one is a `TypeError` where the rule is
-written.
+means the key is there and passes. A `when` rule that cannot judge at all, say
+a `cast` of its own that fails, gives no answer, and that is reported against
+the rule which asked rather than quietly leaving it out. `condition` takes any
+predicate and runs after the checks. The checks are `eq`, `ne`, `gt`, `gte`,
+`ge`, `lt`, `lte`, `le`, `identity`, `is_type_of`, `is_in`, `is_not_in`,
+`contains`, `cont`, `not_contains`, `len_eq`, `len_ne`, `len_min`, `len_max`,
+`startswith`, `endswith`, `not_startswith`, `not_endswith`, `regex` and
+`not_regex`. They are named explicitly, so a misspelled one is a `TypeError`
+where the rule is written.
+
+`regex` and `not_regex` match from the start of the value, so `regex="b"`
+rejects `"abc"`, and a pattern that may appear anywhere needs `.*` in front.
+`is_type_of` reads a parameterized generic through to the items, so
+`list[int]`, `dict[str, int]` and `tuple[int, ...]` say what they look like.
 
 Validation runs once, over the merged values: defaults fill what no layer set,
 `cast` runs next, and the checks see the cast value.

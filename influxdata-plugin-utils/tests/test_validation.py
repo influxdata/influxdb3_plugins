@@ -79,13 +79,16 @@ class TestChecks:
             (Validator("k", is_in=("mean", "max")), "median", "must be one of"),
             (Validator("k", is_not_in=("admin",)), "admin", "must not be one of"),
             (Validator("k", is_type_of=int), "5", "must be of type"),
+            (Validator("k", is_type_of=list[int]), [1, "a"], "must be of type"),
+            (Validator("k", is_type_of="int"), "5", "must be of type"),
             (Validator("k", len_min=2), "a", "must be at least 2 long"),
             (Validator("k", len_max=2), "abc", "must be at most 2 long"),
             (Validator("k", contains="cpu"), "mem_usage", "must contain 'cpu'"),
             (Validator("k", startswith="cpu"), "mem", "must start with 'cpu'"),
             (Validator("k", endswith="_raw"), "cpu", "must end with '_raw'"),
             (Validator("k", regex=r"^[a-z_]+$"), "CPU!", "must match"),
-            (Validator("k", not_regex=r"\s"), "two words", "must not match"),
+            (Validator("k", regex="b"), "abc", "must match"),
+            (Validator("k", not_regex=r"\s"), " leading space", "must not match"),
             (Validator("k", ge=1), 0, "must be at least 1"),
             (Validator("k", lt=10), 10, "must be less than 10"),
             (Validator("k", le=10), 11, "must be at most 10"),
@@ -105,6 +108,37 @@ class TestChecks:
     def test_passing_values_are_returned_unchanged(self):
         rule = Validator("aggregate", is_in=("mean", "max"), len_min=3)
         assert validate({"aggregate": "mean"}, [rule]) == {"aggregate": "mean"}
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            ([1, 2], list[int]),
+            ({1, 2}, set[int]),
+            ({"a": 1}, dict[str, int]),
+            ((1, 2), tuple[int, ...]),
+            ((1, "b"), tuple[int, str]),
+            (5, int | str),
+            (5, (int, str)),
+            (5, "int"),
+        ],
+    )
+    def test_is_type_of_reads_a_parameterized_generic(self, value, expected):
+        rule = Validator("k", is_type_of=expected)
+        assert validate({"k": value}, [rule]) == {"k": value}
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            ((1, 2), list[int]),
+            ([1, 2], tuple[int, ...]),
+            ((1, 2), tuple[int, str]),
+            ({1, "a"}, set[int]),
+        ],
+    )
+    def test_a_generic_names_the_container_as_well_as_the_items(self, value, expected):
+        """A tuple is not a list, and a positional generic is read in order."""
+        with pytest.raises(ValueError, match="k must be of type"):
+            validate({"k": value}, [Validator("k", is_type_of=expected)])
 
     @pytest.mark.parametrize(
         "rule, value, check",
@@ -130,6 +164,24 @@ class TestChecks:
     def test_a_misspelled_check_is_refused_where_it_is_written(self):
         with pytest.raises(TypeError):
             Validator("rows", gtee=1)
+
+    @pytest.mark.parametrize(
+        "kwargs, complaint",
+        [
+            (dict(when=5), "when must be a Validator"),
+            (dict(condition=5), "condition must be callable"),
+        ],
+    )
+    def test_a_rule_that_cannot_work_is_refused_where_it_is_written(
+        self, kwargs, complaint
+    ):
+        """Built wrong, not configured wrong, so it is a TypeError like a typo."""
+        with pytest.raises(TypeError, match=complaint):
+            Validator("k", **kwargs)
+
+    def test_an_omitted_when_or_condition_is_not_a_mistake(self):
+        rule = Validator("k", default="d", when=None, condition=None)
+        assert validate({}, [rule]) == {"k": "d"}
 
 
 class TestWhen:
@@ -159,9 +211,20 @@ class TestWhen:
     def test_a_key_nobody_set_does_not_hold(self):
         assert validate({}, [self.RIPPLE]) == {}
 
-    def test_a_condition_that_cannot_judge_the_value_answers_no(self):
+    def test_a_condition_that_cannot_judge_the_value_is_reported(self):
+        """Not an answer: skipping the rule would drop a requirement in silence."""
         rule = Validator("ripple", required=True, when=Validator("prototype", cast=len))
-        assert validate({"prototype": 5}, [rule]) == {"prototype": 5}
+        with pytest.raises(
+            ValueError, match="ripple: its condition could not be checked"
+        ):
+            validate({"prototype": 5}, [rule])
+
+    def test_a_condition_that_says_no_is_not_an_error(self):
+        """The cast works and the check simply does not hold, so the rule waits."""
+        rule = Validator(
+            "window", required=True, when=Validator("rows", cast=int, gt=100)
+        )
+        assert validate({"rows": "5"}, [rule]) == {"rows": "5"}
 
 
 def test_two_rules_on_one_key_apply_in_order():

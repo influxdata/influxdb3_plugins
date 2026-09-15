@@ -64,25 +64,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that does not name a `.toml` file is now refused before the file is opened.
   It stays supported, and `load_config` is the one to reach for in new plugins.
 - Configuration keys are stored as they arrive. Nothing in a layer is
-  interpreted, whatever a value spells, and a key is matched exactly as written
-  — except header names, which become lower-case config keys (`X-Api-Key` ->
-  `x-api-key`)
-  because their spelling comes from the protocol.
+  interpreted, whatever a value spells, and a key is matched exactly as
+  written — except header names, which become lower-case config keys
+  (`X-Api-Key` -> `x-api-key`) because their spelling comes from the protocol.
+  A validator name is read the same way: dynaconf matched `Validator("Rows")`
+  to a `rows` key and walked `Validator("a.b")` into a nested dict, where here
+  `a.b` is the name of a flat key and a rule named `Rows` finds nothing while
+  the layer carries `rows`.
 
 ### Removed
 
 - The `dynaconf` dependency. The package now has none. `Validator` keeps the
   argument names for the subset the plugins use, so most rules port unchanged,
-  but three habits from dynaconf no longer hold:
-  - `must_exist` is gone; use `required`. They were not quite the same rule:
-    in dynaconf `must_exist=False` meant "this key must be absent" and raised
-    when it was present, which `required=False` does not say.
+  but these habits from dynaconf no longer hold:
+  - `required` is a plain "this key must carry a usable value", and `False` is
+    simply no rule. In dynaconf `required` was an alias for `must_exist`, so
+    both `required=False` and `must_exist=False` meant "this key must be
+    absent" and raised when it was present. `must_exist` is gone; a rule that
+    read `required=False` there says nothing here.
   - a string `default` is stored as written. dynaconf read it as TOML, so
     `default="5"` arrived as the number `5` and `default="5", gte=1` passed;
     now that rule fails, and `cast=int` is how a string default becomes a
     number.
   - a callable `default` is stored as the callable itself. dynaconf called it
     with `(settings, validator)` and kept what it returned.
+  - a `when` rule does not hold while its key is unset. dynaconf read an absent
+    key carrying no existence rule as passing, so
+    `Validator("ripple", required=True, when=Validator("prototype", eq="cheby1"))`
+    demanded `ripple` from a configuration that never mentioned `prototype`;
+    here the rule waits until `prototype` is set.
+  - a `when` rule judges a copy, so its own `default` and `cast` are not kept.
+    dynaconf applied them to the settings on the way past, so
+    `Validator("k", lte=10, when=Validator("k", cast=int))` compared a number
+    there and compares the string here. Put the `cast` on the rule itself.
+  - a `when` rule that cannot judge -- its own `cast` or predicate raising --
+    is reported against the rule that asked, naming both ends: `window: its
+    condition could not be checked: rows: invalid literal for int() with base
+    10: 'abc'`. dynaconf let the guard's own error out, which named the guarded
+    key and never mentioned the rule being written.
+  - every failure is a `ValueError`. dynaconf raised `ValidationError`, which is
+    not one, and let anything but a `TypeError` out of a cast, a condition or a
+    check untouched: `AttributeError` from `startswith` on a number,
+    `re.PatternError` from a bad pattern, `KeyError` from a cast.
+  - `required=True` is not satisfied by `""`, whitespace or `None`, and it is
+    read before `cast`. dynaconf cast first, so `cast=str` turned `None` into
+    the string `"None"` and the rule passed.
+  - values keep their Python types. dynaconf handed a rule containers of its
+    own -- a tuple arrived as a list, a dict as a case-insensitive mapping --
+    so `contains="A"` passed on `{"a": 1}` there and fails here.
+  - a misspelled check is a `TypeError` where the rule is written. dynaconf
+    took any unknown name as a check and raised `AttributeError` at validation
+    time, or passed in silence while the key was absent.
+  - `env`, `messages`, `description`, `items_validators`, the `|` and `&`
+    combinators, `validate_all` and `only`/`exclude` are not carried over. Every
+    rule in the list is applied, too: dynaconf's `register` dropped a rule equal
+    to an earlier one, and compared everything except `default`.
 
 ## [0.3.1] - 2026-08-03
 

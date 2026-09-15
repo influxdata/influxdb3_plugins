@@ -8,14 +8,60 @@ Every rejection is a ``ValueError`` naming the key, so a plugin answers a bad
 configuration from one ``except`` clause.
 """
 
+import builtins
 import copy
 import re
+from types import UnionType
+from typing import Union, get_args, get_origin
 
 from ._utils import is_blank, shown
 
 __all__ = ["Validator", "validate"]
 
 _MISSING = object()
+
+
+class _Refused(ValueError):
+    """The rule judged the value and said no, rather than failing to judge it."""
+
+
+def _is_type_of(value, expected) -> bool:
+    """Is ``value`` of this type? Reads a parameterized generic, not only a class.
+
+    ``expected`` may be a class, a tuple of them, a name such as ``"int"``, a
+    union, or a generic like ``list[int]`` or ``dict[str, int]``, which is
+    checked through to the items.
+    """
+    if isinstance(expected, str):
+        expected = getattr(builtins, expected, expected)
+
+    origin, args = get_origin(expected), get_args(expected)
+    if not args:
+        return isinstance(value, expected)
+    if origin in (Union, UnionType):
+        return any(_is_type_of(value, arg) for arg in args)
+    if origin is tuple:
+        return _is_tuple_of(value, args)
+    if origin is dict:
+        key_type, item_type = args
+        return isinstance(value, dict) and all(
+            _is_type_of(key, key_type) and _is_type_of(item, item_type)
+            for key, item in value.items()
+        )
+    return isinstance(value, origin) and all(
+        _is_type_of(item, args[0]) for item in value
+    )
+
+
+def _is_tuple_of(value, args) -> bool:
+    """``tuple[int, ...]`` is one type repeated; ``tuple[int, str]`` is positional."""
+    if not isinstance(value, tuple):
+        return False
+    if len(args) == 2 and args[1] is Ellipsis:
+        return all(_is_type_of(item, args[0]) for item in value)
+    return len(value) == len(args) and all(
+        _is_type_of(item, arg) for item, arg in zip(value, args)
+    )
 
 
 # check name -> predicate, and how its failure reads
@@ -29,10 +75,7 @@ _CHECKS = {
     "lte": (lambda value, other: value <= other, "must be at most {other}"),
     "le": (lambda value, other: value <= other, "must be at most {other}"),
     "identity": (lambda value, other: value is other, "must be {other} itself"),
-    "is_type_of": (
-        lambda value, other: isinstance(value, other),
-        "must be of type {other}",
-    ),
+    "is_type_of": (_is_type_of, "must be of type {other}"),
     "is_in": (lambda value, other: value in other, "must be one of {other}"),
     "is_not_in": (
         lambda value, other: value not in other,
@@ -74,11 +117,11 @@ _CHECKS = {
         "must not end with {other}",
     ),
     "regex": (
-        lambda value, other: re.search(other, value) is not None,
+        lambda value, other: re.match(other, value) is not None,
         "must match {other}",
     ),
     "not_regex": (
-        lambda value, other: re.search(other, value) is None,
+        lambda value, other: re.match(other, value) is None,
         "must not match {other}",
     ),
 }
@@ -97,7 +140,7 @@ class Validator:
     def __init__(
         self,
         *names: str,
-        required: bool | None = None,
+        required: bool = False,
         default=_MISSING,
         apply_default_on_none: bool = False,
         cast=None,
@@ -131,6 +174,10 @@ class Validator:
     ):
         if not names:
             raise ValueError("a validator needs at least one key name")
+        if when is not None and not isinstance(when, Validator):
+            raise TypeError("when must be a Validator")
+        if condition is not None and not callable(condition):
+            raise TypeError("condition must be callable")
         self.names = names
         self.required = bool(required)
         self.default = default
@@ -141,6 +188,7 @@ class Validator:
         self.checks = tuple(
             (name, value)
             for name, value in (
+                ("is_type_of", is_type_of),
                 ("eq", eq),
                 ("ne", ne),
                 ("gt", gt),
@@ -150,7 +198,6 @@ class Validator:
                 ("lte", lte),
                 ("le", le),
                 ("identity", identity),
-                ("is_type_of", is_type_of),
                 ("is_in", is_in),
                 ("is_not_in", is_not_in),
                 ("contains", contains),
@@ -176,7 +223,9 @@ class Validator:
     def holds(self, values: dict) -> bool:
         """Would this rule pass against ``values``? Used to answer ``when``.
 
-        A key nobody set does not hold: there is nothing to judge.
+        A key nobody set does not hold: there is nothing to judge. A rule that
+        cannot judge at all -- a cast or a predicate of its own that fails --
+        gives no answer, and the failure travels to the rule that asked.
         """
         if self.default is _MISSING and any(
             values.get(name, _MISSING) is _MISSING for name in self.names
@@ -184,14 +233,23 @@ class Validator:
             return False
         try:
             self.apply(dict(values))
-        except ValueError:
+        except _Refused:
             return False
         return True
 
     def apply(self, values: dict) -> None:
         """Default, cast and check every key this rule covers, in place."""
-        if self.when is not None and not self.when.holds(values):
-            return
+        if self.when is not None:
+            try:
+                held = self.when.holds(values)
+            except ValueError as exc:
+                # not an answer: leaving the rule out would drop it unnoticed
+                raise ValueError(
+                    f"{', '.join(self.names)}: its condition could not be "
+                    f"checked: {exc}"
+                ) from exc
+            if not held:
+                return
         for name in self.names:
             self._apply_to(values, name)
 
@@ -200,14 +258,14 @@ class Validator:
         if value is _MISSING or (value is None and self.apply_default_on_none):
             if self.default is _MISSING:
                 if self.required:
-                    raise ValueError(f"{name} is required")
+                    raise _Refused(f"{name} is required")
                 return
             value = self.default
             if isinstance(value, (list, dict, set)):
                 value = copy.deepcopy(value)
 
         if self.required and is_blank(value):
-            raise ValueError(f"{name} is required")
+            raise _Refused(f"{name} is required")
 
         if self.cast is not None:
             try:
@@ -217,16 +275,6 @@ class Validator:
             except Exception as exc:
                 # a cast is the plugin's own code; its failure rejects the value
                 raise ValueError(f"{name}: cannot read {shown(value)}: {exc}") from exc
-
-        if self.condition is not None:
-            try:
-                allowed = self.condition(value)
-            except Exception as exc:
-                raise ValueError(
-                    f"{name} cannot be checked with condition: {exc}"
-                ) from exc
-            if not allowed:
-                raise ValueError(f"{name} is not allowed: {shown(value)}")
 
         for check, other in self.checks:
             predicate, complaint = _CHECKS[check]
@@ -238,7 +286,17 @@ class Validator:
                 ) from exc
             if not passed:
                 expected = complaint.format(other=shown(other))
-                raise ValueError(f"{name} {expected}, got {shown(value)}")
+                raise _Refused(f"{name} {expected}, got {shown(value)}")
+
+        if self.condition is not None:
+            try:
+                allowed = self.condition(value)
+            except Exception as exc:
+                raise ValueError(
+                    f"{name} cannot be checked with condition: {exc}"
+                ) from exc
+            if not allowed:
+                raise _Refused(f"{name} is not allowed: {shown(value)}")
 
         values[name] = value
 

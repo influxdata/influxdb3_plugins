@@ -42,8 +42,16 @@ jobs:
         with:
           python-version: "3.x"
 
+      # twine and packaging are pinned to the versions bundled in the
+      # pypa/gh-action-pypi-publish release the publish job uses (see
+      # requirements/runtime.txt at that tag). The publisher runs its own
+      # `twine check` before uploading, so this step only guards a tag if it
+      # rejects what the publisher rejects. A floating twine here drifts ahead
+      # of the action and passes metadata the publisher cannot read, which is
+      # how utils-v0.4.0 reached the publish job before failing. Bump these
+      # together with the action pin below.
       - name: Install build tooling
-        run: python -m pip install --upgrade build twine packaging
+        run: python -m pip install --upgrade build twine==7.0.0 packaging==26.2
 
       - name: Verify tag matches package version
         id: meta
@@ -200,7 +208,7 @@ jobs:
       # it can reach the release job. Tags are immutable under the ruleset, so a
       # re-run always builds the same commit and the same version.
       - name: Publish distribution to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           skip-existing: true
 

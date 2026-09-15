@@ -100,8 +100,9 @@ jobs:
         with:
           python-version: "3.x"
 
+      # Pinned to match the publish workflow; see the comment there.
       - name: Install build tooling
-        run: python -m pip install --upgrade build twine
+        run: python -m pip install --upgrade build twine==7.0.0 packaging==26.2
 
       - name: Build wheel and source distribution
         working-directory: ${{ env.PACKAGE_DIR }}

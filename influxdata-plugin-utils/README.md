@@ -118,6 +118,12 @@ and become config keys spelled in lower case (`X-Api-Key` → `x-api-key`); use
 `rename` for a name of your own. Everywhere else names are matched and kept
 exactly as written.
 
+Within one spec, spell a `rename` key the way the `allowlist` spells it. A
+`KeySpec` does not know which source will read it, so it checks the two against
+each other as written, and `allowlist=["X-Api-Key"]` with
+`rename={"x-api-key": "api_key"}` is refused at construction. Either spelling
+works as long as both use it.
+
 A header or query parameter the plugin asked for that arrives more than once is
 refused, since which value it would otherwise get is the order the runtime
 delivers them in; `multi=True` reads every value as a list instead. InfluxDB 3

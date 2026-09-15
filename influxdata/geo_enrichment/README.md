@@ -71,7 +71,8 @@ instead.
 
 The plugin includes a JSON metadata schema in its docstring for
 [InfluxDB 3 Explorer](https://docs.influxdata.com/influxdb3/explorer/)
-integration, defining `onwrite_args_config` and `http_body_config`.
+integration, defining `onwrite_args_config`, `http_args_config` and
+`http_body_config`.
 
 ### Core parameters
 
@@ -171,15 +172,20 @@ consumer GPS error. Raise it where exact edge behavior matters.
 
 ### HTTP body parameters
 
-The endpoint takes its **entire configuration from the request body** and reads
-no trigger arguments, so the same request behaves identically whichever trigger
-serves it. Every parameter above may be given in the body under the same name,
-plus the backfill-only fields here.
+Every parameter above may be given in the request body under the same name,
+plus the backfill-only fields here. A trigger created without arguments is
+configured by the body alone, so the same request behaves identically on every
+such trigger.
+
+Arguments on the trigger, or a [TOML file](#toml-configuration) they name, fix
+what they set. The body fills in the rest but may not name a fixed setting: a
+request that does is refused with a 400 naming the key, rather than run with a
+configuration its sender did not ask for. The five backfill fields are always
+the body's; a value for them on the trigger is only the default.
 
 `source_measurements` keeps its name but backfills one table per call: give
 several and the first is used, the rest are ignored with a warning. A field set
-to `null` counts as absent. If the trigger was created with arguments, they are
-ignored and a warning is logged.
+to `null` counts as absent, and a field the plugin does not know is refused.
 
 | Parameter       | Type   | Default   | Description                                                                                         |
 |-----------------|--------|-----------|-----------------------------------------------------------------------------------------------------|
@@ -190,8 +196,9 @@ ignored and a warning is logged.
 
 `start` and `end` keep nanosecond precision. `retry_unknown` and `force` take a
 JSON boolean or any of `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0` as a
-string; anything else is a 400. All five may also be set in a
-[TOML file](#toml-configuration), where they act as defaults the body overrides.
+string; anything else is a 400. All five may also be set on the trigger or in
+its [TOML file](#toml-configuration), where they act as defaults the body
+overrides.
 
 Use `retry_unknown` after widening `max_radius_m`, and `force` after redrawing a
 zone — those rows already hold a resolved value, so `retry_unknown` would pass
@@ -203,28 +210,34 @@ over them. The reference file is re-read on every HTTP call.
 |--------------------|--------|-----------|-----------------------------------------------------|
 | `config_file_path` | string | *(empty)* | `.toml` file, relative to `PLUGIN_DIR` or absolute. |
 
-On a write trigger its values override the trigger arguments.
+A trigger argument on either trigger; the file's values override the other
+trigger arguments. It is never read from a request body: a path the caller
+chose would let them name any file the server can read, so the body refuses it
+like any other unknown field.
 
-In an HTTP request body it goes further: the configuration is then read from
-**that file alone**, and every body field naming a plugin parameter is ignored,
-so a long setup is named once instead of repeated in every backfill request.
+On the HTTP trigger the file is how a long setup is named once instead of
+repeated in every backfill request. What it sets is fixed for every call, and
+each request carries only what the file leaves open — usually the window:
 
-The five backfill fields are the exception. They may be set in the file too, but
-the body always wins, so the file holds the defaults and each call overrides only
-what it needs — usually the window:
+```bash
+influxdb3 create trigger \
+  --database mydb \
+  --plugin-filename gh:influxdata/geo_enrichment/geo_enrichment.py \
+  --trigger-spec "request:geo_backfill" \
+  --trigger-arguments 'config_file_path=geo_enrichment_config_data_writes.toml' \
+  geo_backfill
+```
 
 ```json
 {
-  "config_file_path": "geo_enrichment_config_data_writes.toml",
   "start": "2026-08-01T00:00:00Z",
   "end": "2026-08-29T00:00:00Z",
   "force": true
 }
 ```
 
-```bash
---trigger-arguments 'config_file_path=geo_enrichment_config_data_writes.toml'
-```
+The five backfill fields may be set in the file as well, as the defaults the
+body overrides.
 
 ## Resolution strategies
 
@@ -594,7 +607,9 @@ influxdb3 enable trigger --database mydb geo_enrich_gps
 
 ### HTTP trigger (backfill)
 
-The trigger needs no arguments — the request body carries the configuration.
+Without trigger arguments the request body carries the whole configuration.
+To fix part of it on the trigger instead, see
+[TOML configuration](#toml-configuration).
 
 ```bash
 influxdb3 create trigger \
@@ -744,6 +759,16 @@ trigger runs inline with ingestion, so a backoff sleep would throttle it.
 Pages through a time range with the same pipeline and retries failed writes.
 Re-reads the reference data on every call.
 
+#### `load_trigger_config(influxdb3_local, args, task_id)` and `load_request_config(influxdb3_local, args, request_body, task_id)`
+
+Each source of configuration — the trigger arguments, the TOML file they name,
+the request body — is read by its own `influxdata-plugin-utils` parser, and the
+layers are merged lowest precedence first. One list of `Validator` rules then
+casts and checks the merged result, and `derive_config()` turns the validated
+settings into the dictionary the pipeline reads. On the HTTP endpoint the
+operator's settings are pinned: a body may fill in what they leave open, not
+change them.
+
 #### `read_reference(cfg, requested_attributes)`
 
 Reads the reference file by extension into geometry/attribute records, which both
@@ -760,11 +785,22 @@ write merges; to a target table the whole row is copied.
 
 ## Troubleshooting
 
-### Issue: "output_mode='tag' needs 'target_measurement'"
+### Issue: "target_measurement is required"
 
-A tag is part of a row's identity, so writing one into the source table creates a
-second row and doubles every aggregate. Either set `target_measurement`, or use
-`output_mode=field` to enrich in place.
+Raised for `output_mode=tag`. A tag is part of a row's identity, so writing one
+into the source table creates a second row and doubles every aggregate. Either
+set `target_measurement`, or use `output_mode=field` to enrich in place.
+
+### Issue: "Cannot override pinned keys ['strategy']"
+
+The backfill body named a setting the trigger already fixes, through its
+arguments or its config file. Drop it from the body, or create a trigger that
+leaves it open.
+
+### Issue: "Request body may not set 'config_file_path'"
+
+The body accepts every setting and the five backfill fields, nothing else.
+`config_file_path` in particular is a trigger argument, never a body field.
 
 ### Issue: rows have `UNKNOWN` everywhere
 

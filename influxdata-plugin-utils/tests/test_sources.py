@@ -35,6 +35,34 @@ class TestKeySpec:
         with pytest.raises(ValueError, match="allowlist does not let through"):
             KeySpec(allowlist=["window"], rename={"max-rows": "max_rows"})
 
+    @pytest.mark.parametrize(
+        "spec, complaint",
+        [
+            (dict(denylist=["secret"], rename={"x": "secret"}),
+             "lands on \\['secret'\\], which the denylist keeps out"),
+            (dict(denylist=["secret"], rename={"secret": "safe"}),
+             "names \\['secret'\\], which the denylist keeps out"),
+            (dict(allowlist=["a", "b"], rename={"a": "b"}),
+             "lands on \\['b'\\], which the allowlist already lets through"),
+        ],
+    )
+    def test_a_rename_cannot_reach_around_the_lists(self, spec, complaint):
+        """A refused key must stay refused, whichever end of the rename names it."""
+        with pytest.raises(ValueError, match=complaint):
+            KeySpec(**spec)
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            dict(allowlist=["a", "b"], rename={"a": "b", "b": "c"}),
+            dict(allowlist=["a", "b"], rename={"a": "b", "b": "a"}),
+            dict(denylist=["other"], rename={"x": "y"}),
+        ],
+    )
+    def test_a_rename_that_frees_its_target_is_allowed(self, spec):
+        """The target is only taken while some key keeps that name of its own."""
+        assert KeySpec(**spec).rename is not None
+
     def test_unknown_policy_is_checked(self):
         with pytest.raises(ValueError, match="Invalid unknown"):
             KeySpec(unknown="bogus")
@@ -181,11 +209,9 @@ class TestJsonBody:
             )
 
     def test_renaming_onto_a_key_the_body_already_carries_is_refused(self):
-        """Otherwise the winner would be the order the keys arrive in."""
+        """Without an allowlist the clash is only visible once the body arrives."""
         body = json.dumps({"table": "renamed", "measurement": "sent"})
-        spec = KeySpec(
-            allowlist=["table", "measurement"], rename={"table": "measurement"}
-        )
+        spec = KeySpec(rename={"table": "measurement"})
         with pytest.raises(ValueError, match="same config key 'measurement'"):
             parse_json_body(body, spec)
 

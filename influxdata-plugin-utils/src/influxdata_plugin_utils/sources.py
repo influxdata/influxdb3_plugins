@@ -58,8 +58,11 @@ class KeySpec:
     ``allowlist`` names the keys that pass and ``denylist`` the ones that do
     not; ``rename`` maps a source key onto the config key it becomes. One
     config key comes from one source key, so renaming onto a key the source
-    already carries is refused. ``unknown`` decides what happens to a refused
-    key: ``"ignore"`` drops it, ``"reject"`` names it in the error.
+    already carries is refused. A rename cannot reach around the lists either:
+    neither end of it may name a denied key, and it may not land on a key the
+    allowlist already lets through under its own name. ``unknown`` decides what
+    happens to a refused key: ``"ignore"`` drops it, ``"reject"`` names it in
+    the error.
 
     On a layer the caller controls, prefer ``allowlist``: a key added to the
     plugin later stays unreachable until it is listed, where a ``denylist``
@@ -86,12 +89,34 @@ class KeySpec:
             duplicates = {name for name in targets if targets.count(name) > 1}
             if duplicates:
                 raise ValueError(f"rename maps several keys onto {sorted(duplicates)}")
+
+            denied = set(self.denylist or ())
+            denied_source = set(self.rename) & denied
+            if denied_source:
+                raise ValueError(
+                    f"rename names {sorted(denied_source)}, which the denylist "
+                    f"keeps out"
+                )
+            denied_target = set(targets) & denied
+            if denied_target:
+                raise ValueError(
+                    f"rename lands on {sorted(denied_target)}, which the denylist "
+                    f"keeps out"
+                )
+
             if self.allowlist is not None:
                 unreachable = set(self.rename) - set(self.allowlist)
                 if unreachable:
                     raise ValueError(
                         f"rename names {sorted(unreachable)}, which the allowlist "
                         f"does not let through"
+                    )
+                # a key that keeps its own name would land on the same config key
+                taken = set(targets) & (set(self.allowlist) - set(self.rename))
+                if taken:
+                    raise ValueError(
+                        f"rename lands on {sorted(taken)}, which the allowlist "
+                        f"already lets through"
                     )
 
     def folded(self) -> "KeySpec":

@@ -10,7 +10,7 @@ Modules:
     write          - LineBuilder builders and resilient write_data
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 from . import cache, config, introspection, parsing, sources, validation, write
 from .cache import cached

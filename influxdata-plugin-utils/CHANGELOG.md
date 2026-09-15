@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-09-12
+## [0.4.1] - 2026-09-15
+
+`utils-v0.4.0` was tagged on 2026-09-12 but never published: hatchling 1.32
+started emitting core metadata 2.5, which the publish action's bundled twine
+rejected ([#166](https://github.com/influxdata/influxdb3_plugins/pull/166)).
+Its changes ship here unchanged. There is no 0.4.0 release on PyPI.
 
 ### Added
 
@@ -180,8 +185,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `write` — `build_line`, `build_line_typed`, `add_field_with_type`,
   `write_data` (batching + retry), `BatchLines`.
 
-[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.4.0...HEAD
-[0.4.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.1...utils-v0.4.0
+[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.4.1...HEAD
+[0.4.1]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.1...utils-v0.4.1
 [0.3.1]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.0...utils-v0.3.1
 [0.3.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.2.0...utils-v0.3.0
 [0.2.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.1.0...utils-v0.2.0

@@ -436,11 +436,15 @@ def parse_request_headers(
 
     Names are matched regardless of casing, which RFC 9110 makes meaningless,
     and become config keys spelled in lower case (``X-Api-Key`` ->
-    ``x-api-key``); ``rename`` gives a key another name. A header the plugin
-    asked for that arrives more than once is refused rather than resolved by
-    the order the runtime delivers it in -- ``multi`` reads every value
-    instead. ``Authorization`` never arrives: the engine authenticates with it
-    and drops it, so a token needs a header of your own.
+    ``x-api-key``); ``rename`` gives a key another name. Two casings of one
+    name are therefore one header: ``X-Api-Key`` and ``X-API-KEY`` in one
+    request are that header sent twice. A header the plugin asked for that
+    arrives more than once is refused rather than resolved by the order the
+    runtime delivers it in -- ``multi`` reads every value instead. InfluxDB 3
+    hands the plugin a plain dict, which holds one value per name, so neither
+    the refusal nor ``multi`` fires there; both are for a runtime that delivers
+    name/value pairs. ``Authorization`` never arrives: the engine authenticates
+    with it and drops it, so a token needs a header of your own.
 
     Args:
         request_headers: Headers as delivered to ``process_request`` -- a
@@ -477,9 +481,13 @@ def parse_query_parameters(
 ) -> dict:
     """Read query-string parameters.
 
-    A parameter the plugin asked for that arrives more than once is refused
-    rather than resolved by the order the runtime delivers it in -- ``multi``
-    reads every value instead.
+    Names are compared exactly, so ``Window`` and ``window`` are two
+    parameters; only the same spelling twice is a repeat. A parameter the
+    plugin asked for that arrives more than once is refused rather than
+    resolved by the order the runtime delivers it in -- ``multi`` reads every
+    value instead. InfluxDB 3 hands the plugin a plain dict, which holds one
+    value per name, so neither the refusal nor ``multi`` fires there; both are
+    for a runtime that delivers name/value pairs.
 
     Args:
         query_parameters: Parameters as delivered to ``process_request`` -- a

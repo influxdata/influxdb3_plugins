@@ -71,7 +71,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- The `dynaconf` dependency. The package now has none.
+- The `dynaconf` dependency. The package now has none. `Validator` keeps the
+  argument names for the subset the plugins use, so most rules port unchanged,
+  but three habits from dynaconf no longer hold:
+  - `must_exist` is gone; use `required`. They were not quite the same rule:
+    in dynaconf `must_exist=False` meant "this key must be absent" and raised
+    when it was present, which `required=False` does not say.
+  - a string `default` is stored as written. dynaconf read it as TOML, so
+    `default="5"` arrived as the number `5` and `default="5", gte=1` passed;
+    now that rule fails, and `cast=int` is how a string default becomes a
+    number.
+  - a callable `default` is stored as the callable itself. dynaconf called it
+    with `(settings, validator)` and kept what it returned.
 
 ## [0.3.1] - 2026-08-03
 

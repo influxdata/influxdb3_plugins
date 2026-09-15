@@ -11,16 +11,11 @@ configuration from one ``except`` clause.
 import copy
 import re
 
-from ._utils import is_blank
+from ._utils import is_blank, shown
 
 __all__ = ["Validator", "validate"]
 
 _MISSING = object()
-
-
-def _show(value) -> str:
-    """A value as it reads in a message: strings quoted, everything else plain."""
-    return repr(value) if isinstance(value, (str, bytes)) else str(value)
 
 
 # check name -> predicate, and how its failure reads
@@ -221,7 +216,7 @@ class Validator:
                 raise ValueError(f"{name}: {exc}") from exc
             except Exception as exc:
                 # a cast is the plugin's own code; its failure rejects the value
-                raise ValueError(f"{name}: cannot read {value!r}: {exc}") from exc
+                raise ValueError(f"{name}: cannot read {shown(value)}: {exc}") from exc
 
         if self.condition is not None:
             try:
@@ -231,7 +226,7 @@ class Validator:
                     f"{name} cannot be checked with condition: {exc}"
                 ) from exc
             if not allowed:
-                raise ValueError(f"{name} is not allowed: {value!r}")
+                raise ValueError(f"{name} is not allowed: {shown(value)}")
 
         for check, other in self.checks:
             predicate, complaint = _CHECKS[check]
@@ -242,8 +237,8 @@ class Validator:
                     f"{name} cannot be checked with {check}: {exc}"
                 ) from exc
             if not passed:
-                expected = complaint.format(other=_show(other))
-                raise ValueError(f"{name} {expected}, got {_show(value)}")
+                expected = complaint.format(other=shown(other))
+                raise ValueError(f"{name} {expected}, got {shown(value)}")
 
         values[name] = value
 

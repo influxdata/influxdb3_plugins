@@ -41,7 +41,7 @@ argument order is the precedence, lowest first.
 
 ```python
 from influxdata_plugin_utils.config import load_config
-from influxdata_plugin_utils.parsing import parse_timedelta
+from influxdata_plugin_utils.parsing import parse_int, parse_timedelta
 from influxdata_plugin_utils.sources import (
     KeySpec,
     parse_env,
@@ -62,7 +62,7 @@ VALIDATORS = [
     Validator("measurement", required=True),
     Validator("api_key", required=True),
     Validator("window", default="1h", cast=parse_timedelta),
-    Validator("limit", default=1000, cast=int, gte=1, lte=10_000),
+    Validator("limit", default=1000, cast=parse_int, gte=1, lte=10_000),
 ]
 
 def process_request(
@@ -120,20 +120,35 @@ exactly as written.
 
 A header or query parameter the plugin asked for that arrives more than once is
 refused, since which value it would otherwise get is the order the runtime
-delivers them in; `multi=True` reads every value as a list instead.
+delivers them in; `multi=True` reads every value as a list instead. InfluxDB 3
+hands the plugin a plain dict, which holds one value per name, so a repeat never
+reaches a plugin there and neither the refusal nor `multi` fires; both are for a
+runtime that delivers name/value pairs.
 
 `parse_env` requires an allowlist: the process environment belongs to the host
-and holds credentials, so nothing is read without being named. `parse_toml`
-refuses a path that does not name a `.toml` file before opening it; pass
-`require_suffix=False` for a config file named some other way, and
-`is_toml_path()` answers the same question without reading anything.
-`Authorization` never reaches a plugin — the engine authenticates with it — so
-a token needs a header of your own.
+and holds credentials, so nothing is read without being named. `Authorization`
+never reaches a plugin — the engine authenticates with it — so a token needs a
+header of your own.
+
+`parse_toml` refuses a path that does not name a `.toml` file before opening it;
+pass `require_suffix=False` for a config file named some other way, and
+`is_toml_path()` answers the same question without reading anything. Otherwise
+it reads whatever path it is given: a relative one resolves under the plugin
+directory, an absolute one is used as is. Take that path from a layer the
+operator controls — the trigger arguments, or the file itself. A path that
+arrives in the request body, a header or the query string lets the caller name
+any file the engine can read, and whatever parses as TOML becomes this plugin's
+configuration, another plugin's credentials included.
 
 A value that arrives empty — a blank string, a JSON `null`, an unset variable —
 is left out of its layer, so a validator default applies instead and a blank in
 one layer does not erase the layer below it. `0`, `False` and `[]` are real
 values and are kept.
+
+Headers, query-string parameters and environment variables arrive as text, so
+surrounding whitespace is trimmed before anything else sees the value: a header
+sent as `  secret  ` becomes `secret`. A trigger argument, a body field and a
+TOML value keep exactly what was written, whitespace included.
 
 ### Holding a key against the request
 

@@ -2,6 +2,7 @@
 
 from influxdata_plugin_utils.introspection import (
     get_field_names,
+    get_schema,
     get_table_names,
     get_tag_names,
     query_window,
@@ -133,3 +134,50 @@ def test_query_window_passes_database():
     ) == [{"usage": 1.2}]
 
     assert influxdb3_local.calls[0]["database"] == "db_a"
+
+
+def test_get_schema_returns_column_types_and_leaves_time_out():
+    def responder(query, args, database):
+        return [
+            {"column_name": "time", "data_type": "Timestamp(Nanosecond, None)"},
+            {"column_name": "host", "data_type": "Dictionary(Int32, Utf8)"},
+            {"column_name": "usage", "data_type": "Float64"},
+        ]
+
+    local = FakeInfluxDB(responder)
+    assert get_schema(local, "cpu") == {
+        "host": "Dictionary(Int32, Utf8)",
+        "usage": "Float64",
+    }
+    assert "time" in get_schema(local, "cpu", exclude_time=False)
+
+
+def test_a_schema_is_cached_until_a_caller_asks_for_a_re_read():
+    """The recipe for "I just saw a column the cache does not know"."""
+    columns = [[{"column_name": "usage", "data_type": "Float64"}]]
+
+    def responder(query, args, database):
+        return columns[-1]
+
+    local = FakeInfluxDB(responder)
+    assert get_schema(local, "cpu") == {"usage": "Float64"}
+
+    columns.append(columns[-1] + [{"column_name": "temp", "data_type": "Float64"}])
+    assert get_schema(local, "cpu") == {"usage": "Float64"}
+    assert get_schema(local, "cpu", refresh=True) == {
+        "usage": "Float64",
+        "temp": "Float64",
+    }
+
+
+def test_an_empty_schema_is_asked_for_again_rather_than_remembered():
+    columns = [[]]
+
+    def responder(query, args, database):
+        return columns[-1]
+
+    local = FakeInfluxDB(responder)
+    assert get_schema(local, "cpu") == {}
+
+    columns.append([{"column_name": "usage", "data_type": "Float64"}])
+    assert get_schema(local, "cpu") == {"usage": "Float64"}

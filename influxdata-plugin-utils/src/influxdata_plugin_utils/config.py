@@ -1,124 +1,158 @@
-"""Plugin configuration loading backed by dynaconf.
+"""Configuration loading for InfluxDB 3 plugins.
 
-Loads a plugin's TOML config (resolved via the plugin directory), merges
-environment variables and engine-supplied ``args``, and validates the result.
-dynaconf is an implementation detail and must not leak into plugin code beyond
-the re-exported ``Validator``.
+``load_config`` takes the layers a plugin chooses -- trigger arguments, a TOML
+file, environment variables, the parts of an HTTP request -- merges them in the
+order given and validates the result. Later layers win, so the argument order
+is the precedence, lowest first.
 
-All values are treated as literal data. dynaconf's ``@`` token substitution
-(``@read_file``, ``@format``, ``@get``, ...) is disabled so that a value
-beginning with ``@`` is never evaluated against the server's filesystem or
-environment; see https://github.com/influxdata/influxdb3_plugins/issues/134.
+``merge_config_layers`` does the merging on its own, for a plugin that wants the
+dict without validation, and can hold chosen keys against the layers above.
 """
 
-import os
-import tomllib
-from pathlib import Path
+from ._utils import is_blank, require_choice
+from .sources import (
+    KeySpec,
+    parse_env,
+    parse_toml,
+    parse_trigger_args,
+    resolve_path,
+    resolve_plugin_dir,
+)
+from .validation import Validator, validate
 
-from dynaconf import Dynaconf, Validator
+__all__ = [
+    "Config",
+    "load_config",
+    "load_plugin_config",
+    "merge_config_layers",
+    "resolve_plugin_dir",
+    "resolve_path",
+    "Validator",
+]
 
-__all__ = ["resolve_plugin_dir", "resolve_path", "load_plugin_config", "Validator"]
 
+class Config(dict):
+    """Validated configuration: a dict that also answers to attribute access.
 
-def resolve_plugin_dir() -> Path:
-    """Resolve the plugin directory from the environment.
-
-    Order: ``PLUGIN_DIR`` -> ``INFLUXDB3_PLUGIN_DIR`` -> parent of ``VIRTUAL_ENV``.
+    A key that shares a name with a dict method is reachable as ``cfg["items"]``.
     """
-    for env_var in ("PLUGIN_DIR", "INFLUXDB3_PLUGIN_DIR"):
-        value = os.environ.get(env_var)
-        if value:
-            return Path(value)
-    virtual_env = os.environ.get("VIRTUAL_ENV")
-    if virtual_env:
-        return Path(virtual_env).parent
-    raise ValueError(
-        "Cannot resolve plugin directory: set PLUGIN_DIR, INFLUXDB3_PLUGIN_DIR, "
-        "or run inside the processing engine venv (VIRTUAL_ENV)."
-    )
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+    def as_dict(self) -> dict:
+        """A plain dict copy, for code that would rather not have the extras."""
+        return dict(self)
 
 
-def resolve_path(path: str) -> Path:
-    """Resolve a possibly relative path against the plugin directory.
+def merge_config_layers(*layers, pinned=None, on_conflict: str = "reject") -> dict:
+    """Merge layers into one dict, lowest precedence first.
 
-    Absolute paths are returned unchanged.
+    Args:
+        *layers: Dicts in increasing precedence; the last one wins. ``None`` and
+            empty layers are allowed, so an absent source needs no branching.
+        pinned: Keys that a later layer may not change once an earlier one has
+            set them. Must be a list: a bare string would pin its letters.
+        on_conflict: What to do when a later layer sets a pinned key --
+            ``"reject"`` raises, ``"ignore"`` keeps the value already set.
+
+    Returns:
+        A new dict. A value that arrives empty is left out, so a validator
+        default applies instead; ``0``, ``False`` and ``[]`` are kept.
+
+    Raises:
+        ValueError: ``pinned`` is a string, or a later layer sets a pinned key
+            while ``on_conflict="reject"``.
     """
-    candidate = Path(path)
-    if candidate.is_absolute():
-        return candidate
-    return resolve_plugin_dir() / candidate
+    require_choice(on_conflict, ("reject", "ignore"), "on_conflict")
+    if isinstance(pinned, (str, bytes, bytearray)):
+        raise ValueError("pinned must be a list of keys, not a single string")
+    fixed = frozenset(pinned or ())
+
+    merged: dict = {}
+    held: set = set()
+    conflicts: list = []
+    for layer in layers:
+        for key, value in (layer or {}).items():
+            if is_blank(value):
+                continue
+            if key in held:
+                conflicts.append(key)
+                continue
+            merged[key] = value
+            if key in fixed:
+                held.add(key)
+
+    if conflicts and on_conflict == "reject":
+        # sorted by repr: a layer may spell one key as text and another as bytes
+        raise ValueError(f"Cannot override pinned keys {sorted(set(conflicts), key=repr)}")
+    return merged
+
+
+def load_config(*layers, validators=None) -> Config:
+    """Merge the given layers and validate the result.
+
+    Args:
+        *layers: Dicts in increasing precedence, as produced by the ``sources``
+            parsers or built by the plugin itself.
+        validators: ``Validator`` rules applied to the merged values.
+
+    Returns:
+        The validated configuration.
+
+    Raises:
+        ValueError: A validator rejects the configuration.
+    """
+    return Config(validate(merge_config_layers(*layers), validators))
 
 
 def load_plugin_config(
     args: dict,
-    validators: list[Validator] | None = None,
+    validators=None,
     *,
     env_keys: list[str] | None = None,
     config_file_path_arg: str = "config_file_path",
     source: str = "merge",
-) -> Dynaconf:
-    """Load and validate plugin configuration.
+) -> Config:
+    """Load configuration from the environment, the trigger and a TOML file.
 
-    Layers are merged per key (low -> high): env vars -> ``args`` -> TOML file.
-    Within a layer, later keys override earlier ones; layers do not replace each
-    other wholesale. dynaconf is used for casting and validation only.
+    A plugin that needs other layers, or another order, composes them itself
+    with ``load_config``.
 
     Args:
         args: The dict passed to the plugin entry point (``None`` is treated as
-            empty). The TOML file path is read from ``args[config_file_path_arg]``
-            when present.
-        validators: Optional dynaconf ``Validator`` objects for required keys,
-            type casting, and bounds.
-        env_keys: Explicit environment variable names to read. Nothing is read
-            from the environment when omitted; each name is lowercased to form
-            the config key.
+            empty). The TOML path is read from ``args[config_file_path_arg]``.
+        validators: ``Validator`` rules applied to the merged values.
+        env_keys: Environment variables to read. Nothing is read from the
+            environment when omitted; each name becomes a lower-case config key.
         config_file_path_arg: Name of the ``args`` key holding the TOML path.
-        source: Which non-env layers to apply. ``"merge"`` uses both ``args``
-            and TOML (TOML highest); ``"args"`` uses only ``args``; ``"toml"``
-            uses only the TOML file. The env layer always applies underneath.
+        source: Which layers besides the environment apply. ``"merge"`` uses
+            both ``args`` and the TOML file (the file wins); ``"args"`` uses the
+            arguments alone; ``"toml"`` the file alone.
 
     Returns:
-        A ``Dynaconf`` settings object; access values as attributes or items.
-    """
-    if source not in ("merge", "args", "toml"):
-        raise ValueError(
-            f"Invalid source {source!r}. Supported: merge, args, toml"
-        )
+        The validated configuration.
 
-    # the engine passes None when a trigger has no arguments
+    Raises:
+        ValueError: ``source`` is unknown, the TOML file cannot be read or
+            parsed, or a validator rejects the configuration.
+    """
+    require_choice(source, ("merge", "args", "toml"), "source")
     args = args or {}
 
-    layers: dict = {}
-
-    # 1. env vars (lowest): only the explicitly requested names
-    for env_var in env_keys or []:
-        value = os.environ.get(env_var)
-        if value is not None:
-            layers[env_var.lower()] = value
-
-    # 2. engine args (middle)
+    layers = []
+    if env_keys:
+        values = parse_env(KeySpec(allowlist=env_keys))
+        layers.append({name.lower(): value for name, value in values.items()})
     if source in ("merge", "args"):
-        for key, value in args.items():
-            if key != config_file_path_arg:
-                layers[key] = value
-
-    # 3. TOML file (highest)
+        layers.append(
+            parse_trigger_args(args, KeySpec(denylist=[config_file_path_arg]))
+        )
     if source in ("merge", "toml"):
-        config_file_path = args.get(config_file_path_arg)
-        if config_file_path:
-            with open(resolve_path(config_file_path), "rb") as config_file:
-                layers.update(tomllib.load(config_file))
+        layers.append(parse_toml(args.get(config_file_path_arg)))
 
-    # loaders=[] disables the DYNACONF_* env loader; env is read only via
-    # env_keys. AUTO_CAST_FOR_DYNACONF=False disables dynaconf's "@" token
-    # substitution (@read_file, @format, @jinja, @get, ... — ~30 tokens, each
-    # beginning with "@"). Without it, any string value that begins with "@" is
-    # evaluated instead of stored as data, so an untrusted value arriving in an
-    # HTTP request body could read the server's files or environment variables.
-    # See https://github.com/influxdata/influxdb3_plugins/issues/134.
-    settings = Dynaconf(loaders=[], AUTO_CAST_FOR_DYNACONF=False)
-    settings.update(layers)
-    if validators:
-        settings.validators.register(*validators)
-    settings.validators.validate()
-    return settings
+    merged = merge_config_layers(*layers)
+    return Config(validate(merged, validators))

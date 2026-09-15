@@ -1,7 +1,7 @@
 """Parsing helpers for plugin configuration values.
 
 Each parser accepts a raw string (as delivered via CLI/trigger args) and can be
-used directly or as a dynaconf ``cast=`` callable. Only simple formats are
+used directly or as a ``Validator(cast=...)`` callable. Only simple formats are
 supported here; plugin-specific nested formats stay in their plugins.
 """
 

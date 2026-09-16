@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `sources.parse_json_body` takes `max_depth` (default 100) and refuses a body
+  whose objects and arrays nest deeper than that, counting the top-level
+  object as the first level. The refusal used to rest on the interpreter's
+  recursion guard alone, which sits near a thousand levels on Python 3.11,
+  near ten thousand on 3.13, and past a hundred thousand on 3.14, so "nested
+  too deeply" was a promise the parser could not keep on every interpreter.
+  `max_depth=None` restores the old behaviour.
+
 ## [0.4.0] - 2026-09-12
 
 ### Added

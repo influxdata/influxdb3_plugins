@@ -34,6 +34,7 @@ __all__ = [
 ]
 
 DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_BODY_DEPTH = 100
 
 _UNKNOWN_POLICIES = ("ignore", "reject")
 
@@ -374,7 +375,9 @@ def parse_env(spec: KeySpec) -> dict:
     return _select(present, spec, source="Environment variables")
 
 
-def _decode_body(request_body, max_bytes: int | None) -> dict:
+def _decode_body(
+    request_body, max_bytes: int | None, max_depth: int | None
+) -> dict:
     """Decode a raw request body into a JSON object."""
     if request_body is None:
         return {}
@@ -407,10 +410,12 @@ def _decode_body(request_body, max_bytes: int | None) -> dict:
     try:
         body = json.loads(text)
     except RecursionError as exc:
-        # deep nesting exhausts the stack long before the byte limit is reached
+        # the interpreter's own guard, met before the depth check when the body
+        # out-nests the stack; where it sits varies by Python version
         raise ValueError("Request body is nested too deeply") from exc
     except ValueError as exc:
         raise ValueError(f"Request body is not valid JSON: {exc}") from exc
+    _reject_deep_nesting(body, max_depth)
     if not isinstance(body, dict):
         raise ValueError("Request body must be a JSON object")
     return body
@@ -423,11 +428,41 @@ def _reject_oversized(size: int, max_bytes: int | None) -> None:
         )
 
 
+def _reject_deep_nesting(body, max_depth: int | None) -> None:
+    """Refuse parsed JSON whose objects and arrays nest deeper than ``max_depth``.
+
+    Walked with an explicit stack: the body may nest deeper than a recursive
+    walk could follow, and refusing it cleanly is the whole point.
+    """
+    if max_depth is None:
+        return
+    pending = [(body, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if isinstance(node, dict):
+            children = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > max_depth:
+            raise ValueError(
+                "Request body is nested too deeply, "
+                f"over the {max_depth} level limit"
+            )
+        pending.extend(
+            (child, depth + 1)
+            for child in children
+            if isinstance(child, (dict, list))
+        )
+
+
 def parse_json_body(
     request_body,
     spec: KeySpec | None = None,
     *,
     max_bytes: int | None = DEFAULT_MAX_BODY_BYTES,
+    max_depth: int | None = DEFAULT_MAX_BODY_DEPTH,
 ) -> dict:
     """Read a JSON request body.
 
@@ -438,16 +473,23 @@ def parse_json_body(
         spec: Which of its keys become config values.
         max_bytes: Refuse a body larger than this before parsing it. ``None``
             lifts the limit; a ``dict`` body is never measured.
+        max_depth: Refuse a body whose objects and arrays nest deeper than
+            this, counting the top-level object as the first level. ``None``
+            lifts the limit and leaves only the interpreter's own recursion
+            guard, which sits anywhere from about a thousand levels to past a
+            hundred thousand depending on the Python version; a ``dict`` body
+            is never measured.
 
     Returns:
         Config values, with the JSON types preserved, so a validator ``cast``
         sees a real list or number rather than its string form.
 
     Raises:
-        ValueError: The body is oversized, undecodable, not a JSON object, or
-            carries a key the spec refuses under ``unknown="reject"``.
+        ValueError: The body is oversized, nested too deeply, undecodable, not
+            a JSON object, or carries a key the spec refuses under
+            ``unknown="reject"``.
     """
-    body = _decode_body(request_body, max_bytes)
+    body = _decode_body(request_body, max_bytes, max_depth)
     return _select(body.items(), spec, source="Request body", coerce=False)
 
 

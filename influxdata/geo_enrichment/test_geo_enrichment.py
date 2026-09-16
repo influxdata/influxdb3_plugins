@@ -208,7 +208,7 @@ def load(args, influxdb3_local=None):
     cfg = plugin.load_config(
         plugin.parse_trigger_args(args),
         plugin.parse_toml(args.get("config_file_path")),
-        validators=plugin.VALIDATORS,
+        validators=plugin.SETTING_VALIDATORS,
     )
     return plugin.prepare_config(influxdb3_local or FakeLocal(), cfg, "tid")
 
@@ -1653,13 +1653,14 @@ def test_docstring_header_is_valid_json_matching_the_entry_points():
     http_args = {arg["name"] for arg in header["http_args_config"]}
     body_fields = {field["name"] for field in header["http_body_config"]}
 
-    settings = {name for validator in plugin.VALIDATORS for name in validator.names}
-    backfill_fields = {"start", "end", "batch_size", "retry_unknown", "force"}
+    settings = {n for validator in plugin.SETTING_VALIDATORS for n in validator.names}
+    backfill = {n for validator in plugin.BACKFILL_VALIDATORS for n in validator.names}
     assert header["plugin_type"] == ["onwrite", "http"]
-    assert write_args == settings - backfill_fields | {"config_file_path"}
-    assert http_args == settings | {"config_file_path"}
+    assert backfill == {"start", "end", "batch_size", "retry_unknown", "force"}
+    assert write_args == settings | {"config_file_path"}
+    assert http_args == settings | backfill | {"config_file_path"}
     # the body may carry every setting and the backfill fields, never the path
-    assert body_fields == settings
+    assert body_fields == settings | backfill
 
 
 def test_settings_can_come_from_a_toml_file(monkeypatch, tmp_path):
@@ -1688,18 +1689,26 @@ def test_the_config_file_overrides_the_trigger_arguments(monkeypatch, tmp_path):
     assert cfg["unknown_value"] == "from-toml"
 
 
-def test_the_write_trigger_reads_the_backfill_fields_and_ignores_them(resolver):
-    """One configuration serves both triggers, so a file shared with the
-    endpoint may set force; the write trigger accepts it and skips enriched
-    rows all the same."""
+@pytest.mark.parametrize(
+    "backfill",
+    [
+        {"force": "true", "retry_unknown": "true"},
+        {"start": "2026-01-01T00:00:00Z"},
+        {"batch_size": "many"},
+        {"force": "yes please"},
+    ],
+)
+def test_the_write_trigger_does_not_read_the_backfill_fields(resolver, backfill):
+    """One file may serve both triggers, so it may carry the endpoint's fields,
+    even a half window or a value the endpoint would refuse. The write trigger
+    neither honors nor checks what it never uses: force does not make it
+    re-enrich, and a bad value does not stop live enrichment."""
     influxdb3_local, batches = write_client(
         [gps_row(1_000, geo_country="Russia", geo_city="Moscow")],
         columns=ENRICHED_COLUMNS,
     )
 
-    plugin.process_writes(
-        influxdb3_local, batches, {**BASE_ARGS, "force": "true", "retry_unknown": "true"}
-    )
+    plugin.process_writes(influxdb3_local, batches, {**BASE_ARGS, **backfill})
 
     assert influxdb3_local.writes == []
     assert influxdb3_local.messages("error") == []

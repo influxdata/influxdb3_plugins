@@ -1432,7 +1432,7 @@ def reference_path(value) -> str:
     return path
 
 
-VALIDATORS: list = [
+SETTING_VALIDATORS: list = [
     Validator("source_measurements", required=True, cast=parse_delimited_list, len_min=1),
     Validator("output_columns", required=True, cast=output_column_map, len_min=1),
     Validator("output_mode", default="field", cast=keyword, is_in=("field", "tag")),
@@ -1467,7 +1467,10 @@ VALIDATORS: list = [
     Validator("target_measurement", required=True, when=Validator("output_mode", eq="tag")),
     Validator("reference_file", required=True, when=Validator("strategy", is_in=REFERENCE_STRATEGIES)),
     Validator("priority_attribute", required=True, when=Validator("overlap_policy", eq="priority")),
-    # backfill
+]
+
+# the per-request fields: read by the HTTP trigger alone, so only it checks them
+BACKFILL_VALIDATORS: list = [
     Validator("start", cast=text),
     Validator("end", cast=text),
     Validator("end", required=True, when=Validator("start", required=True)),
@@ -1790,7 +1793,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
         cfg = load_config(
             parse_trigger_args(args),
             parse_toml(args.get("config_file_path")),
-            validators=VALIDATORS,
+            validators=SETTING_VALIDATORS,
         )
         prepare_config(influxdb3_local, cfg, task_id)
         resolver = get_resolver(influxdb3_local, cfg, task_id=task_id)
@@ -1866,7 +1869,7 @@ def process_request(
             parse_json_body(
                 request_body, KeySpec(denylist=["config_file_path"], unknown="reject")
             ),
-            validators=VALIDATORS,
+            validators=SETTING_VALIDATORS + BACKFILL_VALIDATORS,
         )
         prepare_config(influxdb3_local, cfg, task_id)
         resolver = get_resolver(influxdb3_local, cfg, rebuild=True, task_id=task_id)

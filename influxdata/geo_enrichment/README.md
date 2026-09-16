@@ -759,10 +759,12 @@ Re-reads the reference data on every call.
 
 Each source — the trigger arguments, the TOML file they name, the request body —
 is read by its own `influxdata-plugin-utils` parser, and each entry point hands
-the layers to `load_config()` lowest precedence first. The
-`VALIDATORS` list gives every setting its default, cast and checks, with `when`
-rules for what one setting demands of another. `prepare_config()` then checks
-the settings against each other and adds what the pipeline derives from them.
+the layers to `load_config()` lowest precedence first. `SETTING_VALIDATORS`
+gives every setting its default, cast and checks, with `when` rules for what one
+setting demands of another; `BACKFILL_VALIDATORS` does the same for the five
+per-request fields, which only the HTTP trigger applies, so a file shared with
+it cannot stop the write trigger. `prepare_config()` then checks the settings
+against each other and adds what the pipeline derives from them.
 
 #### `read_reference(cfg, requested_attributes)`
 

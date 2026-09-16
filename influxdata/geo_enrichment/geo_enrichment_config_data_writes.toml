@@ -147,6 +147,7 @@ output_columns = { attribute = "your_column" }  # e.g., { country_code = "geo_co
 
 # Window to backfill, RFC 3339, given together
 # start is inclusive, end exclusive. Omit both to cover the whole table
+# Keep the quotes: a bare TOML datetime keeps microseconds at most and is refused
 #start = "2026-08-01T00:00:00Z"
 #end = "2026-08-29T00:00:00Z"
 
@@ -171,17 +172,21 @@ output_columns = { attribute = "your_column" }  # e.g., { country_code = "geo_co
 #   your_trigger_name
 
 ###### Example: Use This Config For An HTTP Backfill ######
-# By default the endpoint takes its whole configuration from the request body.
-# Naming this file in the body switches that off: the configuration is then read
-# from the file alone, and any body field naming a plugin parameter is ignored.
-# The five backfill fields are the exception — the body always wins over the
-# file for those, so a fixed setup can be named once and the window varied here.
+# Name this file in the trigger arguments and its values are the defaults for
+# every request; the body overrides whatever it names, so a long setup is named
+# once and the window varied per call. The path is never read from the body.
+#
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --plugin-filename geo_enrichment.py \
+#   --trigger-spec "request:your_request_path" \
+#   --trigger-arguments config_file_path=geo_enrichment_config_data_writes.toml \
+#   your_backfill_trigger_name
 #
 # curl -X POST "http://localhost:8181/api/v3/engine/your_request_path" \
 #   -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
 #   -H "Content-Type: application/json" \
 #   -d '{
-#     "config_file_path": "geo_enrichment_config_data_writes.toml",
 #     "start": "2026-08-01T00:00:00Z",
 #     "end": "2026-08-29T00:00:00Z",
 #     "retry_unknown": true

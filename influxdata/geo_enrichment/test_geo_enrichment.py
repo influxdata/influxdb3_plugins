@@ -203,10 +203,18 @@ GPS_COLUMNS = {
 ENRICHED_COLUMNS = {**GPS_COLUMNS, "geo_country": "Utf8", "geo_city": "Utf8"}
 
 
-def config(influxdb3_local=None, **overrides):
-    return plugin.normalize_config(
-        influxdb3_local or FakeLocal(), {**BASE_ARGS, **overrides}, "tid"
+def load(args, influxdb3_local=None):
+    """The write trigger's configuration: its arguments, then the file they name."""
+    cfg = plugin.load_config(
+        plugin.parse_trigger_args(args),
+        plugin.parse_toml(args.get("config_file_path")),
+        validators=plugin.SETTING_VALIDATORS,
     )
+    return plugin.prepare_config(influxdb3_local or FakeLocal(), cfg, "tid")
+
+
+def config(influxdb3_local=None, **overrides):
+    return load({**BASE_ARGS, **overrides}, influxdb3_local)
 
 
 def gps_row(time_ns, lat=55.7512, lon=37.6184, device="A", **extra):
@@ -231,14 +239,17 @@ def test_config_defaults_grid_precision_per_grid_type():
         ({"output_mode": "tag"}, "needs 'target_measurement'"),
         ({"output_mode": "tag", "target_measurement": "gps"}, "must differ"),
         ({"point_field": "p", "h3_field": "cell"}, "exactly one coordinate input"),
-        ({"strategy": "nope"}, "Unknown strategy"),
-        ({"strategy": "polygon"}, "needs 'reference_file'"),
-        ({"strategy": "nearest"}, "needs 'reference_file'"),
+        ({"strategy": "nope"}, "strategy must be one of"),
+        ({"strategy": "polygon"}, "strategy='polygon' needs 'reference_file'"),
+        ({"strategy": "nearest"}, "strategy='nearest' needs 'reference_file'"),
         ({"strategy": "grid", "grid_type": "geohash", "grid_precision": "20"}, "out of range"),
         ({"max_radius_m": "-0.5"}, "must be greater than 0"),
         ({"overlap_policy": "priority"}, "needs 'priority_attribute'"),
         ({"nearest_count": "2"}, "needs strategy='nearest'"),
-        ({"source_measurements": " "}, "'source_measurements' is empty"),
+        ({"source_measurements": " "}, "source_measurements is required"),
+        ({"output_columns": "country"}, "'attribute:column' pairs"),
+        ({"output_columns": ["country:geo_country"]}, "cannot be a list"),
+        ({"cache_size": "0"}, "cache_size must be at least 1"),
     ],
 )
 def test_config_rejects_contradictory_settings(overrides, reason):
@@ -246,10 +257,25 @@ def test_config_rejects_contradictory_settings(overrides, reason):
         config(**overrides)
 
 
+def test_a_blank_argument_leaves_the_default_in_place():
+    """An empty trigger argument is "not provided", not an empty setting."""
+    cfg = config(output_mode="", unknown_value=" ")
+
+    assert (cfg["output_mode"], cfg["unknown_value"]) == ("field", "UNKNOWN")
+
+
+def test_keyword_settings_ignore_case_and_surrounding_whitespace():
+    cfg = config(strategy=" Grid ", grid_type="GeoHash", output_mode="Field")
+
+    assert (cfg["strategy"], cfg["grid_type"], cfg["output_mode"]) == (
+        "grid", "geohash", "field"
+    )
+
+
 @pytest.mark.parametrize(
     "overrides, reason",
     [
-        ({"config_file_path": "settings.yaml"}, "must be a .toml file"),
+        ({"config_file_path": "settings.yaml"}, "expected a .toml file"),
         (
             {"strategy": "polygon", "reference_file": "/etc/passwd"},
             r"must be a .geojson or .json or .csv file",
@@ -621,10 +647,11 @@ def backfill_client(rows, columns=None):
 BASE_BODY = dict(BASE_ARGS)
 
 
-def backfill(influxdb3_local, **body):
-    """The endpoint is configured from the body alone; args are not read."""
+def backfill(influxdb3_local, args=None, **body):
+    """A request as the endpoint receives it: the body, and whatever the
+    operator set on the trigger."""
     return plugin.process_request(
-        influxdb3_local, None, None, json.dumps({**BASE_BODY, **body}), None
+        influxdb3_local, None, None, json.dumps({**BASE_BODY, **body}), args
     )
 
 
@@ -713,10 +740,16 @@ def test_force_reresolves_rows_that_already_carry_values(resolver):
 @pytest.mark.parametrize(
     "body, reason",
     [
-        ({"source_measurements": " "}, "'source_measurements' is empty"),
-        ({"start": "2026-01-01T00:00:00Z"}, "must be given together"),
-        ({"batch_size": "many"}, "'batch_size' must be an integer"),
+        ({"source_measurements": " "}, "source_measurements is required"),
+        ({"start": "2026-01-01T00:00:00Z"}, "end is required"),
+        ({"end": "2026-01-01T00:00:00Z"}, "start is required"),
+        ({"batch_size": "many"}, "batch_size: Invalid integer"),
         ({"force": "yes please"}, "Invalid boolean"),
+        # containers the parsers would otherwise turn into garbage identifiers
+        ({"source_measurements": {"gps": True}}, "string or a list of names"),
+        ({"source_measurements": ["gps", 1]}, "string or a list of names"),
+        ({"output_columns": {"country": None}}, "column name string"),
+        ({"output_columns": {"country": {"x": 1}}}, "column name string"),
     ],
 )
 def test_backfill_reports_bad_request_bodies_as_400(resolver, body, reason):
@@ -726,28 +759,51 @@ def test_backfill_reports_bad_request_bodies_as_400(resolver, body, reason):
 
     assert status == 400
     assert reason in response["error"]
+    assert influxdb3_local.writes == []
 
 
-def test_trigger_arguments_are_ignored_and_reported(resolver):
-    """Merging args into the body would make the same request behave differently
-    on two triggers; the endpoint is configured from the body alone."""
-    influxdb3_local = backfill_client([unenriched(1_000)])
+def test_the_body_overrides_the_trigger_arguments(resolver):
+    """Trigger arguments, then the config file, then the body, later layers
+    winning: the trigger holds the defaults and a request names what differs."""
+    influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000, lat=10.0)])
 
-    body, status = plugin.process_request(
+    body, status = backfill(
         influxdb3_local,
-        None,
-        None,
-        json.dumps(BASE_BODY),
-        {"unknown_value": "from-args", "strategy": "grid"},
+        args={"unknown_value": "from-args", "target_measurement": "gps_located"},
+        unknown_value="from-body",
     )
 
     assert status == 200
-    assert body["stats"]["written"] == 1
-    assert influxdb3_local.records()[0].fields["geo_country"] == "Russia"
-    assert any(
-        "Trigger arguments are ignored" in message
-        for message in influxdb3_local.messages("warn")
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][0]
+    assert unresolved.fields["geo_country"] == "from-body"
+    # the argument the body left alone still applied, so the args were read
+    assert unresolved.measurement == "gps_located"
+
+
+def test_trigger_arguments_apply_where_the_body_is_silent(resolver):
+    influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000, lat=10.0)])
+
+    body, status = backfill(influxdb3_local, args={"unknown_value": "from-args"})
+
+    assert status == 200
+    assert body["stats"]["written"] == 2
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][0]
+    assert unresolved.fields["geo_country"] == "from-args"
+
+
+def test_a_body_overrides_but_cannot_unset_a_trigger_setting(resolver):
+    """An empty value counts as absent at every layer, so the trigger's value
+    stands; a run without the setting needs a trigger without it."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    body, status = backfill(
+        influxdb3_local,
+        args={"target_measurement": "gps_located"},
+        target_measurement="",
     )
+
+    assert status == 200
+    assert {r.measurement for r in influxdb3_local.records()} == {"gps_located"}
 
 
 def test_only_the_first_of_several_tables_is_backfilled(resolver):
@@ -770,46 +826,128 @@ def test_body_alone_configures_the_whole_run(resolver):
     assert influxdb3_local.records()[0].fields["geo_city"] == "Moscow"
 
 
-def test_config_file_in_the_body_replaces_the_settings_around_it(
+def test_the_trigger_holds_the_setup_and_the_body_only_the_window(
     resolver, monkeypatch, tmp_path
 ):
-    """A TOML path is how a long setup is reused; letting the body override
-    parts of it would make the effective configuration hard to reason about."""
+    """The documented flow: the setup is named once, on the trigger through
+    its config file, and each request carries only what differs."""
     monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
     (tmp_path / "geo.toml").write_text(
         'source_measurements = "gps"\n'
         'output_columns = "country:geo_country city:geo_city"\n'
-        'unknown_value = "from-toml"\n'
     )
+    influxdb3_local = backfill_client(
+        [unenriched(1_000), unenriched(2_000), unenriched(3_000)]
+    )
+
+    body, status = plugin.process_request(
+        influxdb3_local,
+        None,
+        None,
+        json.dumps(
+            {
+                "start": "1970-01-01T00:00:00.000002000Z",
+                "end": "1970-01-01T00:00:00.000003000Z",
+            }
+        ),
+        {"config_file_path": "geo.toml"},
+    )
+
+    assert status == 200
+    assert body["stats"]["written"] == 1
+    (record,) = influxdb3_local.records()
+    assert record.time == 2_000
+    assert record.fields["geo_country"] == "Russia"
+
+
+def test_a_config_file_named_on_the_trigger_holds_the_defaults(
+    resolver, monkeypatch, tmp_path
+):
+    """A TOML path is how a long setup is reused: named once on the trigger, it
+    overrides the other arguments and applies to every request, and a body
+    overrides only what it names."""
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text('unknown_value = "from-toml"\n')
+    trigger = {"config_file_path": "geo.toml", "unknown_value": "from-args"}
     influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000, lat=10.0)])
 
-    body, status = backfill(
-        influxdb3_local, config_file_path="geo.toml", unknown_value="from-body"
-    )
+    body, status = backfill(influxdb3_local, args=trigger)
 
     assert status == 200
     unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][0]
     assert unresolved.fields["geo_country"] == "from-toml"
 
+    backfill(influxdb3_local, args=trigger, unknown_value="from-body")
 
-def test_backfill_fields_still_come_from_the_body_beside_a_config_file(
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][-1]
+    assert unresolved.fields["geo_country"] == "from-body"
+
+
+def test_a_config_file_path_in_the_body_is_refused(resolver, monkeypatch, tmp_path):
+    """The path names a layer, not a setting: which file the trigger reads is
+    the operator's decision, and a body may override values but never choose
+    the layers they come from."""
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text('unknown_value = "from-toml"\n')
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = backfill(influxdb3_local, config_file_path="geo.toml")
+
+    assert status == 400
+    assert "config_file_path" in response["error"]
+    assert influxdb3_local.writes == []
+
+
+def test_an_unknown_body_field_is_refused(resolver):
+    """A denylist alone would let a misspelling pass unnoticed and leave the
+    caller believing it took effect; the body takes the settings by name."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = backfill(influxdb3_local, forse=True)
+
+    assert status == 400
+    assert "'forse'" in response["error"]
+    assert influxdb3_local.writes == []
+
+
+def test_backfill_fields_on_the_trigger_are_defaults_the_body_overrides(
     resolver, monkeypatch, tmp_path
 ):
-    """start/end/force are per-call, so a TOML never carries them."""
+    """start/end/force are per-call, so a trigger value is only the default."""
     monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
     (tmp_path / "geo.toml").write_text(
-        'source_measurements = "gps"\noutput_columns = "country:geo_country"\n'
+        'start = "1970-01-01T00:00:00.000001000Z"\n'
+        'end = "1970-01-01T00:00:00.000002000Z"\n'
+        "batch_size = 1\n"
     )
     influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000)])
 
     backfill(
         influxdb3_local,
-        config_file_path="geo.toml",
+        args={"config_file_path": "geo.toml"},
         start="1970-01-01T00:00:00.000002000Z",
         end="1970-01-01T00:00:00.000003000Z",
     )
 
     assert [record.time for record in influxdb3_local.records()] == [2_000]
+
+
+def test_a_bare_toml_datetime_bound_is_refused(resolver, monkeypatch, tmp_path):
+    """tomllib reads an unquoted datetime into an object that keeps
+    microseconds at most; the nanoseconds the bound promises would be lost
+    without a word, so the value is refused with the fix named."""
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text(
+        "start = 1970-01-01T00:00:00.000001000Z\n"
+        "end = 1970-01-01T00:00:00.000002000Z\n"
+    )
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = backfill(influxdb3_local, args={"config_file_path": "geo.toml"})
+
+    assert status == 400
+    assert "start: must be a quoted RFC 3339 string" in response["error"]
+    assert influxdb3_local.writes == []
 
 
 def test_json_null_in_the_body_means_not_provided(resolver):
@@ -1543,22 +1681,46 @@ def test_memo_evicts_the_least_recently_used_entry():
 
 
 @pytest.mark.parametrize(
-    "body, expected",
-    [
-        (None, {}),
-        ("", {}),
-        ({"force": True}, {"force": True}),
-        ('{"force": true}', {"force": True}),
-    ],
+    "request_body",
+    [dict(BASE_BODY), json.dumps(BASE_BODY), json.dumps(BASE_BODY).encode()],
 )
-def test_request_body_accepts_json_text_and_dicts(body, expected):
-    assert plugin.parse_request_body(body) == expected
+def test_request_body_is_read_as_a_dict_text_or_bytes(resolver, request_body):
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    body, status = plugin.process_request(influxdb3_local, None, None, request_body)
+
+    assert status == 200
+    assert body["stats"]["written"] == 1
 
 
-@pytest.mark.parametrize("body", ["[1, 2]", "not json"])
-def test_unusable_request_body_is_rejected(body):
-    with pytest.raises(ValueError):
-        plugin.parse_request_body(body)
+@pytest.mark.parametrize("request_body", [None, "", b"", "{}"])
+def test_an_empty_body_runs_with_the_trigger_configuration(resolver, request_body):
+    """With the configuration on the trigger a request need carry nothing."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    body, status = plugin.process_request(
+        influxdb3_local, None, None, request_body, dict(BASE_ARGS)
+    )
+
+    assert status == 200
+    assert body["stats"]["written"] == 1
+
+
+@pytest.mark.parametrize(
+    "request_body, reason",
+    [("[1, 2]", "must be a JSON object"), ("not json", "not valid JSON")],
+)
+def test_unusable_request_body_is_a_bad_request(resolver, request_body, reason):
+    """The trigger is configured, so the 400 is the body's own."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = plugin.process_request(
+        influxdb3_local, None, None, request_body, dict(BASE_ARGS)
+    )
+
+    assert status == 400
+    assert reason in response["error"]
+    assert influxdb3_local.writes == []
 
 
 def test_absent_package_names_the_install_command():
@@ -1598,16 +1760,19 @@ def test_timestamps_keep_nanosecond_precision_in_queries():
 def test_docstring_header_is_valid_json_matching_the_entry_points():
     header = json.loads(plugin.__doc__)
     write_args = {arg["name"] for arg in header["onwrite_args_config"]}
+    http_args = {arg["name"] for arg in header["http_args_config"]}
     body_fields = {field["name"] for field in header["http_body_config"]}
 
+    settings = {n for validator in plugin.SETTING_VALIDATORS for n in validator.names}
+    backfill = {n for validator in plugin.BACKFILL_VALIDATORS for n in validator.names}
     assert header["plugin_type"] == ["onwrite", "http"]
-    assert write_args >= set(BASE_ARGS)
-    # the endpoint reads no trigger arguments, so the body must declare every
-    # setting the write trigger accepts, plus the backfill-only fields
-    assert body_fields - write_args == {
-        "start", "end", "batch_size", "retry_unknown", "force",
-    }
-    assert write_args - body_fields == set()
+    assert backfill == {"start", "end", "batch_size", "retry_unknown", "force"}
+    assert write_args == settings | {"config_file_path"}
+    assert http_args == settings | backfill | {"config_file_path"}
+    # the body may carry every setting and the backfill fields, never the path
+    assert body_fields == settings | backfill
+    # a backfill trigger may be created bare and configured by the body alone
+    assert not any(arg["required"] for arg in header["http_args_config"])
 
 
 def test_settings_can_come_from_a_toml_file(monkeypatch, tmp_path):
@@ -1620,10 +1785,42 @@ def test_settings_can_come_from_a_toml_file(monkeypatch, tmp_path):
         "grid_precision = 8\n"
     )
 
-    cfg = plugin.normalize_config(
-        FakeLocal(), {"config_file_path": "geo.toml"}, "tid"
-    )
+    cfg = load({"config_file_path": "geo.toml"})
 
-    assert cfg["sources"] == ["gps"]
+    assert cfg["source_measurements"] == ["gps"]
     assert cfg["grid_type"] == "geohash"
     assert cfg["grid_precision"] == 8
+
+
+def test_the_config_file_overrides_the_trigger_arguments(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text('unknown_value = "from-toml"\n')
+
+    cfg = config(config_file_path="geo.toml", unknown_value="from-args")
+
+    assert cfg["unknown_value"] == "from-toml"
+
+
+@pytest.mark.parametrize(
+    "backfill",
+    [
+        {"force": "true", "retry_unknown": "true"},
+        {"start": "2026-01-01T00:00:00Z"},
+        {"batch_size": "many"},
+        {"force": "yes please"},
+    ],
+)
+def test_the_write_trigger_does_not_read_the_backfill_fields(resolver, backfill):
+    """One file may serve both triggers, so it may carry the endpoint's fields,
+    even a half window or a value the endpoint would refuse. The write trigger
+    neither honors nor checks what it never uses: force does not make it
+    re-enrich, and a bad value does not stop live enrichment."""
+    influxdb3_local, batches = write_client(
+        [gps_row(1_000, geo_country="Russia", geo_city="Moscow")],
+        columns=ENRICHED_COLUMNS,
+    )
+
+    plugin.process_writes(influxdb3_local, batches, {**BASE_ARGS, **backfill})
+
+    assert influxdb3_local.writes == []
+    assert influxdb3_local.messages("error") == []

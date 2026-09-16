@@ -212,8 +212,10 @@ over them. The reference file is re-read on every HTTP call.
 
 A trigger argument on either trigger; the file's values override the other
 trigger arguments, and on the HTTP trigger the request body overrides the file.
-The path is never read from a request body: a path the caller chose would let
-them name any file the server can read, so the body refuses it.
+The path is never read from a request body. It names a layer rather than
+setting a value: a body that could choose which file the trigger reads would
+take the trigger's configuration out of the operator's hands, so the body
+refuses it.
 
 On the HTTP trigger the file is how a long setup is named once instead of
 repeated in every backfill request; each call then carries only what differs —

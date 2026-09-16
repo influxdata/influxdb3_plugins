@@ -829,8 +829,9 @@ def test_a_config_file_named_on_the_trigger_holds_the_defaults(
 
 
 def test_a_config_file_path_in_the_body_is_refused(resolver, monkeypatch, tmp_path):
-    """Taken from the body, the path would let a caller name any file the
-    server can read; it is only ever a trigger argument."""
+    """The path names a layer, not a setting: which file the trigger reads is
+    the operator's decision, and a body may override values but never choose
+    the layers they come from."""
     monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
     (tmp_path / "geo.toml").write_text('unknown_value = "from-toml"\n')
     influxdb3_local = backfill_client([unenriched(1_000)])

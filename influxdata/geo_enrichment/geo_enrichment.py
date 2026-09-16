@@ -177,6 +177,212 @@
             "required": false
         }
     ],
+    "http_args_config": [
+        {
+            "name": "source_measurements",
+            "example": "gps fleet_pos",
+            "description": "Space-separated source tables to enrich. Rows from other tables in the batch are ignored.",
+            "required": true
+        },
+        {
+            "name": "output_columns",
+            "example": "country_code:geo_country city:geo_city",
+            "description": "Space-separated 'attribute:column' pairs selecting which resolver attributes to write and under what column names. With a GeoJSON reference_file an attribute is a JSONPath into the feature properties, so nested values are reachable as owner.name; with a CSV one it is a column name.",
+            "required": true
+        },
+        {
+            "name": "output_mode",
+            "example": "field",
+            "description": "'field' writes geo attributes as fields, which merge into the source row. 'tag' writes them as tags and requires target_measurement. Defaults to 'field'.",
+            "required": false
+        },
+        {
+            "name": "target_measurement",
+            "example": "gps_located",
+            "description": "Destination table. Omit to enrich the source table in place, which is possible only with output_mode='field'.",
+            "required": false
+        },
+        {
+            "name": "strategy",
+            "example": "polygon",
+            "description": "Resolver: 'builtin' (offline place lookup), 'polygon' (point inside a zone), 'nearest' (closest site) or 'grid' (global grid cell). Defaults to 'builtin'.",
+            "required": false
+        },
+        {
+            "name": "lat_field",
+            "example": "lat",
+            "description": "Column holding latitude, as a number or a string. Defaults to 'lat'.",
+            "required": false
+        },
+        {
+            "name": "lon_field",
+            "example": "lon",
+            "description": "Column holding longitude, as a number or a string. Defaults to 'lon'.",
+            "required": false
+        },
+        {
+            "name": "coord_scale",
+            "example": "1e7",
+            "description": "Positive divisor applied to both coordinates after they are read, turning scaled integers into degrees: 557558000 with coord_scale=1e7 becomes 55.7558. Applies to every input mode. Defaults to 1.",
+            "required": false
+        },
+        {
+            "name": "point_field",
+            "example": "position",
+            "description": "Single column holding both coordinates, used instead of lat_field/lon_field.",
+            "required": false
+        },
+        {
+            "name": "point_format",
+            "example": "wkt",
+            "description": "How to read point_field: 'lat_lon', 'lon_lat', 'wkt' or 'geojson'. Defaults to 'lat_lon'.",
+            "required": false
+        },
+        {
+            "name": "geohash_field",
+            "example": "gh",
+            "description": "Column holding a geohash string, decoded to the cell center.",
+            "required": false
+        },
+        {
+            "name": "h3_field",
+            "example": "h3",
+            "description": "Column holding an H3 index, decoded to the cell center.",
+            "required": false
+        },
+        {
+            "name": "min_population",
+            "example": "10000",
+            "description": "strategy=builtin: consider only places at least this populous, 0 or more. Raising it coarsens the answer; set too high it returns a distant metropolis. Defaults to 0.",
+            "required": false
+        },
+        {
+            "name": "reference_file",
+            "example": "/plugins/data/zones.geojson",
+            "description": "strategy=polygon and strategy=nearest: the reference data, a .geojson, .json or .csv file under PLUGIN_DIR or an absolute path. Required for those strategies.",
+            "required": false
+        },
+        {
+            "name": "reference_encoding",
+            "example": "cp1251",
+            "description": "Python codec name for a CSV reference_file. Defaults to utf-8-sig, which also accepts plain UTF-8. GeoJSON is always UTF-8.",
+            "required": false
+        },
+        {
+            "name": "reference_lat_column",
+            "example": "y_coord",
+            "description": "Latitude column of a CSV reference_file. Detected from lat or latitude when omitted, ignoring case.",
+            "required": false
+        },
+        {
+            "name": "reference_lon_column",
+            "example": "x_coord",
+            "description": "Longitude column of a CSV reference_file. Detected from lon, lng, long or longitude when omitted, ignoring case.",
+            "required": false
+        },
+        {
+            "name": "reference_geometry_column",
+            "example": "shape",
+            "description": "Column of a CSV reference_file holding WKT geometry. Detected from geometry or wkt when omitted. Alternative to the latitude/longitude columns.",
+            "required": false
+        },
+        {
+            "name": "overlap_policy",
+            "example": "smallest",
+            "description": "strategy=polygon: which zone wins when a point is inside several. 'smallest' (most specific), 'largest' (most general), 'first' (file order) or 'priority'. Defaults to 'smallest'.",
+            "required": false
+        },
+        {
+            "name": "priority_attribute",
+            "example": "rank",
+            "description": "strategy=polygon: attribute ranked when overlap_policy='priority', and read only by that policy. Named like the entries of output_columns.",
+            "required": false
+        },
+        {
+            "name": "nearest_count",
+            "example": "3",
+            "description": "strategy=nearest: how many closest sites to describe, 1 or more. Above 1 every output column repeats per rank with a '_2', '_3' suffix. Defaults to 1.",
+            "required": false
+        },
+        {
+            "name": "max_radius_m",
+            "example": "1000",
+            "description": "Meters, above 0. Points farther than this from the resolved place are unresolved. Defaults to 1000 for strategy=nearest and to no limit for strategy=builtin, where distances are measured to a city center. There is no 'no limit' keyword: pass a value larger than half the Earth's circumference.",
+            "required": false
+        },
+        {
+            "name": "grid_type",
+            "example": "h3",
+            "description": "strategy=grid: 'h3' (hexagons), 'geohash' (rectangles) or 's2' (spherical quads). Defaults to 'h3'.",
+            "required": false
+        },
+        {
+            "name": "grid_precision",
+            "example": "7",
+            "description": "strategy=grid: cell size, ranged by grid_type: h3 0-15, geohash 1-12, s2 0-30. Defaults to 7 for h3, 6 for geohash, 9 for s2. Each finer step multiplies the distinct values the column can take.",
+            "required": false
+        },
+        {
+            "name": "unknown_value",
+            "example": "UNKNOWN",
+            "description": "Written when a coordinate cannot be resolved. Defaults to 'UNKNOWN'.",
+            "required": false
+        },
+        {
+            "name": "quantize_decimals",
+            "example": "4",
+            "description": "Decimal places a coordinate is rounded to before it becomes a cache key, 0 to 9. 4 is about 11 m. Defaults to 4.",
+            "required": false
+        },
+        {
+            "name": "cache_size",
+            "example": "100000",
+            "description": "How many distinct rounded coordinates are remembered before least-recently-used entries are evicted, 1 or more. Defaults to 100000.",
+            "required": false
+        },
+        {
+            "name": "target_database",
+            "example": "analytics",
+            "description": "Database for the target table. Defaults to the trigger's database.",
+            "required": false
+        },
+        {
+            "name": "start",
+            "example": "2026-08-01T00:00:00Z",
+            "description": "Default lower bound for every request, RFC 3339 inclusive; the request body overrides it. Given together with end.",
+            "required": false
+        },
+        {
+            "name": "end",
+            "example": "2026-08-29T00:00:00Z",
+            "description": "Default upper bound for every request, RFC 3339 exclusive; the request body overrides it. Given together with start.",
+            "required": false
+        },
+        {
+            "name": "batch_size",
+            "example": "1000",
+            "description": "Default rows read per page for every request, 1 or more; the request body overrides it. Defaults to 1000.",
+            "required": false
+        },
+        {
+            "name": "retry_unknown",
+            "example": "true",
+            "description": "Default for every request: re-resolve rows whose geo column equals unknown_value. The request body overrides it. Defaults to false.",
+            "required": false
+        },
+        {
+            "name": "force",
+            "example": "true",
+            "description": "Default for every request: re-resolve every row in range regardless of its current values. The request body overrides it. Defaults to false.",
+            "required": false
+        },
+        {
+            "name": "config_file_path",
+            "example": "geo_enrichment_config_data_writes.toml",
+            "description": "TOML config file under PLUGIN_DIR whose values override the trigger arguments; the request body overrides both.",
+            "required": false
+        }
+    ],
     "http_body_config": [
         {
             "name": "source_measurements",
@@ -347,39 +553,33 @@
             "required": false
         },
         {
-            "name": "config_file_path",
-            "example": "geo_enrichment_config_data_writes.toml",
-            "description": "TOML config file under PLUGIN_DIR. When given, the configuration is read from that file alone and the other body fields are ignored; start, end, batch_size, retry_unknown and force still come from the body.",
-            "required": false
-        },
-        {
             "name": "start",
             "example": "2026-08-01T00:00:00Z",
-            "description": "RFC 3339 lower bound, inclusive, nanosecond precision kept. Omit both start and end to backfill the whole table. May also be set in config_file_path, where the body overrides it.",
+            "description": "RFC 3339 lower bound, inclusive, nanosecond precision kept. Omit both start and end to backfill the whole table. A value set on the trigger or in its config file is the default.",
             "required": false
         },
         {
             "name": "end",
             "example": "2026-08-29T00:00:00Z",
-            "description": "RFC 3339 upper bound, exclusive, nanosecond precision kept. May also be set in config_file_path, where the body overrides it.",
+            "description": "RFC 3339 upper bound, exclusive, nanosecond precision kept. A value set on the trigger or in its config file is the default.",
             "required": false
         },
         {
             "name": "batch_size",
             "example": "1000",
-            "description": "Rows read per page, 1 or more; smaller values are raised to 1. Defaults to 1000. May also be set in config_file_path, where the body overrides it.",
+            "description": "Rows read per page, 1 or more; smaller values are raised to 1. Defaults to 1000. A value set on the trigger or in its config file is the default.",
             "required": false
         },
         {
             "name": "retry_unknown",
             "example": "true",
-            "description": "Re-resolve rows whose geo column equals unknown_value instead of skipping them. A JSON boolean or true/false, yes/no, on/off, 1/0 as a string. Defaults to false. May also be set in config_file_path, where the body overrides it.",
+            "description": "Re-resolve rows whose geo column equals unknown_value instead of skipping them. A JSON boolean or true/false, yes/no, on/off, 1/0 as a string. Defaults to false. A value set on the trigger or in its config file is the default.",
             "required": false
         },
         {
             "name": "force",
             "example": "true",
-            "description": "Re-resolve every row in range regardless of its current values, for applying a corrected reference file to history. A JSON boolean or true/false, yes/no, on/off, 1/0 as a string. Defaults to false. May also be set in config_file_path, where the body overrides it.",
+            "description": "Re-resolve every row in range regardless of its current values, for applying a corrected reference file to history. A JSON boolean or true/false, yes/no, on/off, 1/0 as a string. Defaults to false. A value set on the trigger or in its config file is the default.",
             "required": false
         }
     ]
@@ -395,13 +595,21 @@ import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
 
-from influxdata_plugin_utils.config import Validator, load_plugin_config, resolve_path
+from influxdata_plugin_utils.config import load_config, resolve_path
 from influxdata_plugin_utils.introspection import get_schema
 from influxdata_plugin_utils.parsing import (
     parse_bool,
     parse_delimited_list,
+    parse_int,
     parse_key_value,
 )
+from influxdata_plugin_utils.sources import (
+    KeySpec,
+    parse_json_body,
+    parse_toml,
+    parse_trigger_args,
+)
+from influxdata_plugin_utils.validation import Validator
 from influxdata_plugin_utils.write import build_line_typed, write_data
 
 # information_schema data types.
@@ -449,7 +657,6 @@ EARTH_RADIUS_M: float = 6_371_008.8
 DEFAULT_NEAREST_RADIUS_M: float = 1000.0
 REFERENCE_TTL_SECONDS: int = 3600
 MEMO_KEY: str = "geo:memo"
-BACKFILL_KEYS: tuple = ("start", "end", "batch_size", "retry_unknown", "force")
 MEMO_MISS: object = object()
 LAT_COLUMN_NAMES: tuple = ("lat", "latitude")
 LON_COLUMN_NAMES: tuple = ("lon", "lng", "long", "longitude")
@@ -1180,224 +1387,162 @@ def memo_store(memo: OrderedDict, key: tuple, value, cache_size: int) -> None:
         memo.popitem(last=False)
 
 
-def check_file_format(value: str, suffixes: tuple, argument: str, task_id: str) -> None:
-    """Reject a reference file whose name is not one of the accepted formats."""
-    if value and not value.lower().endswith(suffixes):
-        raise Exception(
-            f"[{task_id}] '{argument}' must be a "
-            f"{' or '.join(suffixes)} file, got '{value}'."
-        )
+# --- configuration ----------------------------------------------------------
 
 
-def normalize_config(
-    influxdb3_local, args: dict, task_id: str, source: str = "merge"
-) -> dict:
-    args = args or {}
-    check_file_format(
-        str(args.get("config_file_path") or "").strip(),
-        (".toml",),
-        "config_file_path",
-        task_id,
-    )
+def text(value) -> str:
+    """A setting as trimmed text; TOML and JSON may deliver it as a number."""
+    return str(value).strip()
 
-    settings = load_plugin_config(
-        args,
-        source=source,
-        validators=[
-            Validator("source_measurements", required=True),
-            Validator("output_columns", required=True),
-            Validator("output_mode", default="field"),
-            Validator("target_measurement", default=""),
-            Validator("target_database", default=""),
-            Validator("strategy", default="builtin"),
-            Validator("lat_field", default="lat"),
-            Validator("lon_field", default="lon"),
-            Validator("coord_scale", default=1.0, gt=0, cast=float),
-            Validator("point_field", default=""),
-            Validator("point_format", default="lat_lon"),
-            Validator("geohash_field", default=""),
-            Validator("h3_field", default=""),
-            Validator("min_population", default=0, gte=0, cast=int),
-            Validator("reference_file", default=""),
-            Validator("reference_encoding", default="utf-8-sig"),
-            Validator("reference_lat_column", default=""),
-            Validator("reference_lon_column", default=""),
-            Validator("reference_geometry_column", default=""),
-            Validator("overlap_policy", default="smallest"),
-            Validator("priority_attribute", default=""),
-            Validator("nearest_count", default=1, gte=1, cast=int),
-            Validator("max_radius_m", default=-1.0, gte=-1, cast=float),
-            Validator("grid_type", default="h3"),
-            Validator("grid_precision", default=-1, gte=-1, lte=30, cast=int),
-            Validator("unknown_value", default="UNKNOWN"),
-            Validator("quantize_decimals", default=4, gte=0, lte=9, cast=int),
-            Validator("cache_size", default=100_000, gte=1, cast=int),
-            # backfill fields: parsed by process_request, which reports their errors
-            *[Validator(name, default="") for name in BACKFILL_KEYS],
-        ],
-    )
 
-    sources = parse_delimited_list(settings.source_measurements)
-    if not sources:
-        raise Exception(f"[{task_id}] 'source_measurements' is empty.")
+def keyword(value) -> str:
+    """A setting chosen from a fixed list: trimmed and lower-cased."""
+    return text(value).lower()
 
-    strategy = str(settings.strategy).strip().lower()
-    if strategy not in STRATEGIES:
-        raise Exception(
-            f"[{task_id}] Unknown strategy '{strategy}'. Supported: {', '.join(STRATEGIES)}."
-        )
 
-    output_mode = str(settings.output_mode).strip().lower()
-    if output_mode not in ("field", "tag"):
-        raise Exception(
-            f"[{task_id}] 'output_mode' must be 'field' or 'tag', got '{output_mode}'."
-        )
+def page_size(value) -> int:
+    """Rows per backfill page; values below 1 are raised to 1."""
+    return max(1, parse_int(value))
 
-    target = str(settings.target_measurement).strip()
-    if output_mode == "tag":
-        if not target:
-            raise Exception(
-                f"[{task_id}] output_mode='tag' needs 'target_measurement': a tag "
-                f"changes the row's primary key, so writing tags into the source "
-                f"table duplicates rows instead of enriching them."
-            )
-        if target in sources:
-            raise Exception(
-                f"[{task_id}] 'target_measurement' must differ from the source "
-                f"tables when output_mode='tag'."
-            )
 
-    # a list of pairs would stringify into one mangled pair instead of failing
-    if isinstance(settings.output_columns, (list, tuple)):
-        raise Exception(
-            f"[{task_id}] 'output_columns' cannot be a list. Write it as a table, "
+def output_column_map(value) -> dict:
+    """attribute:column pairs from a string, a TOML table or a JSON object."""
+    if isinstance(value, (list, tuple)):
+        # a list of pairs would stringify into one mangled pair instead of failing
+        raise ValueError(
+            "cannot be a list. Write it as a table, "
             'output_columns = { attribute = "column" }, or as a string, '
-            'output_columns = "attribute:column".'
+            'output_columns = "attribute:column"'
         )
     try:
-        column_map = parse_key_value(settings.output_columns, kv_sep=":")
+        return parse_key_value(value, kv_sep=":")
     except ValueError as exc:
-        raise Exception(
-            f"[{task_id}] 'output_columns' must be space-separated "
-            f"'attribute:column' pairs: {exc}"
+        raise ValueError(
+            f"must be space-separated 'attribute:column' pairs: {exc}"
         ) from exc
-    if not column_map:
-        raise Exception(f"[{task_id}] 'output_columns' is empty.")
 
-    nearest_count = int(settings.nearest_count)
-    if nearest_count > 1 and strategy != "nearest":
-        raise Exception(
-            f"[{task_id}] 'nearest_count' above 1 needs strategy='nearest', "
-            f"got '{strategy}'."
+
+def reference_path(value) -> str:
+    """A reference file name, checked for a readable format before it is opened."""
+    path = text(value)
+    if path and not path.lower().endswith(REFERENCE_SUFFIXES):
+        raise ValueError(
+            f"must be a {' or '.join(REFERENCE_SUFFIXES)} file, got '{path}'"
         )
+    return path
+
+
+VALIDATORS: list = [
+    Validator("source_measurements", required=True, cast=parse_delimited_list, len_min=1),
+    Validator("output_columns", required=True, cast=output_column_map, len_min=1),
+    Validator("output_mode", default="field", cast=keyword, is_in=("field", "tag")),
+    Validator("target_measurement", default="", cast=text),
+    Validator("target_database", default="", cast=text),
+    Validator("strategy", default="builtin", cast=keyword, is_in=STRATEGIES),
+    Validator("lat_field", default="lat", cast=text),
+    Validator("lon_field", default="lon", cast=text),
+    Validator("coord_scale", default=1.0, cast=float, gt=0),
+    Validator("point_field", default="", cast=text),
+    Validator("point_format", default="lat_lon", cast=keyword, is_in=POINT_FORMATS),
+    Validator("geohash_field", default="", cast=text),
+    Validator("h3_field", default="", cast=text),
+    Validator("min_population", default=0, cast=parse_int, gte=0),
+    Validator("reference_file", default="", cast=reference_path),
+    Validator("reference_encoding", default="utf-8-sig", cast=text),
+    Validator("reference_lat_column", default="", cast=text),
+    Validator("reference_lon_column", default="", cast=text),
+    Validator("reference_geometry_column", default="", cast=text),
+    Validator("overlap_policy", default="smallest", cast=keyword, is_in=OVERLAP_POLICIES),
+    Validator("priority_attribute", default="", cast=text),
+    Validator("nearest_count", default=1, cast=parse_int, gte=1),
+    # unset: the strategy's own limit, 1000 m for nearest and none otherwise
+    Validator("max_radius_m", cast=float, gt=0),
+    Validator("grid_type", default="h3", cast=keyword, is_in=GRID_TYPES),
+    # unset: the grid's own default; the range depends on the grid as well
+    Validator("grid_precision", cast=parse_int, gte=0, lte=30),
+    Validator("unknown_value", default="UNKNOWN", cast=str),
+    Validator("quantize_decimals", default=4, cast=parse_int, gte=0, lte=9),
+    Validator("cache_size", default=100_000, cast=parse_int, gte=1),
+    # what one setting demands of another
+    Validator("target_measurement", required=True, when=Validator("output_mode", eq="tag")),
+    Validator("reference_file", required=True, when=Validator("strategy", is_in=REFERENCE_STRATEGIES)),
+    Validator("priority_attribute", required=True, when=Validator("overlap_policy", eq="priority")),
+    # backfill
+    Validator("start", cast=text),
+    Validator("end", cast=text),
+    Validator("end", required=True, when=Validator("start", required=True)),
+    Validator("start", required=True, when=Validator("end", required=True)),
+    Validator("batch_size", default=1000, cast=page_size),
+    Validator("retry_unknown", default=False, cast=parse_bool),
+    Validator("force", default=False, cast=parse_bool),
+]
+
+
+def prepare_config(influxdb3_local, cfg, task_id: str):
+    """Check the settings against each other and add what the pipeline derives.
+
+    The refusals here are the ones whose message has to name a second setting.
+    """
+    if (
+        cfg["output_mode"] == "tag"
+        and cfg["target_measurement"] in cfg["source_measurements"]
+    ):
+        raise ValueError(
+            "'target_measurement' must differ from the source tables when "
+            "output_mode='tag'"
+        )
+    if cfg["nearest_count"] > 1 and cfg["strategy"] != "nearest":
+        raise ValueError(
+            f"'nearest_count' above 1 needs strategy='nearest', got '{cfg['strategy']}'"
+        )
+
+    cfg["coord_mode"] = resolve_coord_mode(cfg)
+    cfg.setdefault("grid_precision", DEFAULT_GRID_PRECISION[cfg["grid_type"]])
+    low, high = GRID_PRECISION_RANGE[cfg["grid_type"]]
+    if not low <= cfg["grid_precision"] <= high:
+        raise ValueError(
+            f"grid_precision {cfg['grid_precision']} is out of range for "
+            f"grid_type='{cfg['grid_type']}' ({low}-{high})"
+        )
+    cfg.setdefault(
+        "max_radius_m",
+        DEFAULT_NEAREST_RADIUS_M if cfg["strategy"] == "nearest" else math.inf,
+    )
+
     # what the reference file must supply: ranks and distance are synthesized
-    base_attributes = [name for name in column_map if name != DISTANCE_ATTRIBUTE]
-    column_map = rank_columns(column_map, nearest_count, task_id)
-
-    coord_mode, coord_field = resolve_coord_mode(settings, task_id)
-
-    point_format = str(settings.point_format).strip().lower()
-    if point_format not in POINT_FORMATS:
-        raise Exception(
-            f"[{task_id}] 'point_format' must be one of {', '.join(POINT_FORMATS)}."
-        )
-
-    overlap_policy = str(settings.overlap_policy).strip().lower()
-    if overlap_policy not in OVERLAP_POLICIES:
-        raise Exception(
-            f"[{task_id}] 'overlap_policy' must be one of {', '.join(OVERLAP_POLICIES)}."
-        )
-    if overlap_policy == "priority" and not str(settings.priority_attribute).strip():
-        raise Exception(
-            f"[{task_id}] overlap_policy='priority' needs 'priority_attribute'."
-        )
-
-    grid_type = str(settings.grid_type).strip().lower()
-    if grid_type not in GRID_TYPES:
-        raise Exception(
-            f"[{task_id}] 'grid_type' must be one of {', '.join(GRID_TYPES)}."
-        )
-    grid_precision = int(settings.grid_precision)
-    if grid_precision < 0:
-        grid_precision = DEFAULT_GRID_PRECISION[grid_type]
-    low, high = GRID_PRECISION_RANGE[grid_type]
-    if not low <= grid_precision <= high:
-        raise Exception(
-            f"[{task_id}] grid_precision {grid_precision} is out of range for "
-            f"grid_type='{grid_type}' ({low}-{high})."
-        )
-
-    max_radius_m = float(settings.max_radius_m)
-    if max_radius_m == -1:
-        max_radius_m = DEFAULT_NEAREST_RADIUS_M if strategy == "nearest" else math.inf
-    elif max_radius_m <= 0:
-        raise Exception(f"[{task_id}] 'max_radius_m' must be greater than 0.")
-
-    reference_file = str(settings.reference_file).strip()
-    if strategy in REFERENCE_STRATEGIES and not reference_file:
-        raise Exception(f"[{task_id}] strategy='{strategy}' needs 'reference_file'.")
-    check_file_format(reference_file, REFERENCE_SUFFIXES, "reference_file", task_id)
-
-    if output_mode == "tag" and nearest_count > 1:
-        influxdb3_local.warn(
-            f"[{task_id}] output_mode='tag' tags every one of the "
-            f"{nearest_count} ranks: the series key becomes the whole combination, "
-            f"and two nearly equidistant sites swap ranks as the point moves, "
-            f"opening a new series on every swap."
-        )
-
-    if coord_mode == "h3" and strategy == "grid" and grid_type == "h3":
-        influxdb3_local.warn(
-            f"[{task_id}] Reading H3 cells and writing H3 cells; check that "
-            f"grid_precision differs from the source resolution."
-        )
-
-    cfg = {
-        "sources": sources,
-        "strategy": strategy,
-        "output_mode": output_mode,
-        "target_measurement": target,
-        "target_database": str(settings.target_database).strip() or None,
-        "column_map": column_map,
-        "output_column_names": list(column_map.values()),
-        "coord_mode": coord_mode,
-        "coord_field": coord_field,
-        "lat_field": str(settings.lat_field).strip(),
-        "lon_field": str(settings.lon_field).strip(),
-        "coord_scale": float(settings.coord_scale),
-        "point_field": str(settings.point_field).strip(),
-        "point_format": point_format,
-        "geohash_field": str(settings.geohash_field).strip(),
-        "h3_field": str(settings.h3_field).strip(),
-        "min_population": int(settings.min_population),
-        "reference_file": reference_file,
-        "reference_encoding": str(settings.reference_encoding).strip(),
-        "reference_lat_column": str(settings.reference_lat_column).strip(),
-        "reference_lon_column": str(settings.reference_lon_column).strip(),
-        "reference_geometry_column": str(settings.reference_geometry_column).strip(),
-        "overlap_policy": overlap_policy,
-        "priority_attribute": str(settings.priority_attribute).strip(),
-        "nearest_count": nearest_count,
-        "base_attributes": base_attributes,
-        "distance_attributes": {
-            ranked_attribute(DISTANCE_ATTRIBUTE, rank)
-            for rank in range(1, nearest_count + 1)
-        },
-        "max_radius_m": max_radius_m,
-        "grid_type": grid_type,
-        "grid_precision": int(grid_precision),
-        "unknown_value": str(settings.unknown_value),
-        "quantize_decimals": int(settings.quantize_decimals),
-        "cache_size": int(settings.cache_size),
-        "backfill": {name: settings.get(name) for name in BACKFILL_KEYS},
+    cfg["base_attributes"] = [
+        name for name in cfg["output_columns"] if name != DISTANCE_ATTRIBUTE
+    ]
+    cfg["column_map"] = rank_columns(cfg["output_columns"], cfg["nearest_count"])
+    cfg["output_column_names"] = list(cfg["column_map"].values())
+    cfg["distance_attributes"] = {
+        ranked_attribute(DISTANCE_ATTRIBUTE, rank)
+        for rank in range(1, cfg["nearest_count"] + 1)
     }
     cfg["unresolved_markers"] = {
         column: value for column, (value, _) in output_values(cfg, None).items()
     }
+
+    if cfg["output_mode"] == "tag" and cfg["nearest_count"] > 1:
+        influxdb3_local.warn(
+            f"[{task_id}] output_mode='tag' tags every one of the "
+            f"{cfg['nearest_count']} ranks: the series key becomes the whole "
+            f"combination, and two nearly equidistant sites swap ranks as the "
+            f"point moves, opening a new series on every swap."
+        )
+    if (
+        cfg["coord_mode"] == "h3"
+        and cfg["strategy"] == "grid"
+        and cfg["grid_type"] == "h3"
+    ):
+        influxdb3_local.warn(
+            f"[{task_id}] Reading H3 cells and writing H3 cells; check that "
+            f"grid_precision differs from the source resolution."
+        )
     return cfg
 
 
-def rank_columns(column_map: dict, nearest_count: int, task_id: str) -> dict:
+def rank_columns(column_map: dict, nearest_count: int) -> dict:
     """Repeat every attribute:column pair once per rank, grouped rank by rank."""
     ranked: dict = {}
     claimed: dict = {}
@@ -1406,33 +1551,28 @@ def rank_columns(column_map: dict, nearest_count: int, task_id: str) -> dict:
             name = ranked_attribute(column, rank)
             source = ranked_attribute(attribute, rank)
             if name in claimed:
-                raise Exception(
-                    f"[{task_id}] 'output_columns' maps both '{claimed[name]}' and "
-                    f"'{source}' to column '{name}'."
+                raise ValueError(
+                    f"'output_columns' maps both '{claimed[name]}' and "
+                    f"'{source}' to column '{name}'"
                 )
             claimed[name] = source
             ranked[source] = name
     return ranked
 
 
-def resolve_coord_mode(settings, task_id: str) -> tuple:
-    """Pick the single configured coordinate input mode."""
-    configured = []
-    if str(settings.point_field).strip():
-        configured.append(("point", str(settings.point_field).strip()))
-    if str(settings.geohash_field).strip():
-        configured.append(("geohash", str(settings.geohash_field).strip()))
-    if str(settings.h3_field).strip():
-        configured.append(("h3", str(settings.h3_field).strip()))
-
+def resolve_coord_mode(cfg) -> str:
+    """The single configured coordinate input mode."""
+    inputs = (
+        ("point", cfg["point_field"]),
+        ("geohash", cfg["geohash_field"]),
+        ("h3", cfg["h3_field"]),
+    )
+    configured = [mode for mode, field in inputs if field]
     if len(configured) > 1:
-        names = ", ".join(mode for mode, _ in configured)
-        raise Exception(
-            f"[{task_id}] Configure exactly one coordinate input; got: {names}."
+        raise ValueError(
+            f"Configure exactly one coordinate input; got: {', '.join(configured)}"
         )
-    if configured:
-        return configured[0]
-    return "lat_lon", ""
+    return configured[0] if configured else "lat_lon"
 
 
 def validate_attributes(cfg: dict, resolver, task_id: str) -> None:
@@ -1644,8 +1784,15 @@ def schema_for(
 
 def process_writes(influxdb3_local, table_batches: list, args: dict | None = None):
     task_id: str = str(uuid.uuid4())[:8]
+    args = args or {}
+
     try:
-        cfg = normalize_config(influxdb3_local, args, task_id)
+        cfg = load_config(
+            parse_trigger_args(args),
+            parse_toml(args.get("config_file_path")),
+            validators=VALIDATORS,
+        )
+        prepare_config(influxdb3_local, cfg, task_id)
         resolver = get_resolver(influxdb3_local, cfg, task_id=task_id)
         validate_attributes(cfg, resolver, task_id)
     except Exception as exc:
@@ -1658,7 +1805,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
     for batch in table_batches:
         table = batch["table_name"]
-        if table not in cfg["sources"]:
+        if table not in cfg["source_measurements"]:
             continue
         try:
             schema = schema_for(
@@ -1692,7 +1839,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             lines,
             no_sync=True,
             retries=0,
-            database=cfg["target_database"],
+            database=cfg["target_database"] or None,
         )
         stats["written"] = len(lines)
     except Exception as exc:
@@ -1710,39 +1857,29 @@ def process_request(
     args: dict | None = None,
 ):
     task_id: str = str(uuid.uuid4())[:8]
+    args = args or {}
 
     try:
-        body = parse_request_body(request_body)
-    except ValueError as exc:
-        return {"error": str(exc)}, 400
-
-    if args:
-        influxdb3_local.warn(
-            f"[{task_id}] Trigger arguments are ignored: this endpoint reads its "
-            f"whole configuration from the request body."
+        cfg = load_config(
+            parse_trigger_args(args),
+            parse_toml(args.get("config_file_path")),
+            parse_json_body(
+                request_body, KeySpec(denylist=["config_file_path"], unknown="reject")
+            ),
+            validators=VALIDATORS,
         )
-
-    # a JSON null means "not provided", not the string "None"
-    settings = {key: value for key, value in body.items() if value is not None}
-
-    try:
-        cfg = normalize_config(
-            influxdb3_local,
-            settings,
-            task_id,
-            source="toml" if settings.get("config_file_path") else "args",
-        )
+        prepare_config(influxdb3_local, cfg, task_id)
         resolver = get_resolver(influxdb3_local, cfg, rebuild=True, task_id=task_id)
         validate_attributes(cfg, resolver, task_id)
     except Exception as exc:
         influxdb3_local.error(f"[{task_id}] Configuration error: {exc}")
         return {"error": str(exc)}, 400
 
-    table = cfg["sources"][0]
-    if len(cfg["sources"]) > 1:
+    table = cfg["source_measurements"][0]
+    if len(cfg["source_measurements"]) > 1:
         influxdb3_local.warn(
             f"[{task_id}] One call backfills one table; using '{table}' and "
-            f"ignoring {', '.join(cfg['sources'][1:])}."
+            f"ignoring {', '.join(cfg['source_measurements'][1:])}."
         )
 
     try:
@@ -1751,31 +1888,19 @@ def process_request(
         influxdb3_local.error(f"[{task_id}] {exc}")
         return {"error": str(exc)}, 400
 
-    start = backfill_value(settings, cfg, "start") or None
-    end = backfill_value(settings, cfg, "end") or None
-    if (start is None) != (end is None):
-        return {"error": "'start' and 'end' must be given together"}, 400
-
-    try:
-        batch_size = max(1, int(backfill_value(settings, cfg, "batch_size") or 1000))
-    except (TypeError, ValueError):
-        return {"error": "'batch_size' must be an integer"}, 400
-
-    try:
-        retry_unknown = parse_bool(backfill_value(settings, cfg, "retry_unknown") or False)
-        force = parse_bool(backfill_value(settings, cfg, "force") or False)
-    except ValueError as exc:
-        return {"error": str(exc)}, 400
-
     stats = new_stats()
     schema_cache: dict = {}
     try:
-        cursor = start
+        cursor = cfg.get("start")
         while True:
-            rows = read_page(influxdb3_local, table, cursor, end, batch_size)
+            rows = read_page(
+                influxdb3_local, table, cursor, cfg.get("end"), cfg["batch_size"]
+            )
             if not rows:
                 break
-            rows, cursor = advance_cursor(influxdb3_local, table, rows, batch_size)
+            rows, cursor = advance_cursor(
+                influxdb3_local, table, rows, cfg["batch_size"]
+            )
             schema = schema_for(influxdb3_local, table, rows, schema_cache, task_id)
             lines = enrich_rows(
                 influxdb3_local,
@@ -1786,8 +1911,8 @@ def process_request(
                 resolver,
                 stats,
                 task_id,
-                retry_unknown=retry_unknown,
-                force=force,
+                retry_unknown=cfg["retry_unknown"],
+                force=cfg["force"],
             )
             if lines:
                 write_data(
@@ -1795,7 +1920,7 @@ def process_request(
                     lines,
                     no_sync=True,
                     retries=3,
-                    database=cfg["target_database"],
+                    database=cfg["target_database"] or None,
                 )
                 stats["written"] += len(lines)
             if cursor is None:
@@ -1806,27 +1931,6 @@ def process_request(
 
     log_summary(influxdb3_local, stats, task_id)
     return {"status": "ok", "measurement": table, "stats": stats}, 200
-
-
-def backfill_value(settings: dict, cfg: dict, name: str):
-    """Backfill field from the request body, falling back to the config file."""
-    value = settings.get(name)
-    return cfg["backfill"].get(name) if value is None else value
-
-
-def parse_request_body(request_body) -> dict:
-    if not request_body:
-        return {}
-    if isinstance(request_body, dict):
-        body = request_body
-    else:
-        try:
-            body = json.loads(request_body)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Request body is not valid JSON: {exc}") from exc
-    if not isinstance(body, dict):
-        raise ValueError("Request body must be a JSON object")
-    return body
 
 
 def quote_identifier(identifier: str) -> str:

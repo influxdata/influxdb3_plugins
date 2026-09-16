@@ -259,7 +259,9 @@ def test_config_rejects_contradictory_settings(overrides, reason):
 
 def test_a_blank_argument_leaves_the_default_in_place():
     """An empty trigger argument is "not provided", not an empty setting."""
-    assert config(output_mode="", unknown_value=" ")["output_mode"] == "field"
+    cfg = config(output_mode="", unknown_value=" ")
+
+    assert (cfg["output_mode"], cfg["unknown_value"]) == ("field", "UNKNOWN")
 
 
 def test_keyword_settings_ignore_case_and_surrounding_whitespace():
@@ -766,12 +768,16 @@ def test_the_body_overrides_the_trigger_arguments(resolver):
     influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000, lat=10.0)])
 
     body, status = backfill(
-        influxdb3_local, args={"unknown_value": "from-args"}, unknown_value="from-body"
+        influxdb3_local,
+        args={"unknown_value": "from-args", "target_measurement": "gps_located"},
+        unknown_value="from-body",
     )
 
     assert status == 200
     unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][0]
     assert unresolved.fields["geo_country"] == "from-body"
+    # the argument the body left alone still applied, so the args were read
+    assert unresolved.measurement == "gps_located"
 
 
 def test_trigger_arguments_apply_where_the_body_is_silent(resolver):
@@ -818,6 +824,40 @@ def test_body_alone_configures_the_whole_run(resolver):
     backfill(influxdb3_local, unknown_value="n/a", lat_field="lat", quantize_decimals=2)
 
     assert influxdb3_local.records()[0].fields["geo_city"] == "Moscow"
+
+
+def test_the_trigger_holds_the_setup_and_the_body_only_the_window(
+    resolver, monkeypatch, tmp_path
+):
+    """The documented flow: the setup is named once, on the trigger through
+    its config file, and each request carries only what differs."""
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text(
+        'source_measurements = "gps"\n'
+        'output_columns = "country:geo_country city:geo_city"\n'
+    )
+    influxdb3_local = backfill_client(
+        [unenriched(1_000), unenriched(2_000), unenriched(3_000)]
+    )
+
+    body, status = plugin.process_request(
+        influxdb3_local,
+        None,
+        None,
+        json.dumps(
+            {
+                "start": "1970-01-01T00:00:00.000002000Z",
+                "end": "1970-01-01T00:00:00.000003000Z",
+            }
+        ),
+        {"config_file_path": "geo.toml"},
+    )
+
+    assert status == 200
+    assert body["stats"]["written"] == 1
+    (record,) = influxdb3_local.records()
+    assert record.time == 2_000
+    assert record.fields["geo_country"] == "Russia"
 
 
 def test_a_config_file_named_on_the_trigger_holds_the_defaults(
@@ -1653,14 +1693,33 @@ def test_request_body_is_read_as_a_dict_text_or_bytes(resolver, request_body):
     assert body["stats"]["written"] == 1
 
 
-@pytest.mark.parametrize("request_body", [None, "", "[1, 2]", "not json"])
-def test_unusable_request_body_is_a_bad_request(resolver, request_body):
+@pytest.mark.parametrize("request_body", [None, "", b"", "{}"])
+def test_an_empty_body_runs_with_the_trigger_configuration(resolver, request_body):
+    """With the configuration on the trigger a request need carry nothing."""
     influxdb3_local = backfill_client([unenriched(1_000)])
 
-    response, status = plugin.process_request(influxdb3_local, None, None, request_body)
+    body, status = plugin.process_request(
+        influxdb3_local, None, None, request_body, dict(BASE_ARGS)
+    )
+
+    assert status == 200
+    assert body["stats"]["written"] == 1
+
+
+@pytest.mark.parametrize(
+    "request_body, reason",
+    [("[1, 2]", "must be a JSON object"), ("not json", "not valid JSON")],
+)
+def test_unusable_request_body_is_a_bad_request(resolver, request_body, reason):
+    """The trigger is configured, so the 400 is the body's own."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = plugin.process_request(
+        influxdb3_local, None, None, request_body, dict(BASE_ARGS)
+    )
 
     assert status == 400
-    assert "error" in response
+    assert reason in response["error"]
     assert influxdb3_local.writes == []
 
 

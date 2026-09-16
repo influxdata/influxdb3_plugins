@@ -192,7 +192,9 @@ pass unnoticed.
 | `retry_unknown` | bool   | `false`   | Re-resolve rows whose geo column equals `unknown_value`.                                            |
 | `force`         | bool   | `false`   | Re-resolve every row regardless of its current values.                                              |
 
-`start` and `end` keep nanosecond precision. `retry_unknown` and `force` take a
+`start` and `end` keep nanosecond precision. In a TOML file write them as quoted
+strings: a bare TOML datetime keeps microseconds at most, so one is refused
+rather than truncated. `retry_unknown` and `force` take a
 JSON boolean or any of `true`/`false`, `yes`/`no`, `on`/`off`, `1`/`0` as a
 string; anything else is a 400. All five may also be set on the trigger or in
 its [TOML file](#toml-configuration), where they act as defaults the body

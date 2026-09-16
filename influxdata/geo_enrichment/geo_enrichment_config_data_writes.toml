@@ -147,6 +147,7 @@ output_columns = { attribute = "your_column" }  # e.g., { country_code = "geo_co
 
 # Window to backfill, RFC 3339, given together
 # start is inclusive, end exclusive. Omit both to cover the whole table
+# Keep the quotes: a bare TOML datetime keeps microseconds at most and is refused
 #start = "2026-08-01T00:00:00Z"
 #end = "2026-08-29T00:00:00Z"
 

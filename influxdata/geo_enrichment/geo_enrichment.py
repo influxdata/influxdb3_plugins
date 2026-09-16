@@ -1400,6 +1400,18 @@ def keyword(value) -> str:
     return trimmed(value).lower()
 
 
+def timestamp_text(value) -> str:
+    """An RFC 3339 bound as written. TOML reads a bare datetime into an object
+    that keeps microseconds at most, so only a quoted string holds the
+    nanoseconds the bound promises."""
+    if not isinstance(value, str):
+        raise ValueError(
+            "must be a quoted RFC 3339 string: a bare TOML datetime keeps "
+            "microseconds at most"
+        )
+    return trimmed(value)
+
+
 def page_size(value) -> int:
     """Rows per backfill page; values below 1 are raised to 1."""
     return max(1, parse_int(value))
@@ -1467,8 +1479,8 @@ SETTING_VALIDATORS: list = [
 
 # the per-request fields: read by the HTTP trigger alone, so only it checks them
 BACKFILL_VALIDATORS: list = [
-    Validator("start", cast=trimmed),
-    Validator("end", cast=trimmed),
+    Validator("start", cast=timestamp_text),
+    Validator("end", cast=timestamp_text),
     Validator("end", required=True, when=Validator("start", required=True)),
     Validator("start", required=True, when=Validator("end", required=True)),
     Validator("batch_size", default=1000, cast=page_size),

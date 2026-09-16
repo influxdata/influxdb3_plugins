@@ -871,6 +871,24 @@ def test_backfill_fields_on_the_trigger_are_defaults_the_body_overrides(
     assert [record.time for record in influxdb3_local.records()] == [2_000]
 
 
+def test_a_bare_toml_datetime_bound_is_refused(resolver, monkeypatch, tmp_path):
+    """tomllib reads an unquoted datetime into an object that keeps
+    microseconds at most; the nanoseconds the bound promises would be lost
+    without a word, so the value is refused with the fix named."""
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text(
+        "start = 1970-01-01T00:00:00.000001000Z\n"
+        "end = 1970-01-01T00:00:00.000002000Z\n"
+    )
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = backfill(influxdb3_local, args={"config_file_path": "geo.toml"})
+
+    assert status == 400
+    assert "start: must be a quoted RFC 3339 string" in response["error"]
+    assert influxdb3_local.writes == []
+
+
 def test_json_null_in_the_body_means_not_provided(resolver):
     influxdb3_local = backfill_client([unenriched(1_000)])
 

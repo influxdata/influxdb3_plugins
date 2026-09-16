@@ -1463,10 +1463,6 @@ SETTING_VALIDATORS: list = [
     Validator("unknown_value", default="UNKNOWN", cast=str),
     Validator("quantize_decimals", default=4, cast=parse_int, gte=0, lte=9),
     Validator("cache_size", default=100_000, cast=parse_int, gte=1),
-    # what one setting demands of another
-    Validator("target_measurement", required=True, when=Validator("output_mode", eq="tag")),
-    Validator("reference_file", required=True, when=Validator("strategy", is_in=REFERENCE_STRATEGIES)),
-    Validator("priority_attribute", required=True, when=Validator("overlap_policy", eq="priority")),
 ]
 
 # the per-request fields: read by the HTTP trigger alone, so only it checks them
@@ -1486,14 +1482,22 @@ def prepare_config(influxdb3_local, cfg, task_id: str):
 
     The refusals here are the ones whose message has to name a second setting.
     """
-    if (
-        cfg["output_mode"] == "tag"
-        and cfg["target_measurement"] in cfg["source_measurements"]
-    ):
-        raise ValueError(
-            "'target_measurement' must differ from the source tables when "
-            "output_mode='tag'"
-        )
+    if cfg["output_mode"] == "tag":
+        if not cfg["target_measurement"]:
+            raise ValueError(
+                "output_mode='tag' needs 'target_measurement': a tag changes the "
+                "row's primary key, so writing tags into the source table "
+                "duplicates rows instead of enriching them"
+            )
+        if cfg["target_measurement"] in cfg["source_measurements"]:
+            raise ValueError(
+                "'target_measurement' must differ from the source tables when "
+                "output_mode='tag'"
+            )
+    if cfg["strategy"] in REFERENCE_STRATEGIES and not cfg["reference_file"]:
+        raise ValueError(f"strategy='{cfg['strategy']}' needs 'reference_file'")
+    if cfg["overlap_policy"] == "priority" and not cfg["priority_attribute"]:
+        raise ValueError("overlap_policy='priority' needs 'priority_attribute'")
     if cfg["nearest_count"] > 1 and cfg["strategy"] != "nearest":
         raise ValueError(
             f"'nearest_count' above 1 needs strategy='nearest', got '{cfg['strategy']}'"

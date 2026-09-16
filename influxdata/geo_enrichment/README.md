@@ -762,11 +762,11 @@ Re-reads the reference data on every call.
 Each source — the trigger arguments, the TOML file they name, the request body —
 is read by its own `influxdata-plugin-utils` parser, and each entry point hands
 the layers to `load_config()` lowest precedence first. `SETTING_VALIDATORS`
-gives every setting its default, cast and checks, with `when` rules for what one
-setting demands of another; `BACKFILL_VALIDATORS` does the same for the five
-per-request fields, which only the HTTP trigger applies, so a file shared with
-it cannot stop the write trigger. `prepare_config()` then checks the settings
-against each other and adds what the pipeline derives from them.
+gives every setting its default, cast and checks; `BACKFILL_VALIDATORS` does the
+same for the five per-request fields, which only the HTTP trigger applies, so a
+file shared with it cannot stop the write trigger. `prepare_config()` then
+checks the settings against each other, with messages that name the setting
+making the demand, and adds what the pipeline derives from them.
 
 #### `read_reference(cfg, requested_attributes)`
 
@@ -784,11 +784,11 @@ write merges; to a target table the whole row is copied.
 
 ## Troubleshooting
 
-### Issue: "target_measurement is required"
+### Issue: "output_mode='tag' needs 'target_measurement'"
 
-Raised for `output_mode=tag`. A tag is part of a row's identity, so writing one
-into the source table creates a second row and doubles every aggregate. Either
-set `target_measurement`, or use `output_mode=field` to enrich in place.
+A tag is part of a row's identity, so writing one into the source table creates a
+second row and doubles every aggregate. Either set `target_measurement`, or use
+`output_mode=field` to enrich in place.
 
 ### Issue: "Request body may not set 'config_file_path'"
 

@@ -9,15 +9,37 @@ cross-database plugin queries.
 from .cache import cached
 
 __all__ = [
+    "tag_data_type",
+    "numeric_types",
+    "line_types",
+    "numeric_line_types",
     "get_table_names",
     "get_tag_names",
     "get_field_names",
     "get_schema",
+    "get_line_schema",
     "query_window",
 ]
 
-_TAG_DATA_TYPE = "Dictionary(Int32, Utf8)"
-_NUMERIC_TYPES = {"Int64", "UInt64", "Float64", "Int32", "Float32"}
+tag_data_type = "Dictionary(Int32, Utf8)"
+"""The ``information_schema`` data type of a tag column."""
+
+numeric_types = frozenset({"Int64", "UInt64", "Float64", "Int32", "Float32"})
+"""The ``information_schema`` data types of the columns a numeric aggregate accepts."""
+
+line_types = {
+    "Int64": "int",
+    "Int32": "int",
+    "UInt64": "uint",
+    "Float64": "float",
+    "Float32": "float",
+    "Boolean": "bool",
+    "Utf8": "string",
+}
+"""``information_schema`` data type to the :func:`write.add_field_with_type` type."""
+
+numeric_line_types = frozenset(line_types[data_type] for data_type in numeric_types)
+"""The line types of :data:`numeric_types`: ``int``, ``uint`` and ``float``."""
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -94,7 +116,7 @@ def get_tag_names(
         rows = _query(
             influxdb3_local,
             query,
-            {"table": table, "data_type": _TAG_DATA_TYPE},
+            {"table": table, "data_type": tag_data_type},
             database=database,
         )
         return [row["column_name"] for row in rows]
@@ -134,9 +156,9 @@ def get_field_names(
         for row in rows:
             name = row["column_name"]
             data_type = row.get("data_type", "")
-            if name == "time" or data_type == _TAG_DATA_TYPE:
+            if name == "time" or data_type == tag_data_type:
                 continue
-            if numeric_only and data_type not in _NUMERIC_TYPES:
+            if numeric_only and data_type not in numeric_types:
                 continue
             names.append(name)
         return names
@@ -189,6 +211,43 @@ def get_schema(
             cache_empty=False,
         )
     return producer()
+
+
+def get_line_schema(
+    influxdb3_local,
+    table: str,
+    *,
+    database: str | None = None,
+    use_cache: bool = True,
+    ttl_seconds: int | None = 3600,
+    refresh: bool = False,
+) -> dict:
+    """Return ``{"tags": [name, ...], "fields": {name: line_type}}`` for a table.
+
+    Splits :func:`get_schema` into the tag names and a map of field name to
+    the :func:`write.add_field_with_type` type of that column, or ``None`` for
+    a data type :data:`line_types` does not know. ``time`` is left out. An
+    unknown table gives empty tags and fields; whether that is an error is the
+    caller's to decide. ``refresh=True`` re-reads the catalog, for a caller that
+    saw a column the cached schema does not know. The cache entry is the one
+    :func:`get_schema` keeps, so a refresh through either is seen by both.
+    """
+    columns = get_schema(
+        influxdb3_local,
+        table,
+        database=database,
+        use_cache=use_cache,
+        ttl_seconds=ttl_seconds,
+        refresh=refresh,
+    )
+    return {
+        "tags": [name for name, dt in columns.items() if dt == tag_data_type],
+        "fields": {
+            name: line_types.get(dt)
+            for name, dt in columns.items()
+            if dt != tag_data_type
+        },
+    }
 
 
 def query_window(

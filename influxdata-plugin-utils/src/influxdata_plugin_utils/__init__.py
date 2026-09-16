@@ -10,7 +10,7 @@ Modules:
     write          - LineBuilder builders and resilient write_data
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from . import cache, config, introspection, parsing, sources, validation, write
 from .cache import cached
@@ -23,7 +23,12 @@ from .config import (
     resolve_plugin_dir,
 )
 from .introspection import (
+    line_types,
+    numeric_line_types,
+    numeric_types,
+    tag_data_type,
     get_field_names,
+    get_line_schema,
     get_schema,
     get_table_names,
     get_tag_names,
@@ -53,6 +58,8 @@ from .write import (
     add_field_with_type,
     build_line,
     build_line_typed,
+    infer_type,
+    split_row,
     write_data,
 )
 
@@ -81,7 +88,12 @@ __all__ = [
     "parse_trigger_args",
     "Validator",
     "validate",
+    "line_types",
+    "numeric_line_types",
+    "numeric_types",
+    "tag_data_type",
     "get_field_names",
+    "get_line_schema",
     "get_schema",
     "get_table_names",
     "get_tag_names",
@@ -96,5 +108,7 @@ __all__ = [
     "add_field_with_type",
     "build_line",
     "build_line_typed",
+    "infer_type",
+    "split_row",
     "write_data",
 ]

@@ -1,7 +1,12 @@
 """Tests for influxdata_plugin_utils.introspection."""
 
 from influxdata_plugin_utils.introspection import (
+    line_types,
+    numeric_line_types,
+    numeric_types,
+    tag_data_type,
     get_field_names,
+    get_line_schema,
     get_schema,
     get_table_names,
     get_tag_names,
@@ -181,3 +186,87 @@ def test_an_empty_schema_is_asked_for_again_rather_than_remembered():
 
     columns.append([{"column_name": "usage", "data_type": "Float64"}])
     assert get_schema(local, "cpu") == {"usage": "Float64"}
+
+
+CPU_COLUMNS = [
+    {"column_name": "time", "data_type": "Timestamp(Nanosecond, None)"},
+    {"column_name": "host", "data_type": "Dictionary(Int32, Utf8)"},
+    {"column_name": "region", "data_type": "Dictionary(Int32, Utf8)"},
+    {"column_name": "usage", "data_type": "Float64"},
+    {"column_name": "count", "data_type": "Int64"},
+    {"column_name": "seq", "data_type": "UInt64"},
+    {"column_name": "ok", "data_type": "Boolean"},
+    {"column_name": "state", "data_type": "Utf8"},
+    {"column_name": "odd", "data_type": "Decimal128(10, 2)"},
+]
+
+
+def test_get_line_schema_splits_tags_from_typed_fields_and_leaves_time_out():
+    local = FakeInfluxDB(lambda query, args, database: CPU_COLUMNS)
+
+    assert get_line_schema(local, "cpu") == {
+        "tags": ["host", "region"],
+        "fields": {
+            "usage": "float",
+            "count": "int",
+            "seq": "uint",
+            "ok": "bool",
+            "state": "string",
+            "odd": None,
+        },
+    }
+
+
+def test_get_line_schema_of_an_unknown_table_is_empty_and_asked_again():
+    columns = [[]]
+    local = FakeInfluxDB(lambda query, args, database: columns[-1])
+
+    assert get_line_schema(local, "ghost") == {"tags": [], "fields": {}}
+
+    columns.append(CPU_COLUMNS[:2])
+    assert get_line_schema(local, "ghost") == {"tags": ["host"], "fields": {}}
+    assert len(local.calls) == 2
+
+
+def test_get_line_schema_shares_the_get_schema_entry_and_its_refresh():
+    columns = [CPU_COLUMNS[:4]]
+    local = FakeInfluxDB(lambda query, args, database: columns[-1])
+
+    assert get_line_schema(local, "cpu")["fields"] == {"usage": "float"}
+
+    columns.append(CPU_COLUMNS[:5])
+    # still the cached answer, through either helper
+    assert get_line_schema(local, "cpu")["fields"] == {"usage": "float"}
+    assert get_schema(local, "cpu") == {
+        "host": tag_data_type,
+        "region": tag_data_type,
+        "usage": "Float64",
+    }
+
+    assert get_line_schema(local, "cpu", refresh=True)["fields"] == {
+        "usage": "float",
+        "count": "int",
+    }
+    assert "count" in get_schema(local, "cpu")
+    assert len(local.calls) == 2
+    assert local.cache.ttls["shared:schema:cpu:1"] == 3600
+
+
+def test_get_line_schema_passes_database_and_can_skip_the_cache():
+    local = FakeInfluxDB(lambda query, args, database: CPU_COLUMNS[:3])
+
+    get_line_schema(local, "cpu", database="db_a", use_cache=False)
+    get_line_schema(local, "cpu", database="db_a", use_cache=False)
+
+    assert [call["database"] for call in local.calls] == ["db_a", "db_a"]
+    assert local.cache.values == {}
+
+
+def test_the_catalog_constants_agree_with_each_other():
+    assert tag_data_type == "Dictionary(Int32, Utf8)"
+    assert tag_data_type not in line_types
+    assert numeric_types == {"Int64", "UInt64", "Float64", "Int32", "Float32"}
+    assert numeric_types <= set(line_types)
+    assert {line_types[name] for name in numeric_types} == {"int", "uint", "float"}
+    assert numeric_line_types == {"int", "uint", "float"}
+    assert set(line_types.values()) == {"int", "uint", "float", "bool", "string"}

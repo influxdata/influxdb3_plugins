@@ -1390,14 +1390,14 @@ def memo_store(memo: OrderedDict, key: tuple, value, cache_size: int) -> None:
 # --- configuration ----------------------------------------------------------
 
 
-def text(value) -> str:
+def trimmed(value) -> str:
     """A setting as trimmed text; TOML and JSON may deliver it as a number."""
     return str(value).strip()
 
 
 def keyword(value) -> str:
     """A setting chosen from a fixed list: trimmed and lower-cased."""
-    return text(value).lower()
+    return trimmed(value).lower()
 
 
 def page_size(value) -> int:
@@ -1424,7 +1424,7 @@ def output_column_map(value) -> dict:
 
 def reference_path(value) -> str:
     """A reference file name, checked for a readable format before it is opened."""
-    path = text(value)
+    path = trimmed(value)
     if path and not path.lower().endswith(REFERENCE_SUFFIXES):
         raise ValueError(
             f"must be a {' or '.join(REFERENCE_SUFFIXES)} file, got '{path}'"
@@ -1436,24 +1436,24 @@ SETTING_VALIDATORS: list = [
     Validator("source_measurements", required=True, cast=parse_delimited_list, len_min=1),
     Validator("output_columns", required=True, cast=output_column_map, len_min=1),
     Validator("output_mode", default="field", cast=keyword, is_in=("field", "tag")),
-    Validator("target_measurement", default="", cast=text),
-    Validator("target_database", default="", cast=text),
+    Validator("target_measurement", default="", cast=trimmed),
+    Validator("target_database", default="", cast=trimmed),
     Validator("strategy", default="builtin", cast=keyword, is_in=STRATEGIES),
-    Validator("lat_field", default="lat", cast=text),
-    Validator("lon_field", default="lon", cast=text),
+    Validator("lat_field", default="lat", cast=trimmed),
+    Validator("lon_field", default="lon", cast=trimmed),
     Validator("coord_scale", default=1.0, cast=float, gt=0),
-    Validator("point_field", default="", cast=text),
+    Validator("point_field", default="", cast=trimmed),
     Validator("point_format", default="lat_lon", cast=keyword, is_in=POINT_FORMATS),
-    Validator("geohash_field", default="", cast=text),
-    Validator("h3_field", default="", cast=text),
+    Validator("geohash_field", default="", cast=trimmed),
+    Validator("h3_field", default="", cast=trimmed),
     Validator("min_population", default=0, cast=parse_int, gte=0),
     Validator("reference_file", default="", cast=reference_path),
-    Validator("reference_encoding", default="utf-8-sig", cast=text),
-    Validator("reference_lat_column", default="", cast=text),
-    Validator("reference_lon_column", default="", cast=text),
-    Validator("reference_geometry_column", default="", cast=text),
+    Validator("reference_encoding", default="utf-8-sig", cast=trimmed),
+    Validator("reference_lat_column", default="", cast=trimmed),
+    Validator("reference_lon_column", default="", cast=trimmed),
+    Validator("reference_geometry_column", default="", cast=trimmed),
     Validator("overlap_policy", default="smallest", cast=keyword, is_in=OVERLAP_POLICIES),
-    Validator("priority_attribute", default="", cast=text),
+    Validator("priority_attribute", default="", cast=trimmed),
     Validator("nearest_count", default=1, cast=parse_int, gte=1),
     # unset: the strategy's own limit, 1000 m for nearest and none otherwise
     Validator("max_radius_m", cast=float, gt=0),
@@ -1467,8 +1467,8 @@ SETTING_VALIDATORS: list = [
 
 # the per-request fields: read by the HTTP trigger alone, so only it checks them
 BACKFILL_VALIDATORS: list = [
-    Validator("start", cast=text),
-    Validator("end", cast=text),
+    Validator("start", cast=trimmed),
+    Validator("end", cast=trimmed),
     Validator("end", required=True, when=Validator("start", required=True)),
     Validator("start", required=True, when=Validator("end", required=True)),
     Validator("batch_size", default=1000, cast=page_size),

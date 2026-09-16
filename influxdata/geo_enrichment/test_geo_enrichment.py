@@ -837,6 +837,18 @@ def test_a_config_file_path_in_the_body_is_refused(resolver, monkeypatch, tmp_pa
     assert influxdb3_local.writes == []
 
 
+def test_an_unknown_body_field_is_refused(resolver):
+    """A denylist alone would let a misspelling pass unnoticed and leave the
+    caller believing it took effect; the body takes the settings by name."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = backfill(influxdb3_local, forse=True)
+
+    assert status == 400
+    assert "'forse'" in response["error"]
+    assert influxdb3_local.writes == []
+
+
 def test_backfill_fields_on_the_trigger_are_defaults_the_body_overrides(
     resolver, monkeypatch, tmp_path
 ):

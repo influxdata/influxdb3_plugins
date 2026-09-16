@@ -1867,7 +1867,15 @@ def process_request(
             parse_trigger_args(args),
             parse_toml(args.get("config_file_path")),
             parse_json_body(
-                request_body, KeySpec(denylist=["config_file_path"], unknown="reject")
+                request_body,
+                KeySpec(
+                    allowlist=[
+                        name
+                        for validator in SETTING_VALIDATORS + BACKFILL_VALIDATORS
+                        for name in validator.names
+                    ],
+                    unknown="reject",
+                ),
             ),
             validators=SETTING_VALIDATORS + BACKFILL_VALIDATORS,
         )

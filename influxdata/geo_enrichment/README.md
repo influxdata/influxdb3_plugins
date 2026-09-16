@@ -181,7 +181,9 @@ request overrides only where it names them.
 
 `source_measurements` keeps its name but backfills one table per call: give
 several and the first is used, the rest are ignored with a warning. A field set
-to `null` counts as absent.
+to `null` counts as absent. A field the plugin does not know is refused with a
+400, as is `config_file_path` whatever its value, so a misspelled name cannot
+pass unnoticed.
 
 | Parameter       | Type   | Default   | Description                                                                                         |
 |-----------------|--------|-----------|-----------------------------------------------------------------------------------------------------|

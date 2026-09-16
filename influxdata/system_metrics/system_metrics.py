@@ -66,6 +66,10 @@ _VALIDATORS = [
     Validator("max_retries", default=3, cast=lambda raw: parse_int(raw, minimum=0)),
 ]
 
+_SETTINGS = KeySpec(
+    allowlist=tuple(dict.fromkeys(name for rule in _VALIDATORS for name in rule.names))
+)
+
 # Cached psutil counters, used to derive rates and shares between two runs
 _DISK_IO_STATE_KEY = "system_metrics:disk_io"
 _DISK_IO_COUNTERS = (
@@ -112,7 +116,7 @@ def _load_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
     """
     args = args or {}
     config_file_path = args.get("config_file_path")
-    arg_layer = parse_trigger_args(args, KeySpec(denylist=["config_file_path"]))
+    arg_layer = parse_trigger_args(args, _SETTINGS)
     try:
         loaded = load_config(arg_layer, validators=_VALIDATORS)
     except Exception as e:
@@ -122,7 +126,7 @@ def _load_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
     if config_file_path:
         try:
             loaded = load_config(
-                arg_layer, parse_toml(config_file_path), validators=_VALIDATORS
+                arg_layer, parse_toml(config_file_path, _SETTINGS), validators=_VALIDATORS
             )
             influxdb3_local.info(
                 f"[{task_id}] Loaded configuration from {config_file_path}"

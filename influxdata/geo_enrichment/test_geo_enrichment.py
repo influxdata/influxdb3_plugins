@@ -785,6 +785,21 @@ def test_trigger_arguments_apply_where_the_body_is_silent(resolver):
     assert unresolved.fields["geo_country"] == "from-args"
 
 
+def test_a_body_overrides_but_cannot_unset_a_trigger_setting(resolver):
+    """An empty value counts as absent at every layer, so the trigger's value
+    stands; a run without the setting needs a trigger without it."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    body, status = backfill(
+        influxdb3_local,
+        args={"target_measurement": "gps_located"},
+        target_measurement="",
+    )
+
+    assert status == 200
+    assert {r.measurement for r in influxdb3_local.records()} == {"gps_located"}
+
+
 def test_only_the_first_of_several_tables_is_backfilled(resolver):
     influxdb3_local = backfill_client([unenriched(1_000)])
 

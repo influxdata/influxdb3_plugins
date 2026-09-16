@@ -179,6 +179,12 @@ each overriding the one before. A trigger created without arguments is
 configured by the body alone; one created with them holds the defaults each
 request overrides only where it names them.
 
+A body overrides a setting but cannot unset one: an empty string or `null`
+counts as absent, so the trigger's value stands, and a body naming only `start`
+pairs it with the trigger's `end`. A run that needs a setting the trigger holds
+to be empty, such as no `target_measurement` for an in-place run, needs a
+trigger that leaves it unset.
+
 `source_measurements` keeps its name but backfills one table per call: give
 several and the first is used, the rest are ignored with a warning. A field set
 to `null` counts as absent. A field the plugin does not know is refused with a

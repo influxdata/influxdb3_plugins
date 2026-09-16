@@ -1673,6 +1673,8 @@ def test_docstring_header_is_valid_json_matching_the_entry_points():
     assert http_args == settings | backfill | {"config_file_path"}
     # the body may carry every setting and the backfill fields, never the path
     assert body_fields == settings | backfill
+    # a backfill trigger may be created bare and configured by the body alone
+    assert not any(arg["required"] for arg in header["http_args_config"])
 
 
 def test_settings_can_come_from_a_toml_file(monkeypatch, tmp_path):

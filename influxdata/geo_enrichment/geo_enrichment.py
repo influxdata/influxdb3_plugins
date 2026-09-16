@@ -180,15 +180,15 @@
     "http_args_config": [
         {
             "name": "source_measurements",
-            "example": "gps fleet_pos",
-            "description": "Space-separated source tables to enrich. Rows from other tables in the batch are ignored.",
-            "required": true
+            "example": "gps",
+            "description": "Table to backfill, as the default for every request; the request body overrides it. One call handles one table: if several are given, the first is used and the rest are ignored. The merged configuration must name it: here, in the config file, or in each request body.",
+            "required": false
         },
         {
             "name": "output_columns",
             "example": "country_code:geo_country city:geo_city",
-            "description": "Space-separated 'attribute:column' pairs selecting which resolver attributes to write and under what column names. With a GeoJSON reference_file an attribute is a JSONPath into the feature properties, so nested values are reachable as owner.name; with a CSV one it is a column name.",
-            "required": true
+            "description": "Space-separated 'attribute:column' pairs selecting which resolver attributes to write and under what column names. With a GeoJSON reference_file an attribute is a JSONPath into the feature properties, so nested values are reachable as owner.name; with a CSV one it is a column name. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
         },
         {
             "name": "output_mode",

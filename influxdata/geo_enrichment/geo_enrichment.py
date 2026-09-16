@@ -1417,6 +1417,15 @@ def page_size(value) -> int:
     return max(1, parse_int(value))
 
 
+def measurement_list(value) -> list:
+    """Table names from a space-separated string or a list of strings."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    if isinstance(value, dict) or not all(isinstance(item, str) for item in items):
+        # a mapping or a nested value would stringify into garbage identifiers
+        raise ValueError("must be a space-separated string or a list of names")
+    return parse_delimited_list(value)
+
+
 def output_column_map(value) -> dict:
     """attribute:column pairs from a string, a TOML table or a JSON object."""
     if isinstance(value, (list, tuple)):
@@ -1426,6 +1435,11 @@ def output_column_map(value) -> dict:
             'output_columns = { attribute = "column" }, or as a string, '
             'output_columns = "attribute:column"'
         )
+    if isinstance(value, dict) and not all(
+        isinstance(column, str) for column in value.values()
+    ):
+        # null or a nested value would become a column named after its text
+        raise ValueError("must map every attribute to a column name string")
     try:
         return parse_key_value(value, kv_sep=":")
     except ValueError as exc:
@@ -1445,7 +1459,7 @@ def reference_path(value) -> str:
 
 
 SETTING_VALIDATORS: list = [
-    Validator("source_measurements", required=True, cast=parse_delimited_list, len_min=1),
+    Validator("source_measurements", required=True, cast=measurement_list, len_min=1),
     Validator("output_columns", required=True, cast=output_column_map, len_min=1),
     Validator("output_mode", default="field", cast=keyword, is_in=("field", "tag")),
     Validator("target_measurement", default="", cast=trimmed),

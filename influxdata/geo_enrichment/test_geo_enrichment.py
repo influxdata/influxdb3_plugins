@@ -743,6 +743,11 @@ def test_force_reresolves_rows_that_already_carry_values(resolver):
         ({"end": "2026-01-01T00:00:00Z"}, "start is required"),
         ({"batch_size": "many"}, "batch_size: Invalid integer"),
         ({"force": "yes please"}, "Invalid boolean"),
+        # containers the parsers would otherwise turn into garbage identifiers
+        ({"source_measurements": {"gps": True}}, "string or a list of names"),
+        ({"source_measurements": ["gps", 1]}, "string or a list of names"),
+        ({"output_columns": {"country": None}}, "column name string"),
+        ({"output_columns": {"country": {"x": 1}}}, "column name string"),
     ],
 )
 def test_backfill_reports_bad_request_bodies_as_400(resolver, body, reason):

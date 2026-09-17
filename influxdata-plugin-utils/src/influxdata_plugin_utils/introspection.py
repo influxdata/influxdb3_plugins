@@ -70,6 +70,12 @@ def _query(
     return influxdb3_local.query(query, args, database=database)
 
 
+def _not_found(table: str, database: str | None) -> str:
+    """The message for a table the catalog has no columns for."""
+    where = f" in database {database!r}" if database is not None else ""
+    return f"Table {table!r} not found{where}"
+
+
 def _cache_key(base: str, database: str | None) -> str:
     """Return a cache key, keeping existing default-database keys unchanged."""
     if database is None:
@@ -150,7 +156,13 @@ def get_field_names(
 ) -> list[str]:
     """Return field column names of a table (excludes tags and ``time``).
 
-    With ``numeric_only=True`` only integer/float columns are returned.
+    With ``numeric_only=True`` only integer/float columns are returned, and a
+    table without numeric columns gives ``[]``. Raises ``ValueError`` when the
+    catalog has no columns for the table at all, which is to say it does not
+    exist: a table cannot exist without a field, so an empty catalog answer is
+    never "no fields". :func:`get_tag_names` and :func:`get_table_names` return
+    ``[]`` instead, since a table without tags and a database without tables
+    are ordinary answers.
     """
 
     def producer() -> list[str]:
@@ -159,6 +171,8 @@ def get_field_names(
             "WHERE table_name = $table"
         )
         rows = _query(influxdb3_local, query, {"table": table}, database=database)
+        if not rows:
+            raise ValueError(_not_found(table, database))
         names: list[str] = []
         for row in rows:
             name = row["column_name"]
@@ -212,8 +226,7 @@ def get_schema(
             if not (exclude_time and row["column_name"] == "time")
         }
         if not columns:
-            where = f" in database {database!r}" if database is not None else ""
-            raise ValueError(f"Table {table!r} not found{where}")
+            raise ValueError(_not_found(table, database))
         return columns
 
     if not use_cache:
@@ -246,8 +259,11 @@ def get_line_schema(
 
     Splits :func:`get_schema` into the tag names and a map of field name to
     the :func:`write.add_field_with_type` type of that column, or ``None`` for
-    a data type :data:`LINE_TYPES` does not know. ``time`` is left out. An
-    unknown table raises ``ValueError``, from :func:`get_schema`.
+    a data type :data:`LINE_TYPES` does not know. Such a column is kept rather
+    than dropped so a caller checking a row's keys against the schema can tell
+    a known column of an odd type from one it has never seen, and refresh only
+    for the latter. ``time`` is left out. An unknown table raises
+    ``ValueError``, from :func:`get_schema`.
     ``refresh=True`` re-reads the catalog, for a caller that
     saw a column the cached schema does not know. The cache entry is the one
     :func:`get_schema` keeps, so a refresh through either is seen by both.

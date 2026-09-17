@@ -206,6 +206,33 @@ def test_a_table_dropped_between_reads_is_forgotten_on_refresh():
         get_schema(local, "cpu")  # no stale entry left to answer from
 
 
+def test_get_field_names_raises_for_a_missing_table_but_not_for_no_numeric_fields():
+    columns = [[]]
+    local = FakeInfluxDB(lambda query, args, database: columns[-1])
+
+    with pytest.raises(ValueError, match="Table 'cpu' not found"):
+        get_field_names(local, "cpu")
+    assert local.cache.values == {}
+
+    columns.append(
+        [
+            {"column_name": "time", "data_type": "Timestamp(Nanosecond, None)"},
+            {"column_name": "host", "data_type": "Dictionary(Int32, Utf8)"},
+            {"column_name": "state", "data_type": "Utf8"},
+        ]
+    )
+    assert get_field_names(local, "cpu") == ["state"]
+    assert get_field_names(local, "cpu", numeric_only=True) == []
+
+
+def test_get_tag_names_and_get_table_names_answer_empty_rather_than_raise():
+    """A table without tags and a database without tables are ordinary."""
+    local = FakeInfluxDB(lambda query, args, database: [])
+
+    assert get_tag_names(local, "ghost") == []
+    assert get_table_names(local) == []
+
+
 def test_a_missing_table_names_its_database():
     local = FakeInfluxDB(lambda query, args, database: [])
 

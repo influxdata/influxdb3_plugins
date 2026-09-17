@@ -34,10 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `introspection.get_schema` raises `ValueError` for a table the catalog does
-  not know, instead of returning `{}`. Nothing is cached, so a table created
-  later is seen on the next call, and a refresh that finds the table gone drops
-  the entry it had. `get_line_schema` behaves the same.
+- `introspection.get_schema` and `get_field_names` raise `ValueError` for a
+  table the catalog does not know, instead of returning an empty result.
+  Nothing is cached, so a table created later is seen on the next call, and a
+  `get_schema` refresh that finds the table gone drops the entry it had.
+  `get_line_schema` behaves the same. `get_tag_names` and `get_table_names`
+  keep returning `[]`: a table without tags and a database without tables are
+  ordinary answers, where a table without fields cannot exist.
 - `sources.parse_json_body` takes `max_depth` (default 100) and refuses a body
   whose objects and arrays nest deeper than that, counting the top-level
   object as the first level. The refusal used to rest on the interpreter's

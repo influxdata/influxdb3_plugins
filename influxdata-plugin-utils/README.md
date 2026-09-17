@@ -257,7 +257,9 @@ refresh matters for rows the plugin did not select itself: without it a tag
 added since the schema was cached would be written as a string field.
 
 `get_line_schema` raises `ValueError` for a table the catalog does not know,
-as `get_schema` does. Catch it where the plugin wants its task id in the message.
+as `get_schema` and `get_field_names` do. Catch it where the plugin wants its
+task id in the message. `get_tag_names` answers `[]` for that table instead,
+since a table without tags is ordinary.
 
 ## Cross-database queries
 

@@ -69,14 +69,15 @@ declined:
 Make the private constants public and add the type map.
 
 ```python
-tag_data_type: str
-numeric_types: frozenset[str]
-line_types: dict[str, str]   # Arrow data_type -> int | uint | float | bool | string
-numeric_line_types: frozenset   # {"int", "uint", "float"}
+TAG_DATA_TYPE: str
+NUMERIC_TYPES: frozenset[str]
+LINE_TYPES: dict[str, str]   # Arrow data_type -> int | uint | float | bool | string
+NUMERIC_LINE_TYPES: frozenset   # {"int", "uint", "float"}
 ```
 
-`numeric_line_types` is the set a numeric column's line type falls in, for a
-plugin that has a line schema and wants the aggregatable columns.
+`NUMERIC_LINE_TYPES` is the set a numeric column's line type falls in, for a
+plugin that has a line schema and wants the aggregatable columns. `LINE_TYPES`
+is a read-only mapping.
 
 Add one lookup built on `get_schema`.
 
@@ -93,9 +94,9 @@ def get_line_schema(
 ```
 
 Returns `{"tags": list[str], "fields": dict[str, str | None]}`. A field maps
-to `None` when its Arrow type is not in `line_types`. An unknown table returns
-empty tags and fields, matching `get_schema`, and the caller decides whether
-that is an error. The TTL default matches `get_schema`.
+to `None` when its Arrow type is not in `LINE_TYPES`. An unknown table raises
+`ValueError`, as `get_schema` now does; a plugin that wants its task id in the
+message catches and re-raises. The TTL default matches `get_schema`.
 
 ### `write`
 
@@ -129,7 +130,7 @@ three lines and stays in the caller.
 
 | Plugin | Change | Behavior change |
 |---|---|---|
-| `geo_enrichment` | Delete `tag_data_type`, `line_types`, `infer_line_type`, and `resolve_schema`. `schema_for` stays as the unknown-key check that passes `refresh=True`. In-place mode calls `split_row` and discards the typed fields before adding its own. | None |
+| `geo_enrichment` | Delete `TAG_DATA_TYPE`, `LINE_TYPES`, `infer_line_type`, and `resolve_schema`. `schema_for` stays as the unknown-key check that passes `refresh=True`. In-place mode calls `split_row` and discards the typed fields before adding its own. | None |
 | `gapfill` | `resolve_schema` becomes `get_line_schema` plus the local marker-collision check. Fill and copy sites build `{**tag_values, **values, "time": ts}` and call `split_row`. Report lines stay on `build_line`. | None |
 | `downsampler` | Rename the `_time` key to `time` in Python, not in SQL, since the source `time` column shares the query. Replace `get_aggregatable_fields` with the schema lookup filtered to int, uint, and float. Build an output schema: `avg`, `median`, `stddev`, `var`, and `approx_median` map to float, `count` and `record_count` to int, `sum`, `min`, `max`, `first_value`, and `last_value` keep the source type. Pass it to `split_row`. | Int32 and Float32 columns become aggregatable. UInt64 aggregates are written as uint. |
 | `basic_transformation` | Call `split_row` with the renamed tag list from `tags_mapping` and an empty field map, so every field goes through `infer_type`. Delete `transform_to_influx_line`. Name lookups move to `get_tag_names` and `get_field_names`. | None |

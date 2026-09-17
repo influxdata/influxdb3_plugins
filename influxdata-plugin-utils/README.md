@@ -21,7 +21,7 @@ pip install -e influxdata-plugin-utils
 | `sources`       | `KeySpec`, `parse_trigger_args()`, `parse_toml()`, `parse_env()`, `parse_json_body()`, `parse_request_headers()`, `parse_query_parameters()` |
 | `config`        | `load_config()`, `load_plugin_config()`, `merge_config_layers()`, `Config`, `resolve_plugin_dir()`, `resolve_path()`                         |
 | `validation`    | `Validator`, `validate()`                                                                                                                    |
-| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `get_schema()`, `get_line_schema()`, `query_window()` with optional `database=`; `tag_data_type`, `numeric_types`, `line_types`, `numeric_line_types` |
+| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `get_schema()`, `get_line_schema()`, `query_window()` with optional `database=`; `TAG_DATA_TYPE`, `NUMERIC_TYPES`, `LINE_TYPES`, `NUMERIC_LINE_TYPES` |
 | `parsing`       | `parse_timedelta()`, `parse_timestamp_ns()`, `parse_int()`, `parse_bool()`, `parse_delimited_list()`, `parse_key_value()`                    |
 | `cache`         | `cached(influxdb3_local, key, producer, ttl_seconds=3600, refresh=False, cache_empty=True)`                                                  |
 | `write`         | `build_line()`, `build_line_typed()`, `split_row()`, `infer_type()`, `add_field_with_type()`, `write_data()`, `BatchLines`                  |
@@ -255,6 +255,9 @@ def process_writes(influxdb3_local, table_batches, args=None):
 A key the schema does not know becomes a field typed from its value, so the
 refresh matters for rows the plugin did not select itself: without it a tag
 added since the schema was cached would be written as a string field.
+
+`get_line_schema` raises `ValueError` for a table the catalog does not know,
+as `get_schema` does. Catch it where the plugin wants its task id in the message.
 
 ## Cross-database queries
 

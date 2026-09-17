@@ -1,10 +1,12 @@
 """Tests for influxdata_plugin_utils.introspection."""
 
+import pytest
+
 from influxdata_plugin_utils.introspection import (
-    line_types,
-    numeric_line_types,
-    numeric_types,
-    tag_data_type,
+    LINE_TYPES,
+    NUMERIC_LINE_TYPES,
+    NUMERIC_TYPES,
+    TAG_DATA_TYPE,
     get_field_names,
     get_line_schema,
     get_schema,
@@ -175,17 +177,40 @@ def test_a_schema_is_cached_until_a_caller_asks_for_a_re_read():
     }
 
 
-def test_an_empty_schema_is_asked_for_again_rather_than_remembered():
+def test_a_missing_table_raises_and_is_asked_for_again_rather_than_remembered():
     columns = [[]]
 
     def responder(query, args, database):
         return columns[-1]
 
     local = FakeInfluxDB(responder)
-    assert get_schema(local, "cpu") == {}
+    with pytest.raises(ValueError, match="Table 'cpu' not found"):
+        get_schema(local, "cpu")
+    assert local.cache.values == {}
 
     columns.append([{"column_name": "usage", "data_type": "Float64"}])
     assert get_schema(local, "cpu") == {"usage": "Float64"}
+
+
+def test_a_table_dropped_between_reads_is_forgotten_on_refresh():
+    columns = [[{"column_name": "usage", "data_type": "Float64"}]]
+    local = FakeInfluxDB(lambda query, args, database: columns[-1])
+    assert get_schema(local, "cpu") == {"usage": "Float64"}
+    assert "shared:schema:cpu:1" in local.cache.values
+
+    columns.append([])
+    with pytest.raises(ValueError, match="Table 'cpu' not found"):
+        get_schema(local, "cpu", refresh=True)
+    assert "shared:schema:cpu:1" not in local.cache.values
+    with pytest.raises(ValueError):
+        get_schema(local, "cpu")  # no stale entry left to answer from
+
+
+def test_a_missing_table_names_its_database():
+    local = FakeInfluxDB(lambda query, args, database: [])
+
+    with pytest.raises(ValueError, match="Table 'cpu' not found in database 'db_a'"):
+        get_schema(local, "cpu", database="db_a")
 
 
 CPU_COLUMNS = [
@@ -217,11 +242,12 @@ def test_get_line_schema_splits_tags_from_typed_fields_and_leaves_time_out():
     }
 
 
-def test_get_line_schema_of_an_unknown_table_is_empty_and_asked_again():
+def test_get_line_schema_of_an_unknown_table_raises_and_is_asked_again():
     columns = [[]]
     local = FakeInfluxDB(lambda query, args, database: columns[-1])
 
-    assert get_line_schema(local, "ghost") == {"tags": [], "fields": {}}
+    with pytest.raises(ValueError, match="Table 'ghost' not found"):
+        get_line_schema(local, "ghost")
 
     columns.append(CPU_COLUMNS[:2])
     assert get_line_schema(local, "ghost") == {"tags": ["host"], "fields": {}}
@@ -238,8 +264,8 @@ def test_get_line_schema_shares_the_get_schema_entry_and_its_refresh():
     # still the cached answer, through either helper
     assert get_line_schema(local, "cpu")["fields"] == {"usage": "float"}
     assert get_schema(local, "cpu") == {
-        "host": tag_data_type,
-        "region": tag_data_type,
+        "host": TAG_DATA_TYPE,
+        "region": TAG_DATA_TYPE,
         "usage": "Float64",
     }
 
@@ -263,10 +289,15 @@ def test_get_line_schema_passes_database_and_can_skip_the_cache():
 
 
 def test_the_catalog_constants_agree_with_each_other():
-    assert tag_data_type == "Dictionary(Int32, Utf8)"
-    assert tag_data_type not in line_types
-    assert numeric_types == {"Int64", "UInt64", "Float64", "Int32", "Float32"}
-    assert numeric_types <= set(line_types)
-    assert {line_types[name] for name in numeric_types} == {"int", "uint", "float"}
-    assert numeric_line_types == {"int", "uint", "float"}
-    assert set(line_types.values()) == {"int", "uint", "float", "bool", "string"}
+    assert TAG_DATA_TYPE == "Dictionary(Int32, Utf8)"
+    assert TAG_DATA_TYPE not in LINE_TYPES
+    assert NUMERIC_TYPES == {"Int64", "UInt64", "Float64", "Int32", "Float32"}
+    assert NUMERIC_TYPES <= set(LINE_TYPES)
+    assert {LINE_TYPES[name] for name in NUMERIC_TYPES} == {"int", "uint", "float"}
+    assert NUMERIC_LINE_TYPES == {"int", "uint", "float"}
+    assert set(LINE_TYPES.values()) == {"int", "uint", "float", "bool", "string"}
+
+
+def test_line_types_cannot_be_changed_by_a_caller():
+    with pytest.raises(TypeError):
+        LINE_TYPES["Int64"] = "float"

@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `information_schema` query and cached alongside `get_schema`. A row from
   `process_writes` and a row from `query()` are the same flat dict, and neither
   says which keys are tags; this is the lookup that does. An unknown table
-  gives empty tags and fields, and `refresh=True` re-reads the catalog.
+  raises `ValueError`, and `refresh=True` re-reads the catalog.
 - `write.split_row(row, schema)` turns one such row into the
   `(tags, typed_fields, time_ns)` that `build_line_typed` takes. Every key in
   the row is placed by the schema; a key the schema does not know becomes a
@@ -25,14 +25,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on its own. The docstring says when a caller must refresh the schema first.
 - `write.infer_type(value)`: the type `build_line` already picked for a value,
   now public. Seven plugins carried a copy of it.
-- `introspection.tag_data_type`, `numeric_types`, `line_types` and
-  `numeric_line_types` are public. The tag data type string was declared in
+- `introspection.TAG_DATA_TYPE`, `NUMERIC_TYPES`, `LINE_TYPES` and
+  `NUMERIC_LINE_TYPES` are public. The tag data type string was declared in
   seven plugins, the numeric set in three, and the Arrow-to-line-type map in
-  two; `numeric_line_types` is the set a numeric column's line type falls in,
+  two; `NUMERIC_LINE_TYPES` is the set a numeric column's line type falls in,
   for a plugin that has a line schema and wants the aggregatable columns.
+  `LINE_TYPES` is a read-only mapping.
 
 ### Changed
 
+- `introspection.get_schema` raises `ValueError` for a table the catalog does
+  not know, instead of returning `{}`. Nothing is cached, so a table created
+  later is seen on the next call, and a refresh that finds the table gone drops
+  the entry it had. `get_line_schema` behaves the same.
 - `sources.parse_json_body` takes `max_depth` (default 100) and refuses a body
   whose objects and arrays nest deeper than that, counting the top-level
   object as the first level. The refusal used to rest on the interpreter's

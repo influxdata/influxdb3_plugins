@@ -263,7 +263,7 @@ def test_split_row_skips_none_and_infers_what_the_schema_cannot_type():
         "host": None,  # a tag the write did not set
         "usage": None,  # a field the write did not set
         "count": 3,
-        "odd": 2.5,  # known column, data type outside line_types
+        "odd": 2.5,  # known column, data type outside LINE_TYPES
         "extra": 7,  # column the schema has never seen
         "flag": False,
     }

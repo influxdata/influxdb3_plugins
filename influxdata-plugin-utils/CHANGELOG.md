@@ -7,8 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-16
+
+### Added
+
+- `introspection.get_line_schema(influxdb3_local, table)` returns
+  `{"tags": [...], "fields": {name: line_type}}`: the tag names of a table and
+  each field column's `add_field_with_type` type, read from one
+  `information_schema` query and cached alongside `get_schema`. A row from
+  `process_writes` and a row from `query()` are the same flat dict, and neither
+  says which keys are tags; this is the lookup that does. An unknown table
+  raises `ValueError`, and `refresh=True` re-reads the catalog.
+- `write.split_row(row, schema)` turns one such row into the
+  `(tags, typed_fields, time_ns)` that `build_line_typed` takes. Every key in
+  the row is placed by the schema; a key the schema does not know becomes a
+  field typed from its value. `None` values are skipped and `time` is returned
+  on its own. The docstring says when a caller must refresh the schema first.
+- `write.infer_type(value)`: the type `build_line` already picked for a value,
+  now public. Seven plugins carried a copy of it.
+- `introspection.TAG_DATA_TYPE`, `NUMERIC_TYPES`, `LINE_TYPES` and
+  `NUMERIC_LINE_TYPES` are public. The tag data type string was declared in
+  seven plugins, the numeric set in three, and the Arrow-to-line-type map in
+  two; `NUMERIC_LINE_TYPES` is the set a numeric column's line type falls in,
+  for a plugin that has a line schema and wants the aggregatable columns.
+  `LINE_TYPES` is a read-only mapping.
+
 ### Changed
 
+- `introspection.get_schema` and `get_field_names` raise `ValueError` for a
+  table the catalog does not know, instead of returning an empty result.
+  Nothing is cached, so a table created later is seen on the next call, and a
+  `get_schema` refresh that finds the table gone drops the entry it had.
+  `get_line_schema` behaves the same. `get_tag_names` and `get_table_names`
+  keep returning `[]`: a table without tags and a database without tables are
+  ordinary answers, where a table without fields cannot exist.
 - `sources.parse_json_body` takes `max_depth` (default 100) and refuses a body
   whose objects and arrays nest deeper than that, counting the top-level
   object as the first level. The refusal used to rest on the interpreter's
@@ -190,7 +222,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `write` — `build_line`, `build_line_typed`, `add_field_with_type`,
   `write_data` (batching + retry), `BatchLines`.
 
-[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.4.0...HEAD
+[Unreleased]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.5.0...HEAD
+[0.5.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.4.0...utils-v0.5.0
 [0.4.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.1...utils-v0.4.0
 [0.3.1]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.3.0...utils-v0.3.1
 [0.3.0]: https://github.com/influxdata/influxdb3_plugins/compare/utils-v0.2.0...utils-v0.3.0

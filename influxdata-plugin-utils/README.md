@@ -21,10 +21,10 @@ pip install -e influxdata-plugin-utils
 | `sources`       | `KeySpec`, `parse_trigger_args()`, `parse_toml()`, `parse_env()`, `parse_json_body()`, `parse_request_headers()`, `parse_query_parameters()` |
 | `config`        | `load_config()`, `load_plugin_config()`, `merge_config_layers()`, `Config`, `resolve_plugin_dir()`, `resolve_path()`                         |
 | `validation`    | `Validator`, `validate()`                                                                                                                    |
-| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `get_schema()`, `query_window()` with optional `database=`                      |
+| `introspection` | `get_table_names()`, `get_tag_names()`, `get_field_names()`, `get_schema()`, `get_line_schema()`, `query_window()` with optional `database=`; `TAG_DATA_TYPE`, `NUMERIC_TYPES`, `LINE_TYPES`, `NUMERIC_LINE_TYPES` |
 | `parsing`       | `parse_timedelta()`, `parse_timestamp_ns()`, `parse_int()`, `parse_bool()`, `parse_delimited_list()`, `parse_key_value()`                    |
 | `cache`         | `cached(influxdb3_local, key, producer, ttl_seconds=3600, refresh=False, cache_empty=True)`                                                  |
-| `write`         | `build_line()`, `build_line_typed()`, `add_field_with_type()`, `write_data()`, `BatchLines`                                                  |
+| `write`         | `build_line()`, `build_line_typed()`, `split_row()`, `infer_type()`, `add_field_with_type()`, `write_data()`, `BatchLines`                  |
 
 The package has no dependencies, and every module raises `ValueError` on bad
 input, so a plugin answers a bad configuration from one `except` clause.
@@ -224,6 +224,42 @@ write_data(influxdb3_local, lines)            # batched + retried by default
 # write_data(influxdb3_local, lines, database="other_db")     # another database
 # write_data(influxdb3_local, lines, no_sync=True)            # write_sync API (3.8+)
 ```
+
+## Rebuilding a line from a row
+
+A row from `process_writes` and a row from `influxdb3_local.query()` are the
+same flat dict keyed by column name, and neither says which keys are tags or
+what type each field column has. `get_line_schema` reads that from the catalog
+and `split_row` applies it:
+
+```python
+from influxdata_plugin_utils.introspection import get_line_schema
+from influxdata_plugin_utils.write import build_line_typed, split_row
+
+def process_writes(influxdb3_local, table_batches, args=None):
+    for batch in table_batches:
+        table = batch["table_name"]
+        schema = get_line_schema(influxdb3_local, table)
+        known = set(schema["tags"]) | set(schema["fields"]) | {"time"}
+        if any(key not in known for row in batch["rows"] for key in row):
+            # a column this batch created is not in the cached schema yet
+            schema = get_line_schema(influxdb3_local, table, refresh=True)
+        for row in batch["rows"]:
+            tags, typed_fields, time_ns = split_row(row, schema)
+            typed_fields["enriched"] = (True, "bool")
+            line = build_line_typed(
+                LineBuilder, "cpu_enriched", tags=tags, typed_fields=typed_fields, time_ns=time_ns
+            )
+```
+
+A key the schema does not know becomes a field typed from its value, so the
+refresh matters for rows the plugin did not select itself: without it a tag
+added since the schema was cached would be written as a string field.
+
+`get_line_schema` raises `ValueError` for a table the catalog does not know,
+as `get_schema` and `get_field_names` do. Catch it where the plugin wants its
+task id in the message. `get_tag_names` answers `[]` for that table instead,
+since a table without tags is ordinary.
 
 ## Cross-database queries
 

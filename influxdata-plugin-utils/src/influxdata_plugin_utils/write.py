@@ -14,9 +14,11 @@ from functools import partial
 from .parsing import parse_bool
 
 __all__ = [
+    "infer_type",
     "add_field_with_type",
     "build_line",
     "build_line_typed",
+    "split_row",
     "write_data",
     "BatchLines",
 ]
@@ -42,7 +44,12 @@ class BatchLines:
         return self._built
 
 
-def _infer_type(value) -> str:
+def infer_type(value) -> str:
+    """Return the :func:`add_field_with_type` type a Python value maps to.
+
+    ``bool`` before ``int``, since a bool is an int in Python; anything that is
+    not a bool, int or float is written as a string.
+    """
     if isinstance(value, bool):
         return "bool"
     if isinstance(value, int):
@@ -111,7 +118,7 @@ def build_line(
     for key, value in (fields or {}).items():
         if value is None:
             continue
-        add_field_with_type(line, key, value, _infer_type(value))
+        add_field_with_type(line, key, value, infer_type(value))
         field_count += 1
     if not field_count:
         # fail early: a field-less line would poison the whole batched write
@@ -152,6 +159,42 @@ def build_line_typed(
     if time_ns is not None:
         line.time_ns(time_ns)
     return line
+
+
+def split_row(row, schema: dict) -> tuple[dict, dict, int | None]:
+    """Split a batch or query row into ``(tags, typed_fields, time_ns)``.
+
+    A row from ``process_writes`` and a row from ``influxdb3_local.query`` are
+    the same shape: a flat dict keyed by column name, and neither says which
+    columns are tags. ``schema`` is what
+    :func:`introspection.get_line_schema` returns and supplies that. Every key
+    in the row is placed by it: a tag name goes to ``tags``, any other key to
+    ``typed_fields`` as the ``(value, type)`` pair :func:`build_line_typed`
+    takes, typed by the schema when it knows the column and by
+    :func:`infer_type` when it does not. ``None`` values are skipped. ``time``
+    is returned on its own as an ``int``, or ``None`` when the row has none.
+
+    A key the schema does not know becomes a field. A caller handed rows it did
+    not select itself, such as a ``process_writes`` batch, should re-read the
+    schema with ``refresh=True`` on seeing such a key before splitting; else a
+    tag added since the schema was cached is written as a string field and the
+    write fails on the type conflict.
+    """
+    tag_names = set(schema["tags"])
+    field_types = schema["fields"]
+    tags: dict = {}
+    typed_fields: dict = {}
+    time_ns: int | None = None
+    for key, value in row.items():
+        if value is None:
+            continue
+        if key == "time":
+            time_ns = int(value)
+        elif key in tag_names:
+            tags[key] = value
+        else:
+            typed_fields[key] = (value, field_types.get(key) or infer_type(value))
+    return tags, typed_fields, time_ns
 
 
 def write_data(

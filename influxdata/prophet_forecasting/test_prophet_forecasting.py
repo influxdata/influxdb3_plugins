@@ -876,10 +876,11 @@ def test_http_request_rejections(body, expected):
     assert not local.writes
 
 
-def test_http_null_means_not_set_and_body_is_not_a_file_path():
+def test_http_null_means_not_set():
     local = FakeLocal(rows())
-    body = http_body(validation_window=None, config_file_path="cfg.toml")
-    response = pf.process_request(local, {}, {}, json.dumps(body))
+    response = pf.process_request(
+        local, {}, {}, json.dumps(http_body(validation_window=None))
+    )
 
     assert "Forecast written" in response["message"]
 
@@ -890,6 +891,8 @@ def test_http_null_means_not_set_and_body_is_not_a_file_path():
         ("", "is required"),  # an empty body sets nothing, so a required value is missing
         ("not json", "Expecting value"),
         ('["a"]', "must be a JSON object"),
+        (json.dumps({"config_file_path": "cfg.toml"}), "may not set 'config_file_path'"),
+        (json.dumps({"measuremnt": "temperature"}), "may not set 'measuremnt'"),
     ],
 )
 def test_http_bad_bodies_are_reported(request_body, expected):

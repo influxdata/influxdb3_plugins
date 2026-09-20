@@ -40,7 +40,7 @@ Set these parameters with `--trigger-arguments` when creating a scheduled trigge
 
 ### HTTP request parameters
 
-Send these parameters as JSON in the HTTP POST request body, which must be a JSON object of at most 10 MB. Trigger arguments are not used by the HTTP endpoint; a value that arrives empty — a JSON `null` or a blank string — counts as not set, so the default applies.
+Send these parameters as JSON in the HTTP POST request body, which must be a JSON object of at most 10 MB. Trigger arguments are not used by the HTTP endpoint; a value that arrives empty — a JSON `null` or a blank string — counts as not set, so the default applies. A key outside the tables below is refused and named in the response, so a misspelling is reported rather than silently dropped.
 
 | Parameter            | Type          | Default  | Description                                                                                        |
 |----------------------|---------------|----------|----------------------------------------------------------------------------------------------------|
@@ -96,7 +96,7 @@ Each channel listed in `senders` needs its own keys (`slack_webhook_url`, `disco
 
 *To use a TOML configuration file, set the `PLUGIN_DIR` environment variable and specify the `config_file_path` in the trigger arguments.* This is in addition to the `--plugin-dir` flag when starting InfluxDB 3. Relative paths are resolved against the first directory that is set: `PLUGIN_DIR`, then `INFLUXDB3_PLUGIN_DIR`, then the parent of `VIRTUAL_ENV`. Only that directory is used — the file is not looked up in the remaining ones.
 
-When `config_file_path` is set, the TOML file provides the whole configuration and inline trigger arguments are ignored. `INFLUXDB3_AUTH_TOKEN` from the environment still applies when `influxdb3_auth_token` is not set in the file. In TOML, `tag_values`, `senders`, `changepoints`, `holiday_date_list`, `holiday_names` and `holiday_country_names` can use native structures (a table or a list) instead of the inline string formats, though the inline strings are also accepted. The HTTP endpoint ignores `config_file_path`.
+When `config_file_path` is set, the TOML file provides the whole configuration and inline trigger arguments are ignored. `INFLUXDB3_AUTH_TOKEN` from the environment still applies when `influxdb3_auth_token` is not set in the file. In TOML, `tag_values`, `senders`, `changepoints`, `holiday_date_list`, `holiday_names` and `holiday_country_names` can use native structures (a table or a list) instead of the inline string formats, though the inline strings are also accepted. The HTTP endpoint refuses `config_file_path`: the request names its settings itself.
 
 #### Example TOML configuration
 

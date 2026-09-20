@@ -372,9 +372,16 @@ from urllib.parse import urlparse
 import pandas as pd
 import requests
 from influxdata_plugin_utils.config import (
+    Config,
     Validator,
     load_config,
     resolve_plugin_dir,
+)
+from influxdata_plugin_utils.parsing import (
+    parse_bool,
+    parse_delimited_list,
+    parse_int,
+    parse_timedelta,
 )
 from influxdata_plugin_utils.sources import (
     KeySpec,
@@ -382,12 +389,6 @@ from influxdata_plugin_utils.sources import (
     parse_json_body,
     parse_toml,
     parse_trigger_args,
-)
-from influxdata_plugin_utils.parsing import (
-    parse_bool,
-    parse_delimited_list,
-    parse_int,
-    parse_timedelta,
 )
 from influxdata_plugin_utils.write import build_line, write_data
 from prophet import Prophet
@@ -590,10 +591,18 @@ HTTP_VALIDATORS: list = COMMON_VALIDATORS + [
 
 
 NO_FILE_PATH = KeySpec(denylist=["config_file_path"])
-AUTH_TOKEN_ENV = KeySpec(allowlist=["INFLUXDB3_AUTH_TOKEN"])
+# the variable is spelled in upper case; the config key it becomes is not
+AUTH_TOKEN_ENV = KeySpec(
+    allowlist=["INFLUXDB3_AUTH_TOKEN"],
+    rename={"INFLUXDB3_AUTH_TOKEN": "influxdb3_auth_token"},
+)
+HTTP_BODY_KEYS = KeySpec(
+    allowlist=[name for validator in HTTP_VALIDATORS for name in validator.names],
+    unknown="reject",
+)
 
 
-def load_http_config(request_body) -> dict:
+def load_http_config(request_body) -> Config:
     """
     Load and validate the configuration an HTTP request carries.
 
@@ -601,24 +610,22 @@ def load_http_config(request_body) -> dict:
         request_body: The body as delivered to process_request.
 
     Returns:
-        dict: Config values keyed by lower-case name.
+        Config: The validated configuration.
 
     Raises:
-        ForecastError: If the body cannot be read, a required value is missing,
-            or a value fails to cast.
+        ForecastError: If the body cannot be read, carries a key the endpoint
+            does not accept, a required value is missing, or a value fails to cast.
     """
     try:
-        loaded = load_config(
-            parse_json_body(request_body, NO_FILE_PATH),
+        return load_config(
+            parse_json_body(request_body, HTTP_BODY_KEYS),
             validators=HTTP_VALIDATORS,
         )
     except Exception as e:
         raise ForecastError(f"Failed to load configuration: {e}") from e
 
-    return {key.lower(): value for key, value in loaded.items()}
 
-
-def load_scheduled_config(args: dict | None) -> dict:
+def load_scheduled_config(args: dict | None) -> Config:
     """
     Load and validate the configuration a scheduled trigger runs on.
 
@@ -629,7 +636,7 @@ def load_scheduled_config(args: dict | None) -> dict:
         args (dict | None): Trigger arguments.
 
     Returns:
-        dict: Config values keyed by lower-case name.
+        Config: The validated configuration.
 
     Raises:
         ForecastError: If the file cannot be read, a required value is missing,
@@ -642,15 +649,13 @@ def load_scheduled_config(args: dict | None) -> dict:
             if config_file_path
             else parse_trigger_args(args, NO_FILE_PATH)
         )
-        loaded = load_config(
+        return load_config(
             parse_env(AUTH_TOKEN_ENV),
             trigger_layer,
             validators=SCHEDULED_VALIDATORS,
         )
     except Exception as e:
         raise ForecastError(f"Failed to load configuration: {e}") from e
-
-    return {key.lower(): value for key, value in loaded.items()}
 
 
 def quote_identifier(name: str) -> str:
@@ -1470,7 +1475,7 @@ def process_scheduled_call(
     influxdb3_local.info(f"[{task_id}] Starting scheduled forecast at {call_time}")
 
     try:
-        config: dict = load_scheduled_config(args)
+        config: Config = load_scheduled_config(args)
         tag_values: dict = parse_tag_values(
             influxdb3_local, config["tag_values"], task_id
         )
@@ -1578,7 +1583,7 @@ def process_request(
     influxdb3_local.info(f"[{task_id}] Received forecasting request")
 
     try:
-        config: dict = load_http_config(request_body)
+        config: Config = load_http_config(request_body)
         tag_values: dict = parse_tag_values(
             influxdb3_local, config["tag_values"], task_id
         )

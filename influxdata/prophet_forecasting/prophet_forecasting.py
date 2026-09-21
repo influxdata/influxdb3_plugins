@@ -221,7 +221,141 @@
         {
             "name": "config_file_path",
             "example": "prophet_forecasting_scheduler.toml",
-            "description": "Path to a TOML file supplying all parameters, relative to PLUGIN_DIR. When set, the file replaces the inline trigger arguments.",
+            "description": "Path to a TOML file, relative to PLUGIN_DIR or absolute. Its values override the inline trigger arguments.",
+            "required": false
+        }
+    ],
+    "http_args_config": [
+        {
+            "name": "measurement",
+            "example": "temperature",
+            "description": "The InfluxDB measurement to query for historical data. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "field",
+            "example": "value",
+            "description": "The field name within the measurement to forecast. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "forecast_horizont",
+            "example": "7d",
+            "description": "Future duration to forecast. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m, q, y. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "tag_values",
+            "example": "{'region': 'us-west', 'device': 'sensor1'}",
+            "description": "Tag filters for the source query, as a JSON object. The dot-separated 'tag:value' string form is also accepted. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "target_measurement",
+            "example": "temperature_forecast",
+            "description": "Destination measurement for storing forecast results. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "unique_suffix",
+            "example": "20250619_v1",
+            "description": "Model version identifier, also used as the file name suffix. Up to 64 characters from letters, digits, '.', '_' and '-'. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "start_time",
+            "example": "2025-05-20T00:00:00Z",
+            "description": "Start of the historical window, ISO 8601 with timezone. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "end_time",
+            "example": "2025-06-19T00:00:00Z",
+            "description": "End of the historical window, ISO 8601 with timezone. Forecast points are written from this moment onward. The merged configuration must set it: here, in the config file, or in each request body.",
+            "required": false
+        },
+        {
+            "name": "save_mode",
+            "example": "true",
+            "description": "When true, load the saved model for unique_suffix or train and save it when no file exists. Defaults to false, which trains an in-memory model per request.",
+            "required": false
+        },
+        {
+            "name": "seasonality_mode",
+            "example": "additive",
+            "description": "Prophet seasonality mode ('additive' or 'multiplicative'). Defaults to 'additive'.",
+            "required": false
+        },
+        {
+            "name": "changepoint_prior_scale",
+            "example": "0.05",
+            "description": "Flexibility of trend changepoints, must be greater than 0. Defaults to 0.05.",
+            "required": false
+        },
+        {
+            "name": "changepoints",
+            "example": "['2025-01-01', '2025-06-01']",
+            "description": "Changepoint dates (ISO format) as a JSON list or a space-separated string.",
+            "required": false
+        },
+        {
+            "name": "holiday_date_list",
+            "example": "['2025-07-04']",
+            "description": "Custom holiday dates (ISO format) as a JSON list or a space-separated string.",
+            "required": false
+        },
+        {
+            "name": "holiday_names",
+            "example": "['Independence Day']",
+            "description": "Names matching holiday_date_list, as a JSON list or a dot-separated string.",
+            "required": false
+        },
+        {
+            "name": "holiday_country_names",
+            "example": "['US']",
+            "description": "Country code for built-in holidays, as a JSON list or a dot-separated string. Prophet supports one country, so only the first entry is used.",
+            "required": false
+        },
+        {
+            "name": "inferred_freq",
+            "example": "1D",
+            "description": "Manually specified pandas frequency alias, fixed ('30min', '1h', '1s') or calendar ('D', 'W-SUN', 'MS', 'QS'). If not provided, frequency is inferred from data.",
+            "required": false
+        },
+        {
+            "name": "validation_window",
+            "example": "3d",
+            "description": "Duration held back from training and used to validate the forecast. Defaults to '0s' (no validation).",
+            "required": false
+        },
+        {
+            "name": "validation_alignment",
+            "example": "nearest",
+            "description": "How actual and forecasted values are paired during validation: 'position' (default) pairs them in time order, 'nearest' pairs each actual value with the closest forecast point within half a frequency step.",
+            "required": false
+        },
+        {
+            "name": "msre_threshold",
+            "example": "0.05",
+            "description": "Maximum acceptable Mean Squared Relative Error (MSRE) for validation. Defaults to infinity (no threshold).",
+            "required": false
+        },
+        {
+            "name": "max_forecast_points",
+            "example": "10000",
+            "description": "Maximum number of forecast points per run, counting the validation window. Defaults to 10000.",
+            "required": false
+        },
+        {
+            "name": "target_database",
+            "example": "forecast_db",
+            "description": "Database for forecast results. Defaults to a database named 'default', which is created on first write.",
+            "required": false
+        },
+        {
+            "name": "config_file_path",
+            "example": "prophet_forecasting_http.toml",
+            "description": "Path to a TOML file, relative to PLUGIN_DIR or absolute. Its values override the other trigger arguments, and the request body overrides the file. Never read from the request body.",
             "required": false
         }
     ],
@@ -590,7 +724,6 @@ HTTP_VALIDATORS: list = COMMON_VALIDATORS + [
 ]
 
 
-NO_FILE_PATH = KeySpec(denylist=["config_file_path"])
 # the variable is spelled in upper case; the config key it becomes is not
 AUTH_TOKEN_ENV = KeySpec(
     allowlist=["INFLUXDB3_AUTH_TOKEN"],
@@ -602,60 +735,69 @@ HTTP_BODY_KEYS = KeySpec(
 )
 
 
-def load_http_config(request_body) -> Config:
+def prepare_scheduled_config(
+    influxdb3_local, config: Config, call_time: datetime, task_id: str
+) -> None:
     """
-    Load and validate the configuration an HTTP request carries.
+    Check the settings against each other and add what the run derives.
 
-    Args:
-        request_body: The body as delivered to process_request.
-
-    Returns:
-        Config: The validated configuration.
+    The refusals here are the ones whose message has to name a second setting.
+    Adds tag_values as a mapping, plus run_time, history_start, history_end and
+    forecast_start hung off call_time.
 
     Raises:
-        ForecastError: If the body cannot be read, carries a key the endpoint
-            does not accept, a required value is missing, or a value fails to cast.
+        ForecastError: If validation_window leaves no training data.
     """
-    try:
-        return load_config(
-            parse_json_body(request_body, HTTP_BODY_KEYS),
-            validators=HTTP_VALIDATORS,
+    config["tag_values"] = parse_tag_values(
+        influxdb3_local, config["tag_values"], task_id
+    )
+
+    if config["is_sending_alert"] and config["validation_window"] <= timedelta(0):
+        influxdb3_local.warn(
+            f"[{task_id}] is_sending_alert has no effect without validation_window: "
+            f"alerts are only sent when validation fails"
         )
-    except Exception as e:
-        raise ForecastError(f"Failed to load configuration: {e}") from e
+
+    # the engine passes a naive UTC timestamp
+    run_time: datetime = (
+        call_time if call_time.tzinfo else call_time.replace(tzinfo=timezone.utc)
+    )
+    config["run_time"] = run_time
+    config["history_start"] = run_time - config["window"]
+    config["history_end"] = run_time - config["validation_window"]
+    config["forecast_start"] = run_time
+    if config["history_start"] >= config["history_end"]:
+        raise ForecastError(
+            f"Empty training window: 'window' ({config['window']}) must exceed "
+            f"'validation_window' ({config['validation_window']})"
+        )
 
 
-def load_scheduled_config(args: dict | None) -> Config:
+def prepare_http_config(influxdb3_local, config: Config, task_id: str) -> None:
     """
-    Load and validate the configuration a scheduled trigger runs on.
+    Check the settings against each other and add what the run derives.
 
-    Reads the named environment variables, then either the TOML file at
-    config_file_path or the trigger arguments -- never both.
-
-    Args:
-        args (dict | None): Trigger arguments.
-
-    Returns:
-        Config: The validated configuration.
+    Adds tag_values as a mapping, plus history_start, history_end and
+    forecast_start from start_time, end_time and validation_window.
 
     Raises:
-        ForecastError: If the file cannot be read, a required value is missing,
-            or a value fails to cast.
+        ForecastError: If a bound is not a timezone-aware ISO 8601 value,
+            start_time is not before end_time, or validation_window covers the
+            whole requested range.
     """
-    config_file_path = (args or {}).get("config_file_path")
-    try:
-        trigger_layer = (
-            parse_toml(config_file_path)
-            if config_file_path
-            else parse_trigger_args(args, NO_FILE_PATH)
+    config["tag_values"] = parse_tag_values(
+        influxdb3_local, config["tag_values"], task_id
+    )
+
+    start_time, end_time = parse_time_window(config)
+    config["history_start"] = start_time
+    config["history_end"] = end_time - config["validation_window"]
+    config["forecast_start"] = end_time
+    if start_time >= config["history_end"]:
+        raise ForecastError(
+            f"Empty training window: 'validation_window' "
+            f"({config['validation_window']}) covers the whole requested range"
         )
-        return load_config(
-            parse_env(AUTH_TOKEN_ENV),
-            trigger_layer,
-            validators=SCHEDULED_VALIDATORS,
-        )
-    except Exception as e:
-        raise ForecastError(f"Failed to load configuration: {e}") from e
 
 
 def quote_identifier(name: str) -> str:
@@ -1466,47 +1608,38 @@ def process_scheduled_call(
     Args:
         influxdb3_local: InfluxDB client instance.
         call_time (datetime): Time the trigger fired; the windows hang off it.
-        args (dict | None): Trigger arguments, or a TOML file named by
-            config_file_path. See the plugin metadata for the supported keys.
+        args (dict | None): Trigger arguments; a TOML file named by
+            config_file_path overrides them. See the plugin metadata for the
+            supported keys.
 
     All exceptions are caught and logged; nothing propagates to the engine.
     """
     task_id: str = str(uuid.uuid4())
+    args = args or {}
     influxdb3_local.info(f"[{task_id}] Starting scheduled forecast at {call_time}")
 
     try:
-        config: Config = load_scheduled_config(args)
-        tag_values: dict = parse_tag_values(
-            influxdb3_local, config["tag_values"], task_id
+        config: Config = load_config(
+            parse_env(AUTH_TOKEN_ENV),
+            parse_trigger_args(args),
+            parse_toml(args.get("config_file_path")),
+            validators=SCHEDULED_VALIDATORS,
         )
+        prepare_scheduled_config(influxdb3_local, config, call_time, task_id)
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Configuration error: {e}")
+        return
 
-        # the engine passes a naive UTC timestamp
-        run_time: datetime = (
-            call_time if call_time.tzinfo else call_time.replace(tzinfo=timezone.utc)
-        )
-        if config["is_sending_alert"] and config["validation_window"] <= timedelta(0):
-            influxdb3_local.warn(
-                f"[{task_id}] is_sending_alert has no effect without validation_window: "
-                f"alerts are only sent when validation fails"
-            )
-
-        history_start: datetime = run_time - config["window"]
-        history_end: datetime = run_time - config["validation_window"]
-        if history_start >= history_end:
-            raise ForecastError(
-                f"Empty training window: 'window' ({config['window']}) must exceed "
-                f"'validation_window' ({config['validation_window']})"
-            )
-
+    try:
         status, message = run_forecast(
             influxdb3_local,
             config,
-            tag_values,
-            history_start=history_start,
-            history_end=history_end,
-            forecast_start=run_time,
+            config["tag_values"],
+            history_start=config["history_start"],
+            history_end=config["history_end"],
+            forecast_start=config["forecast_start"],
             use_saved_model=config["model_mode"] == "predict",
-            run_time=run_time,
+            run_time=config["run_time"],
             task_id=task_id,
         )
 
@@ -1517,11 +1650,12 @@ def process_scheduled_call(
         influxdb3_local.error(f"[{task_id}] {message}")
         if status == FORECAST_VALIDATION_FAILED and config["is_sending_alert"]:
             send_validation_alert(
-                influxdb3_local, config, history_end, run_time, task_id
+                influxdb3_local,
+                config,
+                config["history_end"],
+                config["run_time"],
+                task_id,
             )
-
-    except ForecastError as e:
-        influxdb3_local.error(f"[{task_id}] {e}")
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
 
@@ -1574,49 +1708,47 @@ def process_request(
         request_headers: HTTP request headers (unused).
         request_body: JSON body holding the forecast configuration. See the
             http_body_config section of the plugin metadata for the supported keys.
-        args: Trigger arguments (unused; the body carries the configuration).
+        args: Trigger arguments, and the TOML file they name, as the defaults
+            the body overrides.
 
     Returns:
         dict: {"message": <outcome>}.
     """
     task_id: str = str(uuid.uuid4())
+    args = args or {}
     influxdb3_local.info(f"[{task_id}] Received forecasting request")
 
     try:
-        config: Config = load_http_config(request_body)
-        tag_values: dict = parse_tag_values(
-            influxdb3_local, config["tag_values"], task_id
+        config: Config = load_config(
+            parse_env(AUTH_TOKEN_ENV),
+            parse_trigger_args(args),
+            parse_toml(args.get("config_file_path")),
+            parse_json_body(request_body, HTTP_BODY_KEYS),
+            validators=HTTP_VALIDATORS,
         )
+        prepare_http_config(influxdb3_local, config, task_id)
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Configuration error: {e}")
+        return {"message": f"[{task_id}] {e}"}
 
-        start_time, end_time = parse_time_window(config)
-        history_end: datetime = end_time - config["validation_window"]
-        if start_time >= history_end:
-            raise ForecastError(
-                f"Empty training window: 'validation_window' "
-                f"({config['validation_window']}) covers the whole requested range"
-            )
-
+    try:
         status, message = run_forecast(
             influxdb3_local,
             config,
-            tag_values,
-            history_start=start_time,
-            history_end=history_end,
-            forecast_start=end_time,
+            config["tag_values"],
+            history_start=config["history_start"],
+            history_end=config["history_end"],
+            forecast_start=config["forecast_start"],
             use_saved_model=config["save_mode"],
             run_time=datetime.now(timezone.utc),
             task_id=task_id,
         )
-
-        if status == FORECAST_WRITTEN:
-            influxdb3_local.info(f"[{task_id}] {message}")
-        else:
-            influxdb3_local.error(f"[{task_id}] {message}")
-        return {"message": f"[{task_id}] {message}"}
-
-    except (ForecastError, json.JSONDecodeError) as e:
-        influxdb3_local.error(f"[{task_id}] {e}")
-        return {"message": f"[{task_id}] {e}"}
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
         return {"message": f"[{task_id}] Unexpected error: {e}"}
+
+    if status == FORECAST_WRITTEN:
+        influxdb3_local.info(f"[{task_id}] {message}")
+    else:
+        influxdb3_local.error(f"[{task_id}] {message}")
+    return {"message": f"[{task_id}] {message}"}

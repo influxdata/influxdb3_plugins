@@ -39,7 +39,7 @@ Boolean parameters accept `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`. A
 
 *To use a TOML configuration file, set the `PLUGIN_DIR` environment variable and specify the `config_file_path` in the trigger arguments.* This is in addition to the `--plugin-dir` flag when starting InfluxDB 3. Relative paths are resolved against the first directory that is set: `PLUGIN_DIR`, then `INFLUXDB3_PLUGIN_DIR`, then the parent of `VIRTUAL_ENV`. Only that directory is used — the file is not looked up in the remaining ones.
 
-Values in the TOML file override the inline trigger arguments. If the file cannot be read, the plugin logs an error and collects metrics using the inline arguments and defaults.
+Values in the TOML file override the inline trigger arguments. A file that cannot be read, is not named `.toml`, or holds an invalid value stops the run with a configuration error rather than falling back to the inline arguments.
 
 #### Example TOML configuration
 
@@ -175,7 +175,11 @@ The main entry point for scheduled triggers. Loads the configuration, then runs 
 
 ```python
 def process_scheduled_call(influxdb3_local, call_time, args=None):
-    config = _load_config(influxdb3_local, args, task_id)
+    config: Config = load_config(
+        parse_trigger_args(args, SETTINGS),
+        parse_toml(args.get("config_file_path"), SETTINGS),
+        validators=SETTING_VALIDATORS,
+    )
 
     for config_key, metric_type, collect in _COLLECTORS:
         if not config[config_key]:
@@ -284,7 +288,7 @@ influxdb3 install package psutil
 
 #### Issue: No metrics at all and a configuration error in the logs
 
-**Solution**: An invalid parameter value stops the run before any collection. Look for `Failed to load configuration` in the logs, which names the offending value, and fix the trigger arguments. A TOML file that cannot be read is a separate case: it is logged as `Failed to apply config file` and collection continues with the inline arguments.
+**Solution**: An invalid setting stops the run before any collection. Look for `Configuration error` in the logs, which names the offending key and value, and fix the trigger arguments or the TOML file. An unreadable, wrongly named or invalid config file is reported the same way, so check the path in `config_file_path` resolves under `PLUGIN_DIR` and names a `.toml` file.
 
 #### Issue: High CPU usage from plugin
 

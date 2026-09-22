@@ -150,6 +150,20 @@ def written_times(local):
     return [line.timestamp for _, line in local.writes]
 
 
+def load(args):
+    """The write trigger's configuration: the environment, its arguments, then the file."""
+    config_file_path = args.get("config_file_path") or sf.parse_env(
+        sf.env_spec("config_file_path")
+    ).get("config_file_path")
+    cfg = sf.load_config(
+        sf.parse_env(sf.ENV_SETTINGS),
+        sf.parse_trigger_args(args, sf.SETTINGS),
+        sf.parse_toml(config_file_path, sf.SETTINGS),
+        validators=sf.SETTING_VALIDATORS,
+    )
+    return sf.prepare_config(sf.Config(sf.validate(cfg, sf.design_validators(cfg))))
+
+
 BASE_ARGS = {"fc2": "5.0", "sample_rate": "100.0"}
 
 
@@ -190,7 +204,7 @@ def test_missing_scipy_reports_install_command(monkeypatch):
 
 
 def test_defaults():
-    cfg = sf.parse_config({"fc2": "5.0"})
+    cfg = load({"fc2": "5.0"})
     assert cfg.input_fields == ("value",)
     assert cfg.design_type == "preset"
     assert cfg.prototype == "butter"
@@ -238,47 +252,48 @@ def test_defaults():
     ],
 )
 def test_rejections(args, fragment):
-    with pytest.raises(sf.ConfigError) as excinfo:
-        sf.parse_config(args)
+    with pytest.raises(ValueError) as excinfo:
+        load(args)
     assert fragment.lower() in str(excinfo.value).lower()
 
 
 def test_fc_alias_lowpass_and_highpass():
-    assert sf.parse_config({"fc": "5"}).fc2 == 5.0
-    cfg = sf.parse_config({"filter_type": "highpass", "fc": "2"})
+    assert load({"fc": "5"}).fc2 == 5.0
+    cfg = load({"filter_type": "highpass", "fc": "2"})
     assert cfg.fc1 == 2.0
     assert cfg.fc2 is None
 
 
 def test_manual_sos_a0_normalization():
-    cfg = sf.parse_config({"design_type": "manual", "sos": "[[2, 0, 0, 2, 1, 0.5]]"})
+    cfg = load({"design_type": "manual", "sos": "[[2, 0, 0, 2, 1, 0.5]]"})
     assert cfg.sos == ((1.0, 0.0, 0.0, 1.0, 0.5, 0.25),)
 
 
 def test_toml_config_supplies_all_params(tmp_path):
     toml = tmp_path / "cfg.toml"
     toml.write_text('fc2 = 9.0\norder = 2\n')
-    cfg = sf.parse_config({"config_file_path": str(toml)})
+    cfg = load({"config_file_path": str(toml)})
     assert cfg.fc2 == 9.0
     assert cfg.order == 2
 
 
-def test_config_file_path_exclusive_with_inline_args(tmp_path):
+def test_config_file_overrides_inline_args(tmp_path):
     toml = tmp_path / "cfg.toml"
     toml.write_text("fc2 = 9.0\n")
-    with pytest.raises(sf.ConfigError, match="mutually exclusive"):
-        sf.parse_config({"config_file_path": str(toml), "fc2": "5"})
+    cfg = load({"config_file_path": str(toml), "fc2": "5", "order": "2"})
+    assert cfg.fc2 == 9.0  # the file wins where both set a key
+    assert cfg.order == 2  # an argument the file leaves alone still applies
 
 
 def test_toml_relative_path_requires_plugin_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("PLUGIN_DIR", raising=False)
     monkeypatch.delenv("INFLUXDB3_PLUGIN_DIR", raising=False)
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
-    with pytest.raises(sf.ConfigError, match="PLUGIN_DIR"):
-        sf.parse_config({"config_file_path": "cfg.toml"})
+    with pytest.raises(ValueError, match="PLUGIN_DIR"):
+        load({"config_file_path": "cfg.toml"})
     (tmp_path / "cfg.toml").write_text("fc2 = 7.0\n")
     monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
-    assert sf.parse_config({"config_file_path": "cfg.toml"}).fc2 == 7.0
+    assert load({"config_file_path": "cfg.toml"}).fc2 == 7.0
 
 
 def test_toml_relative_path_virtual_env_fallback(tmp_path, monkeypatch):
@@ -288,28 +303,55 @@ def test_toml_relative_path_virtual_env_fallback(tmp_path, monkeypatch):
     venv.mkdir()
     (tmp_path / "cfg.toml").write_text("fc2 = 3.0\n")  # parent of the venv
     monkeypatch.setenv("VIRTUAL_ENV", str(venv))
-    assert sf.parse_config({"config_file_path": "cfg.toml"}).fc2 == 3.0
+    assert load({"config_file_path": "cfg.toml"}).fc2 == 3.0
+
+
+def test_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_SIGNAL_FILTER_FC2", "9.0")
+    monkeypatch.setenv("INFLUXDB3_SIGNAL_FILTER_ORDER", "3")
+
+    cfg = load({"sample_rate": "100.0"})
+    assert cfg.fc2 == 9.0
+    assert cfg.order == 3
+
+    overridden = load({"sample_rate": "100.0", "fc2": "5.0"})
+    assert overridden.fc2 == 5.0
+    assert overridden.order == 3
+
+
+def test_config_file_path_comes_from_the_environment(tmp_path, monkeypatch):
+    toml = tmp_path / "cfg.toml"
+    toml.write_text("fc2 = 9.0\n")
+    monkeypatch.setenv("INFLUXDB3_SIGNAL_FILTER_CONFIG_FILE_PATH", str(toml))
+
+    assert load({"sample_rate": "100.0"}).fc2 == 9.0
+
+
+def test_affix_none_writes_into_the_source_field():
+    """A blank argument reads as unset, so "none" is how you ask for no affix."""
+    assert load({"fc2": "5", "field_suffix": ""}).field_suffix == "_filtered"
+
+    in_place = load({"fc2": "5", "field_suffix": "none"})
+    assert in_place.field_suffix == ""
+    assert sf.resolve_output_field(in_place, "value") == "value"
+    assert sf.loop_hazard_fields(in_place) == ["value"]
 
 
 def test_loop_hazard_detection():
-    hazard = sf.parse_config({"fc2": "5", "field_suffix": ""})
-    assert sf.loop_hazard_fields(hazard) == ["value"]
-    assert sf.loop_hazard_fields(sf.parse_config({"fc2": "5"})) == []
-    other_db = sf.parse_config(
-        {"fc2": "5", "field_suffix": "", "output_target_database": "elsewhere"}
-    )
+    # the trigger reads the field the filter writes back
+    same_name = {"fc2": "5", "input_fields": "value_filtered", "output_field": "value"}
+    assert sf.loop_hazard_fields(load(same_name)) == ["value_filtered"]
+    assert sf.loop_hazard_fields(load({"fc2": "5"})) == []
+    other_db = load({**same_name, "output_target_database": "elsewhere"})
     assert sf.loop_hazard_fields(other_db) == []
-    other_meas = sf.parse_config(
-        {"fc2": "5", "field_suffix": "", "input_measurement": "signal",
-         "output_measurement": "signal_out"}
+    other_meas = load(
+        {**same_name, "input_measurement": "signal", "output_measurement": "signal_out"}
     )
     assert sf.loop_hazard_fields(other_meas) == []
     # output_measurement set but input unrestricted: rows in the output
     # measurement still loop back, so the hazard stands.
-    all_tables = sf.parse_config(
-        {"fc2": "5", "field_suffix": "", "output_measurement": "signal_out"}
-    )
-    assert sf.loop_hazard_fields(all_tables) == ["value"]
+    all_tables = load({**same_name, "output_measurement": "signal_out"})
+    assert sf.loop_hazard_fields(all_tables) == ["value_filtered"]
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +406,7 @@ def test_preset_matrix_matches_scipy(prototype, filter_type):
     else:
         args["fc1"], args["fc2"] = "2.0", "8.0"
         wn = [2.0, 8.0]
-    cfg = sf.parse_config(args)
+    cfg = load(args)
     sos, coeff_hash = sf.design_filter(cfg, 100.0)
     if prototype == "butter":
         expected = sp_signal.butter(4, wn, btype=filter_type, output="sos", fs=100.0)
@@ -377,7 +419,7 @@ def test_preset_matrix_matches_scipy(prototype, filter_type):
 
 
 def test_design_memoized():
-    cfg = sf.parse_config(BASE_ARGS)
+    cfg = load(BASE_ARGS)
     sos_a, hash_a = sf.design_filter(cfg, 100.0)
     sos_b, hash_b = sf.design_filter(cfg, 100.0)
     assert sos_a is sos_b
@@ -385,30 +427,30 @@ def test_design_memoized():
 
 
 def test_coeff_hash_changes_with_fs_and_params():
-    cfg = sf.parse_config(BASE_ARGS)
+    cfg = load(BASE_ARGS)
     _, hash_100 = sf.design_filter(cfg, 100.0)
     _, hash_50 = sf.design_filter(cfg, 50.0)
     assert hash_100 != hash_50
-    cfg2 = sf.parse_config({**BASE_ARGS, "order": "2"})
+    cfg2 = load({**BASE_ARGS, "order": "2"})
     _, hash_o2 = sf.design_filter(cfg2, 100.0)
     assert hash_o2 != hash_100
 
 
 def test_nyquist_rejected():
-    cfg = sf.parse_config({"fc2": "6.0"})
+    cfg = load({"fc2": "6.0"})
     with pytest.raises(ValueError, match="fs/2"):
         sf.design_iir(cfg, 10.0)
 
 
 def test_unstable_manual_sos_rejected():
     # z^2 - 2.5z + 1 has poles at 2.0 and 0.5 -> unstable
-    cfg = sf.parse_config({"design_type": "manual", "sos": "[[1, 0, 0, 1, -2.5, 1]]"})
+    cfg = load({"design_type": "manual", "sos": "[[1, 0, 0, 1, -2.5, 1]]"})
     with pytest.raises(ValueError, match="unstable"):
         sf.design_iir(cfg, None)
 
 
 def test_stable_manual_sos_accepted():
-    cfg = sf.parse_config({"design_type": "manual", "sos": "[[0.2, 0.4, 0.2, 1, -0.4, 0.2]]"})
+    cfg = load({"design_type": "manual", "sos": "[[0.2, 0.4, 0.2, 1, -0.4, 0.2]]"})
     sos = sf.design_iir(cfg, None)
     assert sos.shape == (1, 6)
 
@@ -739,8 +781,12 @@ def test_config_error_logged_not_raised():
 
 def test_loop_hazard_warning_emitted():
     local = FakeLocal()
-    run(local, make_rows(uniform_times(20), [1.0] * 20), args={**BASE_ARGS, "field_suffix": ""})
-    assert any("write loop" in w for w in local.warns)
+    run(
+        local,
+        make_rows(uniform_times(20), [1.0] * 20, field="value_filtered"),
+        args={**BASE_ARGS, "input_fields": "value_filtered", "output_field": "value"},
+    )
+    assert any("replace the source samples" in w for w in local.warns)
 
 
 def test_summary_logged():

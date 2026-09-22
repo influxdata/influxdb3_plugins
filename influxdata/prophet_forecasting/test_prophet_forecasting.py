@@ -370,7 +370,7 @@ def test_missing_required_argument_is_reported():
     assert not local.writes
 
 
-def test_toml_config_replaces_trigger_arguments(tmp_path):
+def test_toml_config_overrides_trigger_arguments(tmp_path):
     (tmp_path / "cfg.toml").write_text(
         "\n".join(
             [
@@ -384,14 +384,21 @@ def test_toml_config_replaces_trigger_arguments(tmp_path):
                 'unique_suffix = "toml_v1"',
                 'inferred_freq = "1h"',
                 'holiday_country_names = ["US"]',
-                'target_database = "forecast_db"',
             ]
         )
     )
     local = FakeLocal(rows())
-    pf.process_scheduled_call(local, CALL_TIME, {"config_file_path": "cfg.toml"})
+    pf.process_scheduled_call(
+        local,
+        CALL_TIME,
+        {
+            "config_file_path": "cfg.toml",
+            "unique_suffix": "arg_v1",
+            "target_database": "arg_db",
+        },
+    )
 
-    assert [database for database, _ in local.writes] == ["forecast_db"] * 6
+    assert [database for database, _ in local.writes] == ["arg_db"] * 6
     assert local.writes[0][1].tags["model_version"] == "toml_v1"
     assert FakeProphet.instances[0].countries == ["US"]
 
@@ -400,6 +407,33 @@ def test_non_toml_config_path_is_rejected():
     local = FakeLocal(rows())
     pf.process_scheduled_call(local, CALL_TIME, {"config_file_path": "cfg.txt"})
     assert "expected a .toml file" in local.errors[-1]
+
+
+def test_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_UNIQUE_SUFFIX", "env_v1")
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_TARGET_DATABASE", "env_db")
+    args = dict(BASE_ARGS)
+    args.pop("unique_suffix")
+
+    local = FakeLocal(rows())
+    pf.process_scheduled_call(local, CALL_TIME, args)
+    assert local.writes and local.writes[0][1].tags["model_version"] == "env_v1"
+    assert all(database == "env_db" for database, _ in local.writes)
+
+    local = FakeLocal(rows())
+    run_scheduled(local, target_database="arg_db")
+    assert local.writes and local.writes[0][1].tags["model_version"] == "v1"
+    assert all(database == "arg_db" for database, _ in local.writes)
+
+
+def test_config_file_path_comes_from_the_environment(tmp_path, monkeypatch):
+    (tmp_path / "cfg.toml").write_text('unique_suffix = "toml_v1"\n')
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_CONFIG_FILE_PATH", "cfg.toml")
+
+    local = FakeLocal(rows())
+    run_scheduled(local)
+
+    assert local.writes and local.writes[0][1].tags["model_version"] == "toml_v1"
 
 
 # ---------------------------------------------------------------------------
@@ -859,6 +893,59 @@ def test_http_request_writes_the_forecast():
     )
 
 
+def test_http_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_TARGET_DATABASE", "env_db")
+    local = FakeLocal(rows())
+
+    response = pf.process_request(local, {}, {}, json.dumps(http_body()))
+
+    assert "Forecast written" in response["message"]
+    assert all(database == "env_db" for database, _ in local.writes)
+
+
+def test_a_header_overrides_the_body_and_a_query_parameter_overrides_both():
+    """The request's own layers, lowest first: body, headers, query string."""
+    local = FakeLocal(rows())
+    headers = {"X-Influxdb3-Prophet-Forecasting-Unique-Suffix": "header_v1"}
+
+    pf.process_request(local, {}, headers, json.dumps(http_body()))
+
+    assert local.writes and local.writes[0][1].tags["model_version"] == "header_v1"
+
+    local = FakeLocal(rows())
+    pf.process_request(
+        local,
+        {"unique_suffix": "query_v1"},
+        headers,
+        json.dumps(http_body()),
+    )
+
+    assert local.writes and local.writes[0][1].tags["model_version"] == "query_v1"
+
+
+def test_headers_the_plugin_did_not_ask_for_are_ignored():
+    local = FakeLocal(rows())
+    headers = {
+        "User-Agent": "curl/8.7.1",
+        "X-Influxdb3-Prophet-Forecasting-Config-File-Path": "cfg.toml",
+    }
+
+    response = pf.process_request(local, {}, headers, json.dumps(http_body()))
+
+    assert "Forecast written" in response["message"]
+
+
+def test_an_unknown_query_parameter_is_refused():
+    local = FakeLocal(rows())
+
+    response = pf.process_request(
+        local, {"unique_suffx": "typo"}, {}, json.dumps(http_body())
+    )
+
+    assert "unique_suffx" in response["message"]
+    assert not local.writes
+
+
 @pytest.mark.parametrize(
     "body, expected",
     [
@@ -876,10 +963,11 @@ def test_http_request_rejections(body, expected):
     assert not local.writes
 
 
-def test_http_null_means_not_set_and_body_is_not_a_file_path():
+def test_http_null_means_not_set():
     local = FakeLocal(rows())
-    body = http_body(validation_window=None, config_file_path="cfg.toml")
-    response = pf.process_request(local, {}, {}, json.dumps(body))
+    response = pf.process_request(
+        local, {}, {}, json.dumps(http_body(validation_window=None))
+    )
 
     assert "Forecast written" in response["message"]
 
@@ -887,9 +975,11 @@ def test_http_null_means_not_set_and_body_is_not_a_file_path():
 @pytest.mark.parametrize(
     "request_body, expected",
     [
-        ("", "No request body provided"),
+        ("", "is required"),  # an empty body sets nothing, so a required value is missing
         ("not json", "Expecting value"),
         ('["a"]', "must be a JSON object"),
+        (json.dumps({"config_file_path": "cfg.toml"}), "may not set 'config_file_path'"),
+        (json.dumps({"measuremnt": "temperature"}), "may not set 'measuremnt'"),
     ],
 )
 def test_http_bad_bodies_are_reported(request_body, expected):
@@ -898,6 +988,43 @@ def test_http_bad_bodies_are_reported(request_body, expected):
 
     assert expected in response["message"]
     assert not local.writes
+
+
+def test_http_trigger_arguments_are_the_defaults_the_body_overrides():
+    local = FakeLocal(rows())
+    args = {
+        "measurement": "temperature",
+        "field": "value",
+        "forecast_horizont": "6h",
+        "tag_values": "region:us-west",
+        "target_measurement": "temperature_forecast",
+        "target_database": "arg_db",
+        "inferred_freq": "1h",
+    }
+    window = {
+        key: http_body()[key] for key in ("unique_suffix", "start_time", "end_time")
+    }
+    body = dict(window, target_database="body_db")
+
+    response = pf.process_request(local, {}, {}, json.dumps(body), args)
+
+    assert "Forecast written" in response["message"]
+    assert [database for database, _ in local.writes] == ["body_db"] * 6
+
+
+def test_http_trigger_reads_the_toml_file_it_names(tmp_path):
+    (tmp_path / "cfg.toml").write_text(
+        'target_database = "toml_db"\nunique_suffix = "toml_v1"\n'
+    )
+    local = FakeLocal(rows())
+
+    response = pf.process_request(
+        local, {}, {}, json.dumps(http_body()), {"config_file_path": "cfg.toml"}
+    )
+
+    assert "Forecast written" in response["message"]
+    assert [database for database, _ in local.writes] == ["toml_db"] * 6
+    assert local.writes[0][1].tags["model_version"] == "http_v1"
 
 
 def test_http_save_mode_loads_the_stored_model(tmp_path):
@@ -924,8 +1051,13 @@ def test_metadata_docstring_is_valid_json():
     metadata = json.loads(ast.get_docstring(ast.parse(source)))
 
     assert metadata["plugin_type"] == ["scheduled", "http"]
-    for section in ("scheduled_args_config", "http_body_config"):
+    for section in ("scheduled_args_config", "http_args_config", "http_body_config"):
         names = [entry["name"] for entry in metadata[section]]
         assert len(names) == len(set(names))
         for entry in metadata[section]:
             assert set(entry) == {"name", "example", "description", "required"}
+
+    body_keys = {entry["name"] for entry in metadata["http_body_config"]}
+    args_keys = {entry["name"] for entry in metadata["http_args_config"]}
+    assert body_keys <= args_keys
+    assert "config_file_path" in args_keys - body_keys

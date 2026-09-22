@@ -204,10 +204,14 @@ ENRICHED_COLUMNS = {**GPS_COLUMNS, "geo_country": "Utf8", "geo_city": "Utf8"}
 
 
 def load(args, influxdb3_local=None):
-    """The write trigger's configuration: its arguments, then the file they name."""
+    """The write trigger's configuration: the environment, its arguments, then the file."""
+    config_file_path = args.get("config_file_path") or plugin.parse_env(
+        plugin.env_spec("config_file_path")
+    ).get("config_file_path")
     cfg = plugin.load_config(
+        plugin.parse_env(plugin.WRITES_ENV),
         plugin.parse_trigger_args(args),
-        plugin.parse_toml(args.get("config_file_path")),
+        plugin.parse_toml(config_file_path),
         validators=plugin.SETTING_VALIDATORS,
     )
     return plugin.prepare_config(influxdb3_local or FakeLocal(), cfg, "tid")
@@ -262,6 +266,28 @@ def test_a_blank_argument_leaves_the_default_in_place():
     cfg = config(output_mode="", unknown_value=" ")
 
     assert (cfg["output_mode"], cfg["unknown_value"]) == ("field", "UNKNOWN")
+
+
+def test_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_SOURCE_MEASUREMENTS", "gps")
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_OUTPUT_COLUMNS", "country:geo_country")
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_UNKNOWN_VALUE", "from-env")
+
+    cfg = load({})
+    assert cfg["source_measurements"] == ["gps"]
+    assert cfg["unknown_value"] == "from-env"
+
+    overridden = load({"unknown_value": "from-args"})
+    assert overridden["unknown_value"] == "from-args"
+    assert overridden["source_measurements"] == ["gps"]
+
+
+def test_config_file_path_comes_from_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text('unknown_value = "from-toml"\n')
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_CONFIG_FILE_PATH", "geo.toml")
+
+    assert config()["unknown_value"] == "from-toml"
 
 
 def test_keyword_settings_ignore_case_and_surrounding_whitespace():
@@ -881,6 +907,71 @@ def test_a_config_file_named_on_the_trigger_holds_the_defaults(
 
     unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][-1]
     assert unresolved.fields["geo_country"] == "from-body"
+
+
+def test_http_environment_is_the_lowest_layer(resolver, monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_UNKNOWN_VALUE", "from-env")
+    influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000, lat=10.0)])
+
+    _, status = backfill(influxdb3_local)
+
+    assert status == 200
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][0]
+    assert unresolved.fields["geo_country"] == "from-env"
+
+    backfill(influxdb3_local, unknown_value="from-body")
+
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][-1]
+    assert unresolved.fields["geo_country"] == "from-body"
+
+
+def test_a_header_overrides_the_body_and_a_query_parameter_overrides_both(resolver):
+    """The request's own layers, lowest first: body, headers, query string."""
+    influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000, lat=10.0)])
+    body = json.dumps({**BASE_BODY, "unknown_value": "from-body"})
+    headers = {"X-Influxdb3-Geo-Enrichment-Unknown-Value": "from-header"}
+
+    _, status = plugin.process_request(influxdb3_local, None, headers, body, None)
+
+    assert status == 200
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][0]
+    assert unresolved.fields["geo_country"] == "from-header"
+
+    plugin.process_request(
+        influxdb3_local, {"unknown_value": "from-query"}, headers, body, None
+    )
+
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][-1]
+    assert unresolved.fields["geo_country"] == "from-query"
+
+
+def test_headers_the_plugin_did_not_ask_for_are_ignored(resolver):
+    """A client sends headers of its own on every request, and the path names a
+    layer, so a header spelling it is dropped like any other unknown name."""
+    influxdb3_local = backfill_client([unenriched(1_000)])
+    headers = {
+        "User-Agent": "curl/8.7.1",
+        "X-Influxdb3-Geo-Enrichment-Config-File-Path": "geo.toml",
+    }
+
+    _, status = plugin.process_request(
+        influxdb3_local, None, headers, json.dumps(BASE_BODY), None
+    )
+
+    assert status == 200
+    assert influxdb3_local.records()[0].fields["geo_city"] == "Moscow"
+
+
+def test_an_unknown_query_parameter_is_refused(resolver):
+    influxdb3_local = backfill_client([unenriched(1_000)])
+
+    response, status = plugin.process_request(
+        influxdb3_local, {"unknown_valu": "typo"}, None, json.dumps(BASE_BODY), None
+    )
+
+    assert status == 400
+    assert "unknown_valu" in response["error"]
+    assert influxdb3_local.writes == []
 
 
 def test_a_config_file_path_in_the_body_is_refused(resolver, monkeypatch, tmp_path):

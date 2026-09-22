@@ -3,7 +3,8 @@
 #   --trigger-arguments config_file_path=<relative_path>
 # Example: If the file is at /plugins/configs/prophet_forecasting_scheduler.toml, use
 #   config_file_path=configs/prophet_forecasting_scheduler.toml
-# When this file is used, it replaces the inline trigger arguments.
+# Values in this file override the inline trigger arguments; an argument the
+# file does not set still applies.
 
 ########## Required Parameters ##########
 # InfluxDB measurement to query for historical data

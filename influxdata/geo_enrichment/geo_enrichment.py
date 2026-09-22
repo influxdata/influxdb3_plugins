@@ -607,6 +607,8 @@ from influxdata_plugin_utils.sources import (
     KeySpec,
     parse_env,
     parse_json_body,
+    parse_query_parameters,
+    parse_request_headers,
     parse_toml,
     parse_trigger_args,
 )
@@ -1516,16 +1518,33 @@ def env_spec(*names: str) -> KeySpec:
     return KeySpec(allowlist=tuple(rename), rename=rename)
 
 
-WRITES_ENV = env_spec(
-    *(name for validator in SETTING_VALIDATORS for name in validator.names)
-)
-REQUEST_ENV = env_spec(
-    *(
+REQUEST_KEYS = tuple(
+    dict.fromkeys(
         name
         for validator in SETTING_VALIDATORS + BACKFILL_VALIDATORS
         for name in validator.names
     )
 )
+
+WRITES_ENV = env_spec(
+    *(name for validator in SETTING_VALIDATORS for name in validator.names)
+)
+REQUEST_ENV = env_spec(*REQUEST_KEYS)
+
+HEADER_PREFIX = "X-Influxdb3-Geo-Enrichment-"
+
+
+def header_name(name: str) -> str:
+    """The header a setting is spelled as: ``X-Influxdb3-Geo-Enrichment-Lat-Field``."""
+    return HEADER_PREFIX + name.replace("_", "-")
+
+
+BODY_KEYS = KeySpec(allowlist=REQUEST_KEYS, unknown="reject")
+HEADER_KEYS = KeySpec(
+    allowlist=tuple(header_name(name) for name in REQUEST_KEYS),
+    rename={header_name(name): name for name in REQUEST_KEYS},
+)
+QUERY_KEYS = KeySpec(allowlist=REQUEST_KEYS, unknown="reject")
 
 
 def prepare_config(influxdb3_local, cfg, task_id: str):
@@ -1929,17 +1948,9 @@ def process_request(
             parse_env(REQUEST_ENV),
             parse_trigger_args(args),
             parse_toml(config_file_path),
-            parse_json_body(
-                request_body,
-                KeySpec(
-                    allowlist=[
-                        name
-                        for validator in SETTING_VALIDATORS + BACKFILL_VALIDATORS
-                        for name in validator.names
-                    ],
-                    unknown="reject",
-                ),
-            ),
+            parse_json_body(request_body, BODY_KEYS),
+            parse_request_headers(request_headers, HEADER_KEYS),
+            parse_query_parameters(query_parameters, QUERY_KEYS),
             validators=SETTING_VALIDATORS + BACKFILL_VALIDATORS,
         )
         prepare_config(influxdb3_local, cfg, task_id)

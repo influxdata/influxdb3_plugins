@@ -409,6 +409,34 @@ def test_non_toml_config_path_is_rejected():
     assert "expected a .toml file" in local.errors[-1]
 
 
+def test_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_UNIQUE_SUFFIX", "env_v1")
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_TARGET_DATABASE", "env_db")
+    args = dict(BASE_ARGS)
+    args.pop("unique_suffix")  # only the environment sets it
+
+    local = FakeLocal(rows())
+    pf.process_scheduled_call(local, CALL_TIME, args)
+    assert local.writes and local.writes[0][1].tags["model_version"] == "env_v1"
+    assert all(database == "env_db" for database, _ in local.writes)
+
+    # a trigger argument overrides the environment
+    local = FakeLocal(rows())
+    run_scheduled(local, target_database="arg_db")
+    assert local.writes and local.writes[0][1].tags["model_version"] == "v1"
+    assert all(database == "arg_db" for database, _ in local.writes)
+
+
+def test_config_file_path_comes_from_the_environment(tmp_path, monkeypatch):
+    (tmp_path / "cfg.toml").write_text('unique_suffix = "toml_v1"\n')
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_CONFIG_FILE_PATH", "cfg.toml")
+
+    local = FakeLocal(rows())
+    run_scheduled(local)
+
+    assert local.writes and local.writes[0][1].tags["model_version"] == "toml_v1"
+
+
 # ---------------------------------------------------------------------------
 # Query building
 # ---------------------------------------------------------------------------
@@ -864,6 +892,16 @@ def test_http_request_writes_the_forecast():
     assert written_times(local) == list(
         pd.date_range("2026-08-24 12:00", periods=6, freq="1h")
     )
+
+
+def test_http_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_TARGET_DATABASE", "env_db")
+    local = FakeLocal(rows())
+
+    response = pf.process_request(local, {}, {}, json.dumps(http_body()))
+
+    assert "Forecast written" in response["message"]
+    assert all(database == "env_db" for database, _ in local.writes)
 
 
 @pytest.mark.parametrize(

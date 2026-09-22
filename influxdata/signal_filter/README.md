@@ -86,6 +86,15 @@ The final output field name is `{field_prefix}{output_field or source_field}{fie
 — by default, `value` becomes `value_filtered`. The raw input field is never copied
 to the output.
 
+### Environment variables
+
+Every parameter can also come from an environment variable named
+`INFLUXDB3_SIGNAL_FILTER_<PARAMETER>` in upper case — for example,
+`INFLUXDB3_SIGNAL_FILTER_FC` sets `fc`. The environment is the lowest layer: a
+trigger argument overrides it, and the TOML file overrides both.
+`INFLUXDB3_SIGNAL_FILTER_CONFIG_FILE_PATH` names the TOML file when the trigger
+doesn't carry a `config_file_path` argument.
+
 ### TOML configuration
 
 To use a TOML configuration file, set the `PLUGIN_DIR` environment variable and

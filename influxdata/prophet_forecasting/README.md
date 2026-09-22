@@ -88,6 +88,10 @@ Scheduled triggers only:
 
 Each channel listed in `senders` needs its own keys (`slack_webhook_url`, `discord_webhook_url`, `http_webhook_url`, `twilio_sid`, `twilio_token`, `twilio_from_number`, `twilio_to_number`, and the optional `*_headers`). See the [influxdata/notifier plugin](../notifier/README.md).
 
+### Environment variables
+
+Every parameter can also come from an environment variable named `INFLUXDB3_PROPHET_FORECASTING_<PARAMETER>` in upper case — for example, `INFLUXDB3_PROPHET_FORECASTING_MEASUREMENT` sets `measurement`, and `INFLUXDB3_PROPHET_FORECASTING_TWILIO_TOKEN` keeps a channel credential out of the trigger. `influxdb3_auth_token` keeps its own variable, `INFLUXDB3_AUTH_TOKEN`. The environment is the lowest layer: a trigger argument overrides it, the TOML file overrides both, and on the HTTP trigger the request body overrides them all. `INFLUXDB3_PROPHET_FORECASTING_CONFIG_FILE_PATH` names the TOML file when the trigger doesn't carry a `config_file_path` argument.
+
 ### TOML configuration
 
 | Parameter          | Type   | Default | Description                                                                      |

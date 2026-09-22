@@ -306,6 +306,39 @@ def test_config_accepts_absolute_toml_path(client, monkeypatch, tmp_path):
     assert calls and all(hostname == "abs-path" for _, hostname in calls)
 
 
+def test_config_reads_settings_from_the_environment(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_HOSTNAME", "from-env")
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_INCLUDE_CPU", "false")
+
+    process_scheduled_call(client, None, None)
+
+    assert [name for name, _ in calls] == ["memory", "disk", "network"]
+    assert all(hostname == "from-env" for _, hostname in calls)
+
+
+def test_config_inline_args_override_the_environment(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_HOSTNAME", "from-env")
+
+    process_scheduled_call(client, None, {"hostname": "from-args"})
+
+    assert calls and all(hostname == "from-args" for _, hostname in calls)
+
+
+def test_config_file_path_comes_from_the_environment(client, monkeypatch, plugin_dir):
+    (plugin_dir / "sm.toml").write_text('hostname = "from-toml"\n')
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_CONFIG_FILE_PATH", "sm.toml")
+
+    process_scheduled_call(client, None, None)
+
+    assert calls and all(hostname == "from-toml" for _, hostname in calls)
+
+
 # --------------------------------------------------------------------------
 # Field typing helpers
 # --------------------------------------------------------------------------

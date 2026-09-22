@@ -729,6 +729,32 @@ AUTH_TOKEN_ENV = KeySpec(
     allowlist=["INFLUXDB3_AUTH_TOKEN"],
     rename={"INFLUXDB3_AUTH_TOKEN": "influxdb3_auth_token"},
 )
+
+ENV_PREFIX = "INFLUXDB3_PROPHET_FORECASTING_"
+
+
+def env_spec(*names: str) -> KeySpec:
+    """Read the named settings from ``INFLUXDB3_PROPHET_FORECASTING_<SETTING>``.
+
+    The prefix is stripped again, so a variable merges with the same setting
+    coming from a trigger argument, the TOML file or the request body.
+    """
+    rename = {f"{ENV_PREFIX}{name.upper()}": name for name in names}
+    return KeySpec(allowlist=tuple(rename), rename=rename)
+
+
+# the notifier's own settings are passed on rather than validated here
+NOTIFICATION_SETTINGS = ("senders",) + tuple(
+    dict.fromkeys(name for keys in AVAILABLE_SENDERS.values() for name in keys)
+)
+
+SCHEDULED_ENV = env_spec(
+    *(name for validator in SCHEDULED_VALIDATORS for name in validator.names),
+    *NOTIFICATION_SETTINGS,
+)
+HTTP_ENV = env_spec(
+    *(name for validator in HTTP_VALIDATORS for name in validator.names)
+)
 HTTP_BODY_KEYS = KeySpec(
     allowlist=[name for validator in HTTP_VALIDATORS for name in validator.names],
     unknown="reject",
@@ -1619,10 +1645,14 @@ def process_scheduled_call(
     influxdb3_local.info(f"[{task_id}] Starting scheduled forecast at {call_time}")
 
     try:
+        config_file_path = args.get("config_file_path") or parse_env(
+            env_spec("config_file_path")
+        ).get("config_file_path")
         config: Config = load_config(
             parse_env(AUTH_TOKEN_ENV),
+            parse_env(SCHEDULED_ENV),
             parse_trigger_args(args),
-            parse_toml(args.get("config_file_path")),
+            parse_toml(config_file_path),
             validators=SCHEDULED_VALIDATORS,
         )
         prepare_scheduled_config(influxdb3_local, config, call_time, task_id)
@@ -1719,10 +1749,14 @@ def process_request(
     influxdb3_local.info(f"[{task_id}] Received forecasting request")
 
     try:
+        config_file_path = args.get("config_file_path") or parse_env(
+            env_spec("config_file_path")
+        ).get("config_file_path")
         config: Config = load_config(
             parse_env(AUTH_TOKEN_ENV),
+            parse_env(HTTP_ENV),
             parse_trigger_args(args),
-            parse_toml(args.get("config_file_path")),
+            parse_toml(config_file_path),
             parse_json_body(request_body, HTTP_BODY_KEYS),
             validators=HTTP_VALIDATORS,
         )

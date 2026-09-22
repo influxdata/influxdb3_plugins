@@ -31,6 +31,10 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 
 Boolean parameters accept `true`/`false`, `1`/`0`, `yes`/`no`, and `on`/`off`. A value the plugin cannot interpret is reported in the logs and the run collects nothing, so fix the trigger arguments and the next run recovers.
 
+### Environment variables
+
+Every parameter can also come from an environment variable named `INFLUXDB3_SYSTEM_METRICS_<PARAMETER>` in upper case — for example, `INFLUXDB3_SYSTEM_METRICS_HOSTNAME` sets `hostname`. The environment is the lowest layer: a trigger argument overrides it, and the TOML file overrides both. `INFLUXDB3_SYSTEM_METRICS_CONFIG_FILE_PATH` names the TOML file when the trigger doesn't carry a `config_file_path` argument.
+
 ### TOML configuration
 
 | Parameter          | Type   | Default | Description                                                                      |

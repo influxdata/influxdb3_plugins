@@ -54,7 +54,12 @@ import uuid
 import psutil
 from influxdata_plugin_utils.config import Config, Validator, load_config
 from influxdata_plugin_utils.parsing import parse_bool, parse_int
-from influxdata_plugin_utils.sources import KeySpec, parse_toml, parse_trigger_args
+from influxdata_plugin_utils.sources import (
+    KeySpec,
+    parse_env,
+    parse_toml,
+    parse_trigger_args,
+)
 from influxdata_plugin_utils.write import build_line_typed, write_data
 
 SETTING_VALIDATORS: list = [
@@ -71,6 +76,21 @@ SETTINGS = KeySpec(
         dict.fromkeys(name for rule in SETTING_VALIDATORS for name in rule.names)
     )
 )
+
+ENV_PREFIX = "INFLUXDB3_SYSTEM_METRICS_"
+
+
+def env_spec(*names: str) -> KeySpec:
+    """Read the named settings from ``INFLUXDB3_SYSTEM_METRICS_<SETTING>``.
+
+    The prefix is stripped again, so a variable merges with the same setting
+    coming from a trigger argument or the TOML file.
+    """
+    rename = {f"{ENV_PREFIX}{name.upper()}": name for name in names}
+    return KeySpec(allowlist=tuple(rename), rename=rename)
+
+
+ENV_SETTINGS = env_spec(*SETTINGS.allowlist)
 
 # Cached psutil counters, used to derive rates and shares between two runs
 _DISK_IO_STATE_KEY = "system_metrics:disk_io"
@@ -492,9 +512,13 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
     args = args or {}
 
     try:
+        config_file_path = args.get("config_file_path") or parse_env(
+            env_spec("config_file_path")
+        ).get("config_file_path")
         config: Config = load_config(
+            parse_env(ENV_SETTINGS),
             parse_trigger_args(args, SETTINGS),
-            parse_toml(args.get("config_file_path"), SETTINGS),
+            parse_toml(config_file_path, SETTINGS),
             validators=SETTING_VALIDATORS,
         )
     except Exception as e:

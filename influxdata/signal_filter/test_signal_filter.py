@@ -151,10 +151,14 @@ def written_times(local):
 
 
 def load(args):
-    """The write trigger's configuration: its arguments, then the file they name."""
+    """The write trigger's configuration: the environment, its arguments, then the file."""
+    config_file_path = args.get("config_file_path") or sf.parse_env(
+        sf.env_spec("config_file_path")
+    ).get("config_file_path")
     cfg = sf.load_config(
+        sf.parse_env(sf.ENV_SETTINGS),
         sf.parse_trigger_args(args, sf.SETTINGS),
-        sf.parse_toml(args.get("config_file_path"), sf.SETTINGS),
+        sf.parse_toml(config_file_path, sf.SETTINGS),
         validators=sf.SETTING_VALIDATORS,
     )
     return sf.prepare_config(sf.Config(sf.validate(cfg, sf.design_validators(cfg))))
@@ -300,6 +304,28 @@ def test_toml_relative_path_virtual_env_fallback(tmp_path, monkeypatch):
     (tmp_path / "cfg.toml").write_text("fc2 = 3.0\n")  # parent of the venv
     monkeypatch.setenv("VIRTUAL_ENV", str(venv))
     assert load({"config_file_path": "cfg.toml"}).fc2 == 3.0
+
+
+def test_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_SIGNAL_FILTER_FC2", "9.0")
+    monkeypatch.setenv("INFLUXDB3_SIGNAL_FILTER_ORDER", "3")
+
+    cfg = load({"sample_rate": "100.0"})
+    assert cfg.fc2 == 9.0
+    assert cfg.order == 3
+
+    # an inline argument overrides the environment; an untouched variable stands
+    overridden = load({"sample_rate": "100.0", "fc2": "5.0"})
+    assert overridden.fc2 == 5.0
+    assert overridden.order == 3
+
+
+def test_config_file_path_comes_from_the_environment(tmp_path, monkeypatch):
+    toml = tmp_path / "cfg.toml"
+    toml.write_text("fc2 = 9.0\n")
+    monkeypatch.setenv("INFLUXDB3_SIGNAL_FILTER_CONFIG_FILE_PATH", str(toml))
+
+    assert load({"sample_rate": "100.0"}).fc2 == 9.0
 
 
 def test_affix_none_writes_into_the_source_field():

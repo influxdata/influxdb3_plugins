@@ -521,6 +521,8 @@ from influxdata_plugin_utils.sources import (
     KeySpec,
     parse_env,
     parse_json_body,
+    parse_query_parameters,
+    parse_request_headers,
     parse_toml,
     parse_trigger_args,
 )
@@ -743,7 +745,6 @@ def env_spec(*names: str) -> KeySpec:
     return KeySpec(allowlist=tuple(rename), rename=rename)
 
 
-# the notifier's own settings are passed on rather than validated here
 NOTIFICATION_SETTINGS = ("senders",) + tuple(
     dict.fromkeys(name for keys in AVAILABLE_SENDERS.values() for name in keys)
 )
@@ -752,13 +753,25 @@ SCHEDULED_ENV = env_spec(
     *(name for validator in SCHEDULED_VALIDATORS for name in validator.names),
     *NOTIFICATION_SETTINGS,
 )
-HTTP_ENV = env_spec(
-    *(name for validator in HTTP_VALIDATORS for name in validator.names)
+HTTP_KEYS = tuple(
+    dict.fromkeys(name for validator in HTTP_VALIDATORS for name in validator.names)
 )
-HTTP_BODY_KEYS = KeySpec(
-    allowlist=[name for validator in HTTP_VALIDATORS for name in validator.names],
-    unknown="reject",
+
+HEADER_PREFIX = "X-Influxdb3-Prophet-Forecasting-"
+
+
+def header_name(name: str) -> str:
+    """The header a setting is spelled as, prefixed and hyphenated."""
+    return HEADER_PREFIX + name.replace("_", "-")
+
+
+HTTP_ENV = env_spec(*HTTP_KEYS)
+HTTP_BODY_KEYS = KeySpec(allowlist=HTTP_KEYS, unknown="reject")
+HTTP_HEADER_KEYS = KeySpec(
+    allowlist=tuple(header_name(name) for name in HTTP_KEYS),
+    rename={header_name(name): name for name in HTTP_KEYS},
 )
+HTTP_QUERY_KEYS = KeySpec(allowlist=HTTP_KEYS, unknown="reject")
 
 
 def prepare_scheduled_config(
@@ -1734,12 +1747,14 @@ def process_request(
 
     Args:
         influxdb3_local: InfluxDB client instance.
-        query_parameters: HTTP query parameters (unused).
-        request_headers: HTTP request headers (unused).
+        query_parameters: Query-string parameters, spelled as the settings are;
+            the highest layer.
+        request_headers: Headers spelled X-Influxdb3-Prophet-Forecasting-<SETTING>,
+            overriding the body and overridden by the query string.
         request_body: JSON body holding the forecast configuration. See the
             http_body_config section of the plugin metadata for the supported keys.
         args: Trigger arguments, and the TOML file they name, as the defaults
-            the body overrides.
+            the request overrides.
 
     Returns:
         dict: {"message": <outcome>}.
@@ -1758,6 +1773,8 @@ def process_request(
             parse_trigger_args(args),
             parse_toml(config_file_path),
             parse_json_body(request_body, HTTP_BODY_KEYS),
+            parse_request_headers(request_headers, HTTP_HEADER_KEYS),
+            parse_query_parameters(query_parameters, HTTP_QUERY_KEYS),
             validators=HTTP_VALIDATORS,
         )
         prepare_http_config(influxdb3_local, config, task_id)

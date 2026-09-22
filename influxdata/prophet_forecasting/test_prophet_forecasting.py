@@ -413,14 +413,13 @@ def test_environment_is_the_lowest_layer(monkeypatch):
     monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_UNIQUE_SUFFIX", "env_v1")
     monkeypatch.setenv("INFLUXDB3_PROPHET_FORECASTING_TARGET_DATABASE", "env_db")
     args = dict(BASE_ARGS)
-    args.pop("unique_suffix")  # only the environment sets it
+    args.pop("unique_suffix")
 
     local = FakeLocal(rows())
     pf.process_scheduled_call(local, CALL_TIME, args)
     assert local.writes and local.writes[0][1].tags["model_version"] == "env_v1"
     assert all(database == "env_db" for database, _ in local.writes)
 
-    # a trigger argument overrides the environment
     local = FakeLocal(rows())
     run_scheduled(local, target_database="arg_db")
     assert local.writes and local.writes[0][1].tags["model_version"] == "v1"
@@ -902,6 +901,49 @@ def test_http_environment_is_the_lowest_layer(monkeypatch):
 
     assert "Forecast written" in response["message"]
     assert all(database == "env_db" for database, _ in local.writes)
+
+
+def test_a_header_overrides_the_body_and_a_query_parameter_overrides_both():
+    """The request's own layers, lowest first: body, headers, query string."""
+    local = FakeLocal(rows())
+    headers = {"X-Influxdb3-Prophet-Forecasting-Unique-Suffix": "header_v1"}
+
+    pf.process_request(local, {}, headers, json.dumps(http_body()))
+
+    assert local.writes and local.writes[0][1].tags["model_version"] == "header_v1"
+
+    local = FakeLocal(rows())
+    pf.process_request(
+        local,
+        {"unique_suffix": "query_v1"},
+        headers,
+        json.dumps(http_body()),
+    )
+
+    assert local.writes and local.writes[0][1].tags["model_version"] == "query_v1"
+
+
+def test_headers_the_plugin_did_not_ask_for_are_ignored():
+    local = FakeLocal(rows())
+    headers = {
+        "User-Agent": "curl/8.7.1",
+        "X-Influxdb3-Prophet-Forecasting-Config-File-Path": "cfg.toml",
+    }
+
+    response = pf.process_request(local, {}, headers, json.dumps(http_body()))
+
+    assert "Forecast written" in response["message"]
+
+
+def test_an_unknown_query_parameter_is_refused():
+    local = FakeLocal(rows())
+
+    response = pf.process_request(
+        local, {"unique_suffx": "typo"}, {}, json.dumps(http_body())
+    )
+
+    assert "unique_suffx" in response["message"]
+    assert not local.writes
 
 
 @pytest.mark.parametrize(

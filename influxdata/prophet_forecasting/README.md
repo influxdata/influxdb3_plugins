@@ -40,7 +40,7 @@ Set these parameters with `--trigger-arguments` when creating a scheduled trigge
 
 ### HTTP request parameters
 
-Send these parameters as JSON in the HTTP POST request body, which must be a JSON object of at most 10 MB. The body is the last layer: trigger arguments, then the [TOML file](#toml-configuration) they name, then the body, each overriding the one before. A trigger created without arguments is configured by the body alone; one created with them holds the defaults each request overrides only where it names them. A value that arrives empty — a JSON `null` or a blank string — counts as not set, so the trigger's value or the default applies. A key outside the tables below is refused and named in the response, as is `config_file_path` whatever its value, so a misspelling is reported rather than silently dropped.
+Send these parameters as JSON in the HTTP POST request body, which must be a JSON object of at most 10 MB. A request carries three layers of its own — the body, then the headers, then the query string, each overriding the one before — and all three override what the trigger holds: the [environment](#environment-variables), the trigger arguments, then the [TOML file](#toml-configuration) they name. A trigger created without arguments is configured by the request alone; one created with them holds the defaults each request overrides only where it names them. A value that arrives empty — a JSON `null` or a blank string — counts as not set, so the trigger's value or the default applies. A key outside the tables below is refused and named in the response, as is `config_file_path` whatever its value, so a misspelling is reported rather than silently dropped.
 
 | Parameter            | Type          | Default  | Description                                                                                        |
 |----------------------|---------------|----------|----------------------------------------------------------------------------------------------------|
@@ -53,6 +53,20 @@ Send these parameters as JSON in the HTTP POST request body, which must be a JSO
 | `start_time`         | string        | required | Historical window start, ISO 8601 with timezone                                                    |
 | `end_time`           | string        | required | Historical window end, ISO 8601 with timezone. Forecast points are written from this moment onward |
 | `save_mode`          | boolean       | false    | When true, load the saved model for `unique_suffix`, or train and save it when no file exists      |
+
+#### Headers and query parameters
+
+The same names reach the plugin as headers, spelled `X-Influxdb3-Prophet-Forecasting-<PARAMETER>` with underscores written as hyphens (`X-Influxdb3-Prophet-Forecasting-Start-Time` sets `start_time`), and as query-string parameters, spelled exactly like the parameter (`?save_mode=true`). Header names are matched regardless of casing, which RFC 9110 makes meaningless.
+
+```bash
+curl -X POST "http://localhost:8181/api/v3/engine/forecast?save_mode=true" \
+  -H "Authorization: Bearer $INFLUXDB3_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Influxdb3-Prophet-Forecasting-Unique-Suffix: v2" \
+  -d '{"start_time": "2026-08-01T00:00:00Z", "end_time": "2026-08-29T00:00:00Z"}'
+```
+
+A header the plugin does not ask for is ignored, since a client sends headers of its own on every request; an unknown query parameter is refused and named in the response, like an unknown body field. Neither layer can name `config_file_path`, for the reason the body cannot.
 
 ### Advanced parameters
 
@@ -90,7 +104,7 @@ Each channel listed in `senders` needs its own keys (`slack_webhook_url`, `disco
 
 ### Environment variables
 
-Every parameter can also come from an environment variable named `INFLUXDB3_PROPHET_FORECASTING_<PARAMETER>` in upper case — for example, `INFLUXDB3_PROPHET_FORECASTING_MEASUREMENT` sets `measurement`, and `INFLUXDB3_PROPHET_FORECASTING_TWILIO_TOKEN` keeps a channel credential out of the trigger. `influxdb3_auth_token` keeps its own variable, `INFLUXDB3_AUTH_TOKEN`. The environment is the lowest layer: a trigger argument overrides it, the TOML file overrides both, and on the HTTP trigger the request body overrides them all. `INFLUXDB3_PROPHET_FORECASTING_CONFIG_FILE_PATH` names the TOML file when the trigger doesn't carry a `config_file_path` argument.
+Every parameter can also come from an environment variable named `INFLUXDB3_PROPHET_FORECASTING_<PARAMETER>` in upper case — for example, `INFLUXDB3_PROPHET_FORECASTING_MEASUREMENT` sets `measurement`, and `INFLUXDB3_PROPHET_FORECASTING_TWILIO_TOKEN` keeps a channel credential out of the trigger. `influxdb3_auth_token` keeps its own variable, `INFLUXDB3_AUTH_TOKEN`. The environment is the lowest layer: a trigger argument overrides it, the TOML file overrides both, and on the HTTP trigger the request — its body, its headers and its query string — overrides them all. `INFLUXDB3_PROPHET_FORECASTING_CONFIG_FILE_PATH` names the TOML file when the trigger doesn't carry a `config_file_path` argument.
 
 ### TOML configuration
 
@@ -100,7 +114,7 @@ Every parameter can also come from an environment variable named `INFLUXDB3_PROP
 
 *To use a TOML configuration file, set the `PLUGIN_DIR` environment variable and specify the `config_file_path` in the trigger arguments.* This is in addition to the `--plugin-dir` flag when starting InfluxDB 3. Relative paths are resolved against the first directory that is set: `PLUGIN_DIR`, then `INFLUXDB3_PLUGIN_DIR`, then the parent of `VIRTUAL_ENV`. Only that directory is used — the file is not looked up in the remaining ones.
 
-The file's values override the other trigger arguments, and on the HTTP trigger the request body overrides the file; an argument the file does not set still applies. `INFLUXDB3_AUTH_TOKEN` from the environment applies when `influxdb3_auth_token` is set neither as an argument nor in the file. In TOML, `tag_values`, `senders`, `changepoints`, `holiday_date_list`, `holiday_names` and `holiday_country_names` can use native structures (a table or a list) instead of the inline string formats, though the inline strings are also accepted. The path is never read from a request body. It names a layer rather than setting a value: a body that could choose which file the trigger reads would take the trigger's configuration out of the operator's hands, so the body refuses it.
+The file's values override the other trigger arguments, and on the HTTP trigger the request overrides the file; an argument the file does not set still applies. `INFLUXDB3_AUTH_TOKEN` from the environment applies when `influxdb3_auth_token` is set neither as an argument nor in the file. In TOML, `tag_values`, `senders`, `changepoints`, `holiday_date_list`, `holiday_names` and `holiday_country_names` can use native structures (a table or a list) instead of the inline string formats, though the inline strings are also accepted. The path is never read from a request — not from its body, its headers or its query string. It names a layer rather than setting a value: a request that could choose which file the trigger reads would take the trigger's configuration out of the operator's hands, so the body and the query string refuse it and a header spelling it is dropped.
 
 #### Example TOML configuration
 

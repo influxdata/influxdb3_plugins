@@ -314,7 +314,6 @@ def test_environment_is_the_lowest_layer(monkeypatch):
     assert cfg.fc2 == 9.0
     assert cfg.order == 3
 
-    # an inline argument overrides the environment; an untouched variable stands
     overridden = load({"sample_rate": "100.0", "fc2": "5.0"})
     assert overridden.fc2 == 5.0
     assert overridden.order == 3

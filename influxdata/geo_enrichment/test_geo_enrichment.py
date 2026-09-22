@@ -204,10 +204,14 @@ ENRICHED_COLUMNS = {**GPS_COLUMNS, "geo_country": "Utf8", "geo_city": "Utf8"}
 
 
 def load(args, influxdb3_local=None):
-    """The write trigger's configuration: its arguments, then the file they name."""
+    """The write trigger's configuration: the environment, its arguments, then the file."""
+    config_file_path = args.get("config_file_path") or plugin.parse_env(
+        plugin.env_spec("config_file_path")
+    ).get("config_file_path")
     cfg = plugin.load_config(
+        plugin.parse_env(plugin.WRITES_ENV),
         plugin.parse_trigger_args(args),
-        plugin.parse_toml(args.get("config_file_path")),
+        plugin.parse_toml(config_file_path),
         validators=plugin.SETTING_VALIDATORS,
     )
     return plugin.prepare_config(influxdb3_local or FakeLocal(), cfg, "tid")
@@ -262,6 +266,29 @@ def test_a_blank_argument_leaves_the_default_in_place():
     cfg = config(output_mode="", unknown_value=" ")
 
     assert (cfg["output_mode"], cfg["unknown_value"]) == ("field", "UNKNOWN")
+
+
+def test_environment_is_the_lowest_layer(monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_SOURCE_MEASUREMENTS", "gps")
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_OUTPUT_COLUMNS", "country:geo_country")
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_UNKNOWN_VALUE", "from-env")
+
+    cfg = load({})
+    assert cfg["source_measurements"] == ["gps"]
+    assert cfg["unknown_value"] == "from-env"
+
+    # a trigger argument overrides the environment; an untouched variable stands
+    overridden = load({"unknown_value": "from-args"})
+    assert overridden["unknown_value"] == "from-args"
+    assert overridden["source_measurements"] == ["gps"]
+
+
+def test_config_file_path_comes_from_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "geo.toml").write_text('unknown_value = "from-toml"\n')
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_CONFIG_FILE_PATH", "geo.toml")
+
+    assert config()["unknown_value"] == "from-toml"
 
 
 def test_keyword_settings_ignore_case_and_surrounding_whitespace():
@@ -878,6 +905,22 @@ def test_a_config_file_named_on_the_trigger_holds_the_defaults(
     assert unresolved.fields["geo_country"] == "from-toml"
 
     backfill(influxdb3_local, args=trigger, unknown_value="from-body")
+
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][-1]
+    assert unresolved.fields["geo_country"] == "from-body"
+
+
+def test_http_environment_is_the_lowest_layer(resolver, monkeypatch):
+    monkeypatch.setenv("INFLUXDB3_GEO_ENRICHMENT_UNKNOWN_VALUE", "from-env")
+    influxdb3_local = backfill_client([unenriched(1_000), unenriched(2_000, lat=10.0)])
+
+    _, status = backfill(influxdb3_local)
+
+    assert status == 200
+    unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][0]
+    assert unresolved.fields["geo_country"] == "from-env"
+
+    backfill(influxdb3_local, unknown_value="from-body")
 
     unresolved = [r for r in influxdb3_local.records() if r.time == 2_000][-1]
     assert unresolved.fields["geo_country"] == "from-body"

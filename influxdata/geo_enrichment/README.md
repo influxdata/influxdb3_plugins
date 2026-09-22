@@ -210,6 +210,16 @@ Use `retry_unknown` after widening `max_radius_m`, and `force` after redrawing a
 zone — those rows already hold a resolved value, so `retry_unknown` would pass
 over them. The reference file is re-read on every HTTP call.
 
+### Environment variables
+
+Every parameter can also come from an environment variable named
+`INFLUXDB3_GEO_ENRICHMENT_<PARAMETER>` in upper case — for example,
+`INFLUXDB3_GEO_ENRICHMENT_REFERENCE_FILE` sets `reference_file`. The
+environment is the lowest layer: a trigger argument overrides it, the TOML file
+overrides both, and on the HTTP trigger the request body overrides them all.
+`INFLUXDB3_GEO_ENRICHMENT_CONFIG_FILE_PATH` names the TOML file when the trigger
+doesn't carry a `config_file_path` argument.
+
 ### TOML configuration
 
 | Parameter          | Type   | Default   | Description                                         |

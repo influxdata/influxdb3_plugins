@@ -270,8 +270,8 @@
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/signal_filter/README.md",
                 "required_plugins": [],
-                "required_libraries": ["numpy", "scipy", "influxdata-plugin-utils>=0.3.0"],
-                "last_update": "2026-07-14",
+                "required_libraries": ["numpy", "scipy", "influxdata-plugin-utils>=0.4.0"],
+                "last_update": "2026-09-22",
                 "trigger_types_supported": ["data_writes"]
             },
             {

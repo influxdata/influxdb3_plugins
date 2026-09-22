@@ -29,8 +29,8 @@ plugin but works with any measurement carrying numeric fields.
 
 Plugin parameters may be specified as key-value pairs in the `--trigger-arguments`
 flag (`influxdb3 create trigger`) or in the `trigger_arguments` field of the API.
-Values are strings; the plugin coerces them. Alternatively, supply every parameter
-from a TOML file via `config_file_path` — see [TOML configuration](#toml-configuration).
+Values are strings; the plugin coerces them. Parameters may also come from a TOML
+file via `config_file_path` — see [TOML configuration](#toml-configuration).
 
 > **CLI limitation:** the `sos` argument is a JSON array containing commas, and
 > `influxdb3 create trigger --trigger-arguments` splits on every comma, so the value
@@ -80,7 +80,7 @@ and configure the plugin.
 | `output_field`           | string | *(source field)* | Base name override for the output field. Only valid when a single input field is configured.                                         |
 | `field_prefix`           | string | *(empty)*        | Prefix for the output field name. `none` means no prefix; an empty value counts as unset.                                            |
 | `field_suffix`           | string | `_filtered`      | Suffix for the output field name. `none` writes into the source field, replacing its samples; an empty value counts as unset.        |
-| `config_file_path`       | string | —                | Path to a TOML file supplying all parameters; mutually exclusive with inline arguments. Relative paths resolve against `PLUGIN_DIR`. |
+| `config_file_path`       | string | —                | Path to a TOML file supplying parameters; its values override inline arguments. Relative paths resolve against `PLUGIN_DIR`.         |
 
 The final output field name is `{field_prefix}{output_field or source_field}{field_suffix}`
 — by default, `value` becomes `value_filtered`. The raw input field is never copied
@@ -91,9 +91,10 @@ to the output.
 To use a TOML configuration file, set the `PLUGIN_DIR` environment variable and
 reference the file with the `config_file_path` trigger argument (relative paths
 resolve against `PLUGIN_DIR`, then `INFLUXDB3_PLUGIN_DIR`, then the parent of
-`VIRTUAL_ENV`). The TOML file then supplies **all** parameters — it is mutually
-exclusive with inline trigger arguments, so passing both is rejected. See
-[`signal_filter_config_data_writes.toml`](signal_filter_config_data_writes.toml)
+`VIRTUAL_ENV`). The file and the inline trigger arguments are layered, and the
+file wins wherever both set a key, so a trigger can carry defaults that a file
+overrides. A blank value counts as unset and leaves the layer below it standing.
+See [`signal_filter_config_data_writes.toml`](signal_filter_config_data_writes.toml)
 for an annotated template.
 
 ## Data requirements
@@ -349,7 +350,7 @@ filtered points, and finally saves the advanced per-series state.
 Key operations:
 
 1. Guards that `numpy`, `scipy`, and `influxdata-plugin-utils` are installed; logs an install command otherwise
-2. Parses and validates trigger arguments (inline, or entirely from a TOML file)
+2. Parses and validates the configuration (trigger arguments layered under a TOML file)
 3. Warns on any write-loop hazard configuration
 4. Groups rows into per-(field, series) samples, dropping null/non-numeric/non-finite values
 5. Resolves the sample rate (explicit → frozen → inferred with warm-up)

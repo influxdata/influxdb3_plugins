@@ -3,8 +3,8 @@
 #   --trigger-arguments config_file_path=<relative_path>
 # Example: If the file is at /plugins/configs/signal_filter_config_data_writes.toml, use
 #   config_file_path=configs/signal_filter_config_data_writes.toml
-# This file supplies all parameters; it is mutually exclusive with inline
-# trigger arguments (passing both is rejected).
+# This file is layered over the inline trigger arguments: where both set a key,
+# the value here wins.
 
 ########## Required Parameters ##########
 # Filter type: 'lowpass', 'highpass', 'bandpass', or 'bandstop'.

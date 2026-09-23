@@ -238,6 +238,49 @@ def test_boolean_arguments_accept_common_spellings(tmp_path, raw):
     assert any("ACCEPTED" in info for info in local.infos)
 
 
+def test_environment_is_the_lowest_layer(tmp_path, monkeypatch):
+    schema_file = write_schema(tmp_path, SCHEMA)
+    monkeypatch.setenv("INFLUXDB3_SCHEMA_VALIDATOR_SCHEMA_FILE", schema_file)
+    monkeypatch.setenv("INFLUXDB3_SCHEMA_VALIDATOR_TARGET_DATABASE", "env_db")
+
+    local = FakeLocal()
+    sv.process_writes(local, [{"table_name": "weather", "rows": [VALID_ROW]}], {})
+    assert [database for database, _point in local.writes] == ["env_db"]
+
+    # an inline argument overrides the environment; an untouched variable stands
+    overridden = FakeLocal()
+    sv.process_writes(
+        overridden,
+        [{"table_name": "weather", "rows": [VALID_ROW]}],
+        {"target_database": "args_db"},
+    )
+    assert [database for database, _point in overridden.writes] == ["args_db"]
+
+
+def test_config_file_path_comes_from_the_environment(tmp_path, monkeypatch):
+    schema_file = write_schema(tmp_path, SCHEMA)
+    (tmp_path / "from_env.toml").write_text(
+        f'schema_file = "{schema_file}"\ntarget_database = "env_toml_db"\n'
+    )
+    (tmp_path / "from_args.toml").write_text(
+        f'schema_file = "{schema_file}"\ntarget_database = "args_toml_db"\n'
+    )
+    monkeypatch.setenv("INFLUXDB3_SCHEMA_VALIDATOR_CONFIG_FILE_PATH", "from_env.toml")
+
+    local = FakeLocal()
+    sv.process_writes(local, [{"table_name": "weather", "rows": [VALID_ROW]}], {})
+    assert [database for database, _point in local.writes] == ["env_toml_db"]
+
+    # a config_file_path argument names the file instead
+    from_args = FakeLocal()
+    sv.process_writes(
+        from_args,
+        [{"table_name": "weather", "rows": [VALID_ROW]}],
+        {"config_file_path": "from_args.toml"},
+    )
+    assert [database for database, _point in from_args.writes] == ["args_toml_db"]
+
+
 def test_toml_config_overrides_trigger_arguments(tmp_path):
     schema_file = write_schema(tmp_path, SCHEMA)
     (tmp_path / "trigger.toml").write_text(

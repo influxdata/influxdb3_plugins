@@ -54,6 +54,15 @@ This plugin includes a JSON metadata schema in its docstring that defines suppor
 | `log_accepted`        | boolean | `false`          | Log one message per accepted row — noisy, use for debugging. Accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`                               |
 | `write_rejection_log` | boolean | `false`          | Write rejected row details to the `_schema_rejections` measurement in the target database. Accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off` |
 
+### Environment variables
+
+Every parameter can also come from an environment variable named
+`INFLUXDB3_SCHEMA_VALIDATOR_<PARAMETER>` in upper case — for example,
+`INFLUXDB3_SCHEMA_VALIDATOR_SCHEMA_FILE` sets `schema_file`. The environment is
+the lowest layer: a trigger argument overrides it, and the TOML file overrides
+both. `INFLUXDB3_SCHEMA_VALIDATOR_CONFIG_FILE_PATH` names the TOML file when the
+trigger doesn't carry a `config_file_path` argument.
+
 ### TOML configuration
 
 | Parameter          | Type   | Default | Description                                                                      |

@@ -61,7 +61,12 @@ import uuid
 from influxdata_plugin_utils.cache import cached
 from influxdata_plugin_utils.config import Config, load_config, resolve_path
 from influxdata_plugin_utils.parsing import parse_bool
-from influxdata_plugin_utils.sources import KeySpec, parse_toml, parse_trigger_args
+from influxdata_plugin_utils.sources import (
+    KeySpec,
+    parse_env,
+    parse_toml,
+    parse_trigger_args,
+)
 from influxdata_plugin_utils.validation import Validator
 from influxdata_plugin_utils.write import build_line_typed, infer_type, write_data
 
@@ -108,12 +113,28 @@ CONFIG_VALIDATORS = [
     Validator("write_rejection_log", default=False, cast=parse_bool),
 ]
 
+SETTING_NAMES = [name for validator in CONFIG_VALIDATORS for name in validator.names]
+
 # a key outside this list is named in the error rather than silently dropped
 CONFIG_KEYS = KeySpec(
-    allowlist=[name for validator in CONFIG_VALIDATORS for name in validator.names]
-    + ["config_file_path"],
+    allowlist=SETTING_NAMES + ["config_file_path"],
     unknown="reject",
 )
+
+ENV_PREFIX = "INFLUXDB3_SCHEMA_VALIDATOR_"
+
+
+def env_spec(*names: str) -> KeySpec:
+    """Read the named settings from ``INFLUXDB3_SCHEMA_VALIDATOR_<SETTING>``.
+
+    The prefix is stripped again, so a variable merges with the same setting
+    coming from a trigger argument or the TOML file.
+    """
+    rename = {f"{ENV_PREFIX}{name.upper()}": name for name in names}
+    return KeySpec(allowlist=tuple(rename), rename=rename)
+
+
+ENV_SETTINGS = env_spec(*SETTING_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -391,9 +412,13 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
     influxdb3_local.info(f"[{task_id}] Schema Validator plugin triggered")
 
     try:
+        config_file_path = args.get("config_file_path") or parse_env(
+            env_spec("config_file_path")
+        ).get("config_file_path")
         config: Config = load_config(
+            parse_env(ENV_SETTINGS),
             parse_trigger_args(args, CONFIG_KEYS),
-            parse_toml(args.get("config_file_path"), CONFIG_KEYS),
+            parse_toml(config_file_path, CONFIG_KEYS),
             validators=CONFIG_VALIDATORS,
         )
     except Exception as e:

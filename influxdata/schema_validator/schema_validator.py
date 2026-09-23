@@ -5,49 +5,49 @@
         {
             "name": "schema_file",
             "example": "schema_validator_config.json",
-            "description": "Path to the JSON schema configuration file (relative to PLUGIN_DIR).",
+            "description": "Path to the JSON schema configuration file, absolute or relative to the plugin directory.",
             "required": true
         },
         {
             "name": "target_database",
             "example": "clean_db",
-            "description": "Target database to write validated data to. If omitted, writes to the same database.",
+            "description": "Target database to write validated data to. Defaults to the trigger's own database.",
             "required": false
         },
         {
             "name": "target_table_prefix",
             "example": "validated_",
-            "description": "Prefix to add to measurement names when writing to the target. If omitted, uses the original measurement name.",
+            "description": "Prefix added to measurement names in the target. Ignored for tables that define 'target_table'. Defaults to an empty string.",
             "required": false
         },
         {
             "name": "target_table_suffix",
             "example": "_clean",
-            "description": "Suffix to add to measurement names when writing to the target. If omitted, no suffix is added.",
+            "description": "Suffix added to measurement names in the target. Ignored for tables that define 'target_table'. Defaults to an empty string.",
             "required": false
         },
         {
             "name": "log_rejected",
             "example": "true",
-            "description": "If 'true', logs details about rejected rows. Defaults to 'true'.",
+            "description": "Log one warning per rejected row. Accepts true/false, 1/0, yes/no, on/off. Defaults to true.",
             "required": false
         },
         {
             "name": "log_accepted",
             "example": "false",
-            "description": "If 'true', logs details about accepted rows. Defaults to 'false'.",
+            "description": "Log one message per accepted row. Accepts true/false, 1/0, yes/no, on/off. Defaults to false.",
             "required": false
         },
         {
             "name": "write_rejection_log",
             "example": "true",
-            "description": "If 'true', writes rejected row details to a '_schema_rejections' measurement. Defaults to 'false'.",
+            "description": "Write rejected row details to the '_schema_rejections' measurement in the target database. Accepts true/false, 1/0, yes/no, on/off. Defaults to false.",
             "required": false
         },
         {
             "name": "config_file_path",
             "example": "schema_validator_trigger_config.toml",
-            "description": "Path to TOML config file to override trigger arguments.",
+            "description": "Path to a TOML config file, absolute or relative to the plugin directory. Its values override the inline arguments.",
             "required": false
         }
     ]
@@ -55,578 +55,490 @@
 """
 
 import json
-import os
-import tomllib
+import time
 import uuid
-from pathlib import Path
-from typing import Iterable, Optional, runtime_checkable, Protocol
+
+from influxdata_plugin_utils.cache import cached
+from influxdata_plugin_utils.config import Config, load_config, resolve_path
+from influxdata_plugin_utils.parsing import parse_bool
+from influxdata_plugin_utils.sources import (
+    KeySpec,
+    parse_env,
+    parse_toml,
+    parse_trigger_args,
+)
+from influxdata_plugin_utils.validation import Validator
+from influxdata_plugin_utils.write import build_line_typed, infer_type, write_data
+
+REJECTION_MEASUREMENT = "_schema_rejections"
+SCHEMA_CACHE_TTL_SECONDS = 300
+ROW_DATA_LIMIT = 1024
+
+# Schema type names accepted in a field definition, mapped to write types.
+FIELD_TYPES = {
+    "float": "float",
+    "float64": "float",
+    "double": "float",
+    "integer": "int",
+    "int": "int",
+    "int64": "int",
+    "uint64": "uint",
+    "unsigned": "uint",
+    "uint": "uint",
+    "string": "string",
+    "str": "string",
+    "boolean": "bool",
+    "bool": "bool",
+}
+SUPPORTED_TYPES = ", ".join(sorted(FIELD_TYPES))
 
 
 # ---------------------------------------------------------------------------
-# Batch write helper
+# Configuration
 # ---------------------------------------------------------------------------
 
-@runtime_checkable
-class _LineBuilderInterface(Protocol):
-    def build(self) -> str: ...
+
+def trimmed(value) -> str:
+    """A setting as trimmed text; TOML may deliver it as a number."""
+    return str(value).strip()
 
 
-class _BatchLines:
+CONFIG_VALIDATORS = [
+    Validator("schema_file", required=True, cast=trimmed, endswith=".json"),
+    Validator("target_database", default="", cast=str),
+    Validator("target_table_prefix", default="", cast=str),
+    Validator("target_table_suffix", default="", cast=str),
+    Validator("log_rejected", default=True, cast=parse_bool),
+    Validator("log_accepted", default=False, cast=parse_bool),
+    Validator("write_rejection_log", default=False, cast=parse_bool),
+]
+
+SETTING_NAMES = [name for validator in CONFIG_VALIDATORS for name in validator.names]
+
+# a key outside this list is named in the error rather than silently dropped
+CONFIG_KEYS = KeySpec(
+    allowlist=SETTING_NAMES + ["config_file_path"],
+    unknown="reject",
+)
+
+ENV_PREFIX = "INFLUXDB3_SCHEMA_VALIDATOR_"
+
+
+def env_spec(*names: str) -> KeySpec:
+    """Read the named settings from ``INFLUXDB3_SCHEMA_VALIDATOR_<SETTING>``.
+
+    The prefix is stripped again, so a variable merges with the same setting
+    coming from a trigger argument or the TOML file.
     """
-    Wraps multiple LineBuilder objects into a single object with a build()
-    method that returns a newline-separated string. This allows batched writes
-    through the write_sync / write_sync_to_db APIs without changing the Rust code.
-    """
-    def __init__(self, line_builders: Iterable[_LineBuilderInterface]):
-        self._line_builders = list(line_builders)
-        self._built: Optional[str] = None
+    rename = {f"{ENV_PREFIX}{name.upper()}": name for name in names}
+    return KeySpec(allowlist=tuple(rename), rename=rename)
 
-    def _coerce_builder(self, builder: _LineBuilderInterface) -> str:
-        build_fn = getattr(builder, "build", None)
-        if not callable(build_fn):
-            raise TypeError("line_builder is missing a callable build()")
-        return str(build_fn())
 
-    def build(self) -> str:
-        if self._built is None:
-            lines = [self._coerce_builder(builder) for builder in self._line_builders]
-            if not lines:
-                raise ValueError("batch_write received no lines to build")
-            self._built = "\n".join(lines)
-        return self._built
+ENV_SETTINGS = env_spec(*SETTING_NAMES)
 
 
 # ---------------------------------------------------------------------------
 # Schema loading
 # ---------------------------------------------------------------------------
 
-def load_schema(influxdb3_local, schema_file_path: str, task_id: str) -> dict | None:
-    """
-    Loads the JSON schema configuration file from the plugin directory.
-    Uses the influxdb3_local cache to avoid re-reading the file on every WAL flush.
-    """
-    cache_key = f"schema_validator:{schema_file_path}"
-    cached = influxdb3_local.cache.get(cache_key)
-    if cached is not None:
-        return cached
 
-    if not schema_file_path.endswith(".json"):
-        influxdb3_local.error(
-            f"[{task_id}] Invalid schema file format: expected a .json file"
-        )
+def resolve_field_type(field_def) -> str | None:
+    """Return the write type of a field definition, or None when it is untyped."""
+    if not isinstance(field_def, dict):
         return None
-
-    plugin_dir_var = os.getenv("PLUGIN_DIR", None)
-    if plugin_dir_var:
-        plugin_dir = Path(plugin_dir_var)
-        file_path = plugin_dir / schema_file_path
-    else:
-        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-        candidates: list[str] = []
-        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-            candidates.append(influxdb3_plugin_dir)
-        if virtual_env := os.environ.get("VIRTUAL_ENV"):
-            candidates.append(str(Path(virtual_env).parent))
-
-        resolved = None
-        for base in candidates:
-            candidate = Path(base) / schema_file_path
-            if candidate.exists():
-                resolved = candidate
-                break
-
-        if resolved is None:
-            candidates_str = ", ".join(candidates) if candidates else "none available"
-            influxdb3_local.error(f"[{task_id}] PLUGIN_DIR env var not set and schema file path '{schema_file_path}' was not found via fallbacks (tried: {candidates_str})")
-            return None
-
-        file_path = resolved
-
-    try:
-        with open(file_path, "r") as f:
-            schema = json.load(f)
-        influxdb3_local.info(f"[{task_id}] Loaded schema from {file_path}")
-        # Cache for 300 seconds (5 minutes) so config changes are picked up reasonably fast
-        influxdb3_local.cache.put(cache_key, schema, ttl=300)
-        return schema
-    except Exception:
-        influxdb3_local.error(f"[{task_id}] Failed to read schema file")
+    raw_type = field_def.get("type")
+    if raw_type is None:
         return None
+    return FIELD_TYPES.get(str(raw_type).strip().lower())
 
 
-def validate_schema_structure(influxdb3_local, schema: dict, task_id: str) -> bool:
-    """
-    Validates the basic structure of a loaded schema to catch malformed configs
-    before they cause AttributeError crashes during row processing.
-    """
-    allowed = schema.get("allowed_measurements", None)
+def validate_schema(schema: dict) -> dict:
+    """Check the schema structure and field types, returning it unchanged."""
+    allowed = schema.get("allowed_measurements")
     if allowed is not None and not isinstance(allowed, list):
-        influxdb3_local.error(f"[{task_id}] 'allowed_measurements' must be a list, got {type(allowed).__name__}")
-        return False
+        raise ValueError(
+            f"'allowed_measurements' must be a list, got {type(allowed).__name__}"
+        )
 
-    tables = schema.get("tables", None)
-    if tables is not None and not isinstance(tables, dict):
-        influxdb3_local.error(f"[{task_id}] 'tables' must be a dict, got {type(tables).__name__}")
-        return False
+    tables = schema.get("tables")
+    if not isinstance(tables, dict) or not tables:
+        raise ValueError("'tables' must be a non-empty dict of measurement definitions")
 
-    if not tables:
-        influxdb3_local.error(f"[{task_id}] 'tables' is empty or missing — no measurements to validate")
-        return False
+    for table_name, table_def in tables.items():
+        if not isinstance(table_def, dict):
+            raise ValueError(
+                f"Table '{table_name}' definition must be a dict, got {type(table_def).__name__}"
+            )
 
-    if isinstance(tables, dict):
-        for table_name, table_def in tables.items():
-            if not isinstance(table_def, dict):
-                influxdb3_local.error(f"[{task_id}] Table '{table_name}' definition must be a dict, got {type(table_def).__name__}")
-                return False
-            tags = table_def.get("tags", None)
-            if tags is not None and not isinstance(tags, dict):
-                influxdb3_local.error(f"[{task_id}] Table '{table_name}' tags must be a dict, got {type(tags).__name__}")
-                return False
-            fields = table_def.get("fields", None)
-            if fields is not None and not isinstance(fields, dict):
-                influxdb3_local.error(f"[{task_id}] Table '{table_name}' fields must be a dict, got {type(fields).__name__}")
-                return False
+        tags = table_def.get("tags")
+        if tags is not None and not isinstance(tags, dict):
+            raise ValueError(
+                f"Table '{table_name}' tags must be a dict, got {type(tags).__name__}"
+            )
 
-    return True
+        fields = table_def.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            raise ValueError(f"Table '{table_name}' fields must be a non-empty dict")
+
+        for field_name, field_def in fields.items():
+            if isinstance(field_def, dict) and field_def.get("type") is not None:
+                if resolve_field_type(field_def) is None:
+                    raise ValueError(
+                        f"Table '{table_name}' field '{field_name}' has unknown type "
+                        f"'{field_def['type']}' (supported: {SUPPORTED_TYPES})"
+                    )
+
+    return schema
+
+
+def load_schema(influxdb3_local, schema_file: str, task_id: str) -> dict:
+    """Read the JSON schema file and cache the validated result."""
+
+    def read_schema() -> dict:
+        schema_path = resolve_path(schema_file)
+        with open(schema_path) as schema_fh:
+            schema = validate_schema(json.load(schema_fh))
+        influxdb3_local.info(f"[{task_id}] Loaded schema from {schema_path}")
+        return schema
+
+    return cached(
+        influxdb3_local,
+        f"schema_validator:{schema_file}",
+        read_schema,
+        ttl_seconds=SCHEMA_CACHE_TTL_SECONDS,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Validation helpers
+# Target resolution
 # ---------------------------------------------------------------------------
 
-def get_table_schema(schema: dict, table_name: str) -> dict | None:
-    """
-    Finds the schema definition for a given table/measurement name.
-    Returns the table schema dict, or None if the table is not in the schema.
-    """
-    tables = schema.get("tables", {})
-    return tables.get(table_name, None)
+
+def target_measurement(table_schema: dict, table_name: str, config: dict) -> str:
+    """Measurement name validated rows of a table are written to."""
+    if target_table := table_schema.get("target_table"):
+        return str(target_table)
+    return f"{config['target_table_prefix']}{table_name}{config['target_table_suffix']}"
 
 
-def validate_measurement(schema: dict, table_name: str) -> tuple[bool, str]:
-    """
-    Validates that the measurement/table name is allowed by the schema.
-    If 'allowed_measurements' is a non-empty list, the table_name must be in that list.
-    If omitted (None) or empty ([]), no measurement filter is applied — validation
-    falls through to the table-level 'tables' rules.
-    """
-    allowed = schema.get("allowed_measurements", None)
-    if allowed:
-        if table_name not in allowed:
-            return False, f"Measurement '{table_name}' is not in the allowed measurements list"
-    return True, ""
+def validate_targets(schema: dict, config: dict, table_names: set[str]) -> None:
+    """Reject a configuration that writes one of the given tables back into itself."""
+    if config["target_database"]:
+        return
+
+    for table_name in table_names:
+        table_schema = schema["tables"].get(table_name)
+        if table_schema is None:
+            continue
+        if target_measurement(table_schema, table_name, config) == table_name:
+            raise ValueError(
+                f"Table '{table_name}' would be written back into itself; set "
+                "target_database, target_table_prefix, target_table_suffix, or the "
+                "table's 'target_table'"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Row validation
+# ---------------------------------------------------------------------------
+
+
+def check_field_type(value, field_type: str) -> bool:
+    """Check a value against a write type from FIELD_TYPES."""
+    if field_type == "float":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if field_type == "int":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if field_type == "uint":
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    if field_type == "string":
+        return isinstance(value, str)
+    return isinstance(value, bool)
 
 
 def validate_tags(table_schema: dict, row: dict) -> tuple[bool, str]:
-    """
-    Validates the tags in a row against the table schema.
-
-    Checks:
-    1. All required tags are present and non-None
-    2. If 'allowed_values' is specified for a tag, the value must be in that list
-
-    Extra tags not defined in the schema are silently stripped during output.
-    """
+    """Check required tags and allowed tag values. Extra tags are ignored."""
     tags_schema = table_schema.get("tags", {})
-    if not tags_schema:
-        return True, ""
 
-    # Check required tags
     for tag_name, tag_def in tags_schema.items():
         if isinstance(tag_def, dict):
             required = tag_def.get("required", False)
-            allowed_values = tag_def.get("allowed_values", None)
+            allowed_values = tag_def.get("allowed_values")
         else:
-            # Simple definition: just the tag name listed means it's required
+            # a bare tag name means the tag is required
             required = True
             allowed_values = None
 
-        value = row.get(tag_name, None)
+        value = row.get(tag_name)
 
         if required and value is None:
             return False, f"Required tag '{tag_name}' is missing"
 
         if value is not None and allowed_values is not None:
-            if str(value) not in [str(v) for v in allowed_values]:
-                return False, f"Tag '{tag_name}' value '{value}' is not in allowed values: {allowed_values}"
+            if str(value) not in [str(allowed) for allowed in allowed_values]:
+                return (
+                    False,
+                    f"Tag '{tag_name}' value '{value}' is not in allowed values: {allowed_values}",
+                )
 
     return True, ""
 
 
 def validate_fields(table_schema: dict, row: dict) -> tuple[bool, str]:
-    """
-    Validates the fields in a row against the table schema.
-
-    Checks:
-    1. All required fields are present and non-None
-    2. Type validation if 'type' is specified
-    3. Allowed values validation if 'allowed_values' is specified
-
-    Extra fields not defined in the schema are silently stripped during output.
-    """
-    fields_schema = table_schema.get("fields", {})
-    if not fields_schema:
-        return True, ""
+    """Check required fields, field types and allowed field values."""
+    fields_schema = table_schema["fields"]
 
     for field_name, field_def in fields_schema.items():
         if isinstance(field_def, dict):
             required = field_def.get("required", False)
-            field_type = field_def.get("type", None)
-            allowed_values = field_def.get("allowed_values", None)
+            allowed_values = field_def.get("allowed_values")
         else:
+            # a bare field name means the field is required
             required = True
-            field_type = None
             allowed_values = None
 
-        value = row.get(field_name, None)
+        value = row.get(field_name)
 
         if required and value is None:
             return False, f"Required field '{field_name}' is missing"
 
-        if value is not None:
-            # Type validation
-            if field_type is not None:
-                if not check_field_type(value, field_type):
-                    return False, f"Field '{field_name}' expected type '{field_type}', got {type(value).__name__} (value: {value})"
-
-            # Allowed values validation
-            if allowed_values is not None:
-                if value not in allowed_values and str(value) not in [str(v) for v in allowed_values]:
-                    return False, f"Field '{field_name}' value '{value}' is not in allowed values: {allowed_values}"
-
-    return True, ""
-
-
-def check_field_type(value, expected_type: str) -> bool:
-    """
-    Checks if a value matches the expected InfluxDB field type.
-    Supported types: 'float', 'integer', 'string', 'boolean', 'uint64'
-    Returns False for unknown/unrecognized types.
-    """
-    expected_type_lower = expected_type.lower()
-
-    if expected_type_lower in ("float", "float64", "double"):
-        return isinstance(value, (int, float))
-    elif expected_type_lower in ("integer", "int", "int64"):
-        return isinstance(value, int) and not isinstance(value, bool)
-    elif expected_type_lower in ("string", "str"):
-        return isinstance(value, str)
-    elif expected_type_lower in ("boolean", "bool"):
-        return isinstance(value, bool)
-    elif expected_type_lower in ("uint64", "unsigned", "uint"):
-        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-    else:
-        # Unknown type — reject to catch schema config typos
-        return False
-
-
-def validate_row(schema: dict, table_schema: dict, table_name: str, row: dict) -> tuple[bool, str]:
-    """
-    Validates a single row against the full schema.
-    Returns (is_valid, rejection_reason).
-    """
-    # 1. Validate measurement name
-    valid, reason = validate_measurement(schema, table_name)
-    if not valid:
-        return False, reason
-
-    # 2. Validate tags
-    valid, reason = validate_tags(table_schema, row)
-    if not valid:
-        return False, reason
-
-    # 3. Validate fields
-    valid, reason = validate_fields(table_schema, row)
-    if not valid:
-        return False, reason
-
-    return True, ""
-
-
-# ---------------------------------------------------------------------------
-# Row writing helpers
-# ---------------------------------------------------------------------------
-
-def build_line_from_row(table_schema: dict, target_measurement: str, row: dict) -> "LineBuilder | None":
-    """
-    Builds a LineBuilder object from a validated row.
-    Separates tags from fields based on the schema definition.
-    Returns None if no fields were added (line protocol requires at least one field).
-    """
-    builder = LineBuilder(target_measurement)
-
-    tags_schema = table_schema.get("tags", {})
-    fields_schema = table_schema.get("fields", {})
-
-    # Set timestamp if present
-    ts = row.get("time", None)
-    if ts is not None:
-        builder.time_ns(ts)
-
-    # Add tags in deterministic order (dict preserves insertion order in Python 3.7+)
-    for tag_name in tags_schema:
-        value = row.get(tag_name, None)
-        if value is not None:
-            builder.tag(tag_name, str(value))
-
-    # Add fields with proper typing in deterministic order
-    field_count = 0
-    for field_name in fields_schema:
-        value = row.get(field_name, None)
         if value is None:
             continue
 
-        # Determine the correct field method based on schema type or actual value type
-        field_def = fields_schema.get(field_name, {})
-        if isinstance(field_def, dict):
-            field_type = field_def.get("type", None)
-        else:
-            field_type = None
+        field_type = resolve_field_type(field_def)
+        if field_type is not None and not check_field_type(value, field_type):
+            return (
+                False,
+                f"Field '{field_name}' expected type '{field_def['type']}', "
+                f"got {type(value).__name__} (value: {value})",
+            )
 
-        if field_type:
-            _add_typed_field(builder, field_name, value, field_type)
-        else:
-            _add_inferred_field(builder, field_name, value)
-        field_count += 1
+        if allowed_values is not None:
+            if value not in allowed_values and str(value) not in [
+                str(allowed) for allowed in allowed_values
+            ]:
+                return (
+                    False,
+                    f"Field '{field_name}' value '{value}' is not in allowed values: {allowed_values}",
+                )
 
-    # Line protocol requires at least one field
-    if field_count == 0:
+    return True, ""
+
+
+def validate_row(table_schema: dict, row: dict) -> tuple[bool, str]:
+    """Validate one row, returning (is_valid, rejection_reason)."""
+    is_valid, reason = validate_tags(table_schema, row)
+    if not is_valid:
+        return False, reason
+
+    return validate_fields(table_schema, row)
+
+
+# ---------------------------------------------------------------------------
+# Line building
+# ---------------------------------------------------------------------------
+
+
+def build_line_from_row(table_schema: dict, measurement: str, row: dict):
+    """Build a line from a validated row, keeping only schema-defined columns.
+
+    Returns None when the row carries no schema-defined field. Raises ValueError
+    when a value cannot be written as its type.
+    """
+    tags = {tag_name: row.get(tag_name) for tag_name in table_schema.get("tags", {})}
+
+    typed_fields = {}
+    for field_name, field_def in table_schema["fields"].items():
+        value = row.get(field_name)
+        if value is None:
+            continue
+        field_type = resolve_field_type(field_def) or infer_type(value)
+        typed_fields[field_name] = (value, field_type)
+
+    if not typed_fields:
         return None
 
-    return builder
+    return build_line_typed(
+        LineBuilder,
+        measurement,
+        tags=tags,
+        typed_fields=typed_fields,
+        time_ns=row.get("time"),
+    )
 
 
-def _add_typed_field(builder, field_name: str, value, field_type: str):
-    """Adds a field to the LineBuilder using the schema-defined type."""
-    ft = field_type.lower()
-    if ft in ("float", "float64", "double"):
-        builder.float64_field(field_name, float(value))
-    elif ft in ("integer", "int", "int64"):
-        builder.int64_field(field_name, int(value))
-    elif ft in ("uint64", "unsigned", "uint"):
-        builder.uint64_field(field_name, int(value))
-    elif ft in ("string", "str"):
-        builder.string_field(field_name, str(value))
-    elif ft in ("boolean", "bool"):
-        builder.bool_field(field_name, bool(value))
-    else:
-        _add_inferred_field(builder, field_name, value)
+class RejectionClock:
+    """Hands out strictly increasing timestamps so rejections stay distinct."""
+
+    def __init__(self):
+        self._last_ns = 0
+
+    def next_ns(self) -> int:
+        self._last_ns = max(time.time_ns(), self._last_ns + 1)
+        return self._last_ns
 
 
-def _add_inferred_field(builder, field_name: str, value):
-    """Adds a field to the LineBuilder by inferring its type from the Python value."""
-    if isinstance(value, bool):
-        builder.bool_field(field_name, value)
-    elif isinstance(value, int):
-        builder.int64_field(field_name, value)
-    elif isinstance(value, float):
-        builder.float64_field(field_name, value)
-    else:
-        builder.string_field(field_name, str(value))
-
-
-def write_rejection_log_entry(influxdb3_local, target_database: str | None, table_name: str, reason: str, row: dict):
-    """
-    Writes a rejection log entry to the _schema_rejections measurement.
-    """
-    builder = LineBuilder("_schema_rejections")
-    builder.tag("source_table", table_name)
-    builder.string_field("reason", reason)
-    builder.string_field("row_data", str(row)[:1024])  # Truncate to avoid huge writes
-
-    if target_database:
-        influxdb3_local.write_sync_to_db(target_database, builder, no_sync=True)
-    else:
-        influxdb3_local.write_sync(builder, no_sync=True)
+def build_rejection_line(table_name: str, reason: str, row: dict, time_ns: int):
+    """Build a rejection log entry for one rejected row."""
+    line = LineBuilder(REJECTION_MEASUREMENT)
+    line.tag("source_table", table_name)
+    line.string_field("reason", reason)
+    line.string_field("row_data", str(row)[:ROW_DATA_LIMIT])
+    line.time_ns(time_ns)
+    return line
 
 
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def process_writes(influxdb3_local, table_batches: list, args: dict | None = None):
-    """
-    Schema Validator Plugin - Validates incoming data against a JSON schema definition
-    and writes only conforming rows to a target database/table.
 
-    This plugin is triggered on each WAL flush. For every row in the incoming data:
-    1. Checks if the measurement/table name is allowed
-    2. Validates that required tags are present and have allowed values
-    3. Validates that required fields are present, have correct types, and allowed values
-    4. Strips any extra tags/fields not defined in the schema
-    5. Writes valid rows to the target (same or different database/table)
-    6. Optionally logs and records rejected rows
+def process_writes(influxdb3_local, table_batches: list, args: dict | None = None):
+    """Validate incoming rows against a JSON schema and forward the valid ones.
+
+    For every row of every table batch the plugin checks the measurement name,
+    required tags and their allowed values, then required fields, their types and
+    their allowed values. Valid rows are stripped down to the schema-defined
+    columns and written to the target database or table; rejected rows are
+    optionally logged and recorded in the '_schema_rejections' measurement.
 
     Args:
         influxdb3_local: The InfluxDB 3 local API object.
-        table_batches (list): List of table batch dicts, each with 'table_name' and 'rows'.
+        table_batches (list): Table batch dicts with 'table_name' and 'rows'.
         args (dict | None): Trigger arguments dictionary.
     """
     task_id = str(uuid.uuid4())[:8]
+    args = args or {}
     influxdb3_local.info(f"[{task_id}] Schema Validator plugin triggered")
 
     try:
-        # ---- Load args from config file if specified ----
-        if args:
-            if path := args.get("config_file_path", None):
-                if not path.endswith(".toml"):
-                    influxdb3_local.error(
-                        f"[{task_id}] Invalid config file format: expected a .toml file"
-                    )
-                    return
+        config_file_path = args.get("config_file_path") or parse_env(
+            env_spec("config_file_path")
+        ).get("config_file_path")
+        config: Config = load_config(
+            parse_env(ENV_SETTINGS),
+            parse_trigger_args(args, CONFIG_KEYS),
+            parse_toml(config_file_path, CONFIG_KEYS),
+            validators=CONFIG_VALIDATORS,
+        )
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Failed to load configuration: {e}")
+        return
+
+    try:
+        schema = load_schema(influxdb3_local, config["schema_file"], task_id)
+        validate_targets(
+            schema, config, {batch["table_name"] for batch in table_batches}
+        )
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Failed to load schema: {e}")
+        return
+
+    target_database = config["target_database"] or None
+    log_rejected = config["log_rejected"]
+    log_accepted = config["log_accepted"]
+    write_rejections = config["write_rejection_log"]
+    allowed_measurements = schema.get("allowed_measurements")
+    rejection_clock = RejectionClock()
+
+    total_accepted = 0
+    total_rejected = 0
+    total_dropped = 0
+
+    for table_batch in table_batches:
+        table_name = table_batch["table_name"]
+
+        if allowed_measurements and table_name not in allowed_measurements:
+            if log_rejected:
+                influxdb3_local.info(
+                    f"[{task_id}] Skipping table '{table_name}' - not in allowed_measurements"
+                )
+            continue
+
+        table_schema = schema["tables"].get(table_name)
+        if table_schema is None:
+            if log_rejected:
+                influxdb3_local.info(
+                    f"[{task_id}] No schema defined for table '{table_name}', skipping"
+                )
+            continue
+
+        measurement = target_measurement(table_schema, table_name, config)
+        valid_lines = []
+        rejection_lines = []
+        batch_accepted = 0
+        batch_rejected = 0
+
+        for row in table_batch["rows"]:
+            is_valid, reason = validate_row(table_schema, row)
+
+            if is_valid:
                 try:
-                    plugin_dir_var = os.getenv("PLUGIN_DIR", None)
-                    if not plugin_dir_var:
-                        # Fallbacks for servers where the operator has not exported PLUGIN_DIR:
-                        #  - INFLUXDB3_PLUGIN_DIR: set when the server is configured via env var
-                        #  - VIRTUAL_ENV: exported by the processing engine; default venv is <plugin-dir>/.venv
-                        candidates: list[str] = []
-                        if influxdb3_plugin_dir := os.environ.get("INFLUXDB3_PLUGIN_DIR"):
-                            candidates.append(influxdb3_plugin_dir)
-                        if virtual_env := os.environ.get("VIRTUAL_ENV"):
-                            candidates.append(str(Path(virtual_env).parent))
-
-                        resolved = None
-                        for base in candidates:
-                            candidate = Path(base) / path
-                            if candidate.exists():
-                                resolved = candidate
-                                break
-
-                        if resolved is None:
-                            candidates_str = ", ".join(candidates) if candidates else "none available"
-                            influxdb3_local.error(f"[{task_id}] PLUGIN_DIR env var not set and config file path '{path}' was not found via fallbacks (tried: {candidates_str})")
-                            return
-
-                        file_path = resolved
-                    else:
-                        plugin_dir = Path(plugin_dir_var)
-                        file_path = plugin_dir / path
-                    influxdb3_local.info(f"[{task_id}] Reading trigger config from {file_path}")
-                    with open(file_path, "rb") as f:
-                        args = tomllib.load(f)
-                except Exception:
-                    influxdb3_local.error(f"[{task_id}] Failed to read config file")
-                    return
-
-        # ---- Validate required args ----
-        if not args or "schema_file" not in args:
-            influxdb3_local.error(f"[{task_id}] Missing required argument: 'schema_file'")
-            return
-
-        # ---- Parse configuration ----
-        schema_file = args["schema_file"]
-        target_database = args.get("target_database", None)
-        target_table_prefix = args.get("target_table_prefix", "")
-        target_table_suffix = args.get("target_table_suffix", "")
-        log_rejected = str(args.get("log_rejected", "true")).lower() == "true"
-        log_accepted = str(args.get("log_accepted", "false")).lower() == "true"
-        write_rejections = str(args.get("write_rejection_log", "false")).lower() == "true"
-
-        # ---- Load schema ----
-        schema = load_schema(influxdb3_local, schema_file, task_id)
-        if schema is None:
-            influxdb3_local.error(f"[{task_id}] Cannot proceed without a valid schema")
-            return
-
-        # ---- Validate schema structure ----
-        if not validate_schema_structure(influxdb3_local, schema, task_id):
-            return
-
-        # ---- Process each table batch ----
-        total_accepted = 0
-        total_rejected = 0
-
-        for table_batch in table_batches:
-            table_name = table_batch["table_name"]
-            rows = table_batch["rows"]
-
-            # Check if this measurement is even relevant to our schema
-            # If allowed_measurements is a non-empty list, skip tables not in it
-            allowed_measurements = schema.get("allowed_measurements", None)
-            if allowed_measurements and table_name not in allowed_measurements:
-                if log_rejected:
-                    influxdb3_local.info(
-                        f"[{task_id}] Skipping table '{table_name}' - not in allowed_measurements"
-                    )
-                continue
-
-            # Get table-specific schema; if not defined, skip
-            table_schema = get_table_schema(schema, table_name)
-            if table_schema is None:
-                if log_rejected:
-                    influxdb3_local.info(
-                        f"[{task_id}] No schema defined for table '{table_name}', skipping"
-                    )
-                continue
-
-            # Determine target measurement name
-            target_table = table_schema.get("target_table", None)
-            if target_table:
-                target_measurement = target_table
-            else:
-                target_measurement = f"{target_table_prefix}{table_name}{target_table_suffix}"
-
-            # Validate each row, collect valid LineBuilders for batched write
-            batch_accepted = 0
-            batch_rejected = 0
-            valid_line_builders = []
-
-            for row in rows:
-                is_valid, reason = validate_row(schema, table_schema, table_name, row)
-
-                if is_valid:
-                    line = build_line_from_row(table_schema, target_measurement, row)
+                    line = build_line_from_row(table_schema, measurement, row)
+                except ValueError as e:
+                    is_valid, reason = False, str(e)
+                else:
                     if line is None:
-                        reason = "No fields matched the schema definition"
                         is_valid = False
+                        reason = "No fields matched the schema definition"
                     else:
-                        valid_line_builders.append(line)
+                        valid_lines.append(line)
                         batch_accepted += 1
-
                         if log_accepted:
                             influxdb3_local.info(
-                                f"[{task_id}] ACCEPTED: {table_name} -> {target_measurement}"
+                                f"[{task_id}] ACCEPTED: {table_name} -> {measurement}"
                             )
 
-                if not is_valid:
-                    batch_rejected += 1
-
-                    if log_rejected:
-                        influxdb3_local.warn(
-                            f"[{task_id}] REJECTED: {table_name} - {reason}"
+            if not is_valid:
+                batch_rejected += 1
+                if log_rejected:
+                    influxdb3_local.warn(
+                        f"[{task_id}] REJECTED: {table_name} - {reason}"
+                    )
+                if write_rejections:
+                    rejection_lines.append(
+                        build_rejection_line(
+                            table_name, reason, row, rejection_clock.next_ns()
                         )
+                    )
 
-                    if write_rejections:
-                        try:
-                            write_rejection_log_entry(
-                                influxdb3_local, target_database, table_name, reason, row
-                            )
-                        except Exception as e:
-                            influxdb3_local.error(
-                                f"[{task_id}] Failed to write rejection log: {e}"
-                            )
+        try:
+            write_data(
+                influxdb3_local,
+                valid_lines,
+                retries=0,
+                no_sync=True,
+                database=target_database,
+            )
+        except Exception as e:
+            influxdb3_local.error(
+                f"[{task_id}] Failed to write {batch_accepted} validated rows of "
+                f"table '{table_name}': {e}"
+            )
+            total_dropped += batch_accepted
+            batch_accepted = 0
 
-            # Batched write of all valid rows for this table
-            if valid_line_builders:
-                batch = _BatchLines(valid_line_builders)
-                if target_database:
-                    influxdb3_local.write_sync_to_db(target_database, batch, no_sync=True)
-                else:
-                    influxdb3_local.write_sync(batch, no_sync=True)
-
-            total_accepted += batch_accepted
-            total_rejected += batch_rejected
-
-            influxdb3_local.info(
-                f"[{task_id}] Table '{table_name}': {batch_accepted} accepted, {batch_rejected} rejected"
+        try:
+            write_data(
+                influxdb3_local,
+                rejection_lines,
+                retries=0,
+                no_sync=True,
+                database=target_database,
+            )
+        except Exception as e:
+            influxdb3_local.error(
+                f"[{task_id}] Failed to write rejection log of table '{table_name}': {e}"
             )
 
+        total_accepted += batch_accepted
+        total_rejected += batch_rejected
+
         influxdb3_local.info(
-            f"[{task_id}] Schema Validator complete: {total_accepted} total accepted, {total_rejected} total rejected"
+            f"[{task_id}] Table '{table_name}': {batch_accepted} accepted, {batch_rejected} rejected"
         )
 
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error in process_writes: {e}")
+    influxdb3_local.info(
+        f"[{task_id}] Schema Validator complete: {total_accepted} total accepted, "
+        f"{total_rejected} total rejected, {total_dropped} total dropped"
+    )

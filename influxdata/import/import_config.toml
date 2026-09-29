@@ -1,5 +1,9 @@
 # Import Plugin Configuration Template
-# Copy this file to your PLUGIN_DIR and reference it with `--trigger-arguments config_file_path=import_config.toml`
+# Reference this file with `--trigger-arguments config_file_path=import_config.toml`
+# or with INFLUXDB3_IMPORT_CONFIG_FILE_PATH; the argument wins when both name a
+# file, and the request body may not name one. The path may be absolute or
+# relative to the plugin directory. Values here override the same keys passed
+# inline; the request body overrides both. An unknown key is an error.
 # This plugin is designed for HTTP-triggered importing between InfluxDB instances
 
 ########## Required Parameters ##########
@@ -8,26 +12,24 @@
 source_url = "http://localhost:8086"  # e.g., "http://localhost:8086", "https://influxdb-source.example.com:8086"
 
 # Source InfluxDB version
-# Specify the version of source InfluxDB: 1 or 2
-influxdb_version = 1  # e.g., 1 or 2
+# Specify the version of source InfluxDB: 1, 2 or 3
+influxdb_version = 1  # e.g., 1, 2 or 3
 
 # Source database name
 # Specify the name of the database to import from
 source_database = "telegraf"  # e.g., "telegraf", "mydb", "sensor_data"
 
 
-########## Authentication Parameters (Required - choose one method) ##########
-# Authentication Method 1: Token-based authentication (InfluxDB v2 or v1 with token support)
-# Specify the authentication token for the source InfluxDB
-source_token = "my-token"  # e.g., "my-super-secret-token"
-
-# Authentication Method 2: Username/Password authentication (InfluxDB v1)
-# Specify both username AND password together (cannot be used with source_token)
-#source_username = "admin"  # e.g., "admin", "user123"
-#source_password = "my-password"  # e.g., "my-secure-password"
-
-# Note: You must provide EITHER source_token OR (source_username AND source_password together)
-# Using both methods simultaneously will result in an error
+########## Authentication ##########
+# Do not put credentials in this file. There is no source_token,
+# source_username or source_password setting here, and an unknown key is not
+# ignored: it fails the request and is named in the error. So a token written
+# below does not authenticate the import — it stops it.
+#
+# Credentials are sent as request headers instead:
+#   -H "Source-Token: my-super-secret-token"
+# or, for InfluxDB v1 basic auth:
+#   -H "Source-Username: admin" -H "Source-Password: my-password"
 
 
 ########## Optional Parameters ##########
@@ -37,18 +39,18 @@ source_token = "my-token"  # e.g., "my-super-secret-token"
 #dest_database = "imported_data"  # e.g., "imported_data", "production_data"
 
 # Import start timestamp
-# Specify the start time for data import in RFC3339, Unix, or date format
+# RFC3339, Unix seconds or nanoseconds, or YYYY-MM-DD; a value naming no zone is read as UTC
 # If not specified, import starts from the oldest data available
 #start_timestamp = "2024-01-01T00:00:00Z"  # e.g., "2024-01-01T00:00:00Z", "1704067200", "2024-01-01"
 
 # Import end timestamp
-# Specify the end time for data import in RFC3339, Unix, or date format
+# Same formats as start_timestamp
 # If not specified, import continues to the newest data available
 #end_timestamp = "2024-12-31T23:59:59Z"  # e.g., "2024-12-31T23:59:59Z", "1735689599", "2024-12-31"
 
 # Query interval delay in milliseconds
 # Delay between consecutive queries to avoid overloading the source database
-# Default: 100ms
+# 0 or greater, default: 100ms
 #query_interval_ms = 100  # e.g., 100, 500, 1000
 
 # Import direction
@@ -59,7 +61,7 @@ source_token = "my-token"  # e.g., "my-super-secret-token"
 
 # Target batch size
 # Number of rows to fetch and write in each batch
-# Default: 2000
+# 1 or greater, default: 2000
 #target_batch_size = 2000  # e.g., 1000, 2000, 5000
 
 # Table filter

@@ -74,6 +74,94 @@
             "description": "TOML config file path, absolute or relative to the plugin directory. Also read from INFLUXDB3_IMPORT_CONFIG_FILE_PATH; its keys override the same keys passed inline.",
             "required": false
         }
+    ],
+    "http_body_config": [
+        {
+            "name": "source_url",
+            "example": "http://localhost:8086",
+            "description": "Source InfluxDB URL (include port if non-standard). Required unless set in the trigger arguments, the TOML file or the environment.",
+            "required": false
+        },
+        {
+            "name": "influxdb_version",
+            "example": 1,
+            "description": "Source InfluxDB version: 1, 2, or 3. Required unless set in the trigger arguments, the TOML file or the environment.",
+            "required": false
+        },
+        {
+            "name": "source_database",
+            "example": "telegraf",
+            "description": "Source database name. Required unless set in the trigger arguments, the TOML file or the environment.",
+            "required": false
+        },
+        {
+            "name": "dest_database",
+            "example": "imported_data",
+            "description": "Destination database name.",
+            "required": false
+        },
+        {
+            "name": "start_timestamp",
+            "example": "2024-01-01T00:00:00Z",
+            "description": "Import start timestamp (RFC3339/Unix/date format).",
+            "required": false
+        },
+        {
+            "name": "end_timestamp",
+            "example": "2024-12-31T23:59:59Z",
+            "description": "Import end timestamp (RFC3339/Unix/date format).",
+            "required": false
+        },
+        {
+            "name": "query_interval_ms",
+            "example": "100",
+            "description": "Delay between queries in milliseconds (0 or greater, default: 100).",
+            "required": false
+        },
+        {
+            "name": "import_direction",
+            "example": "oldest_first",
+            "description": "Import direction: 'oldest_first' or 'newest_first' (default: 'oldest_first').",
+            "required": false
+        },
+        {
+            "name": "target_batch_size",
+            "example": "2000",
+            "description": "Target rows per query batch (1 or greater, default: 2000).",
+            "required": false
+        },
+        {
+            "name": "table_filter",
+            "example": "cpu.mem.disk",
+            "description": "Dot-separated list of specific tables to import (or all if not specified).",
+            "required": false
+        },
+        {
+            "name": "dry_run",
+            "example": "false",
+            "description": "Estimate the import and return a plan without writing data (default: false).",
+            "required": false
+        }
+    ],
+    "http_headers_config": [
+        {
+            "name": "Source-Token",
+            "example": "<your-source-token>",
+            "description": "Authentication token for the source InfluxDB, sent as Bearer for v1 and v3 and as Token for v2. On a v1 source it is ignored when Source-Username and Source-Password are both present.",
+            "required": false
+        },
+        {
+            "name": "Source-Username",
+            "example": "admin",
+            "description": "Username for InfluxDB v1 basic authentication. Applies only to a v1 source, and only together with Source-Password.",
+            "required": false
+        },
+        {
+            "name": "Source-Password",
+            "example": "<your-source-password>",
+            "description": "Password for InfluxDB v1 basic authentication. Applies only to a v1 source, and only together with Source-Username.",
+            "required": false
+        }
     ]
 }
 """
@@ -99,6 +187,7 @@ from influxdata_plugin_utils.sources import (
     KeySpec,
     parse_env,
     parse_json_body,
+    parse_query_parameters,
     parse_request_headers,
     parse_toml,
     parse_trigger_args,
@@ -126,9 +215,13 @@ IMPORT_DIRECTIONS = ("oldest_first", "newest_first")
 STOP_NOUNS = {"cancelled": "cancellation", "paused": "pause"}
 
 ENV_PREFIX = "INFLUXDB3_IMPORT_"
+HEADER_PREFIX = "X-Influxdb3-Import-"
 
 # Credentials are sent as request headers, never through the config layers
 CREDENTIAL_NAMES = ("source-token", "source-username", "source-password")
+
+# the query string names the action and the import it acts on, not a setting
+CONTROL_NAMES = ("action", "import_id")
 
 
 # --- how a raw setting becomes its value, for the validators below ---
@@ -236,10 +329,44 @@ CREDENTIAL_HEADERS = KeySpec(
     rename={name: name.replace("-", "_") for name in CREDENTIAL_NAMES},
 )
 
+
+def header_name(name: str) -> str:
+    """The header a setting is spelled as, prefixed and hyphenated."""
+    return HEADER_PREFIX + name.replace("_", "-").title()
+
+
+# a header outside this list is dropped rather than refused: a client sends
+# headers of its own on every request, and refusing them would refuse the request
+SETTING_HEADERS = KeySpec(
+    allowlist=tuple(header_name(name) for name in VALUE_NAMES),
+    rename={header_name(name): name for name in VALUE_NAMES},
+)
+
 # the read-only actions read a few keys of the body directly and ignore the rest
 SOURCE_KEYS = KeySpec(
     allowlist=["source_url", "influxdb_version", "source_database"]
 )
+
+# an action accepts only the query parameters it reads, so an unknown one is
+# named alongside what that action does accept
+QUERY_ACTION_ONLY = KeySpec(allowlist=("action",), unknown="reject")
+QUERY_WITH_IMPORT_ID = KeySpec(allowlist=CONTROL_NAMES, unknown="reject")
+QUERY_WITH_SETTINGS = KeySpec(
+    allowlist=("action",) + tuple(VALUE_NAMES), unknown="reject"
+)
+
+# resume takes no settings: it reads the configuration the import was started
+# with, and the read-only actions take their source from the request body
+QUERY_KEYS_BY_ACTION = {
+    "start": QUERY_WITH_SETTINGS,
+    "status": QUERY_WITH_IMPORT_ID,
+    "pause": QUERY_WITH_IMPORT_ID,
+    "resume": QUERY_WITH_IMPORT_ID,
+    "cancel": QUERY_WITH_IMPORT_ID,
+    "test_connection": QUERY_ACTION_ONLY,
+    "databases": QUERY_ACTION_ONLY,
+    "tables": QUERY_ACTION_ONLY,
+}
 
 
 class ImportPauseState(Enum):
@@ -284,32 +411,30 @@ class SourceQueryError(Exception):
     """The source accepted the request but reported a failed statement."""
 
 
-def extract_credentials(request_headers) -> Dict[str, Optional[str]]:
-    """
-    Extract credentials from HTTP headers.
-
-    Args:
-        request_headers: HTTP request headers dict
-
-    Returns:
-        What the request carried, keyed source_token, source_username,
-        source_password; a header that was not sent is absent
-    """
-    return parse_request_headers(request_headers, CREDENTIAL_HEADERS)
-
-
 def load_import_settings(
     influxdb3_local,
     task_id: str,
     args: Optional[Dict[str, Any]] = None,
     request_body=None,
+    request_headers=None,
+    query_settings: Optional[Dict[str, Any]] = None,
 ) -> ImportConfig:
     """
-    Load configuration from environment, trigger arguments, TOML file and request body
-    Priority: request body > config file > args > environment variables
-    Within the environment, INFLUXDB3_IMPORT_* wins when a setting is given
-    under both names.
+    Load configuration from every layer a start request can carry.
+
+    Priority: query parameters > headers > request body > config file > args >
+    environment variables. Within the environment, INFLUXDB3_IMPORT_* wins when
+    a setting is given under both names.
     The TOML file path is never read from the request body.
+
+    Args:
+        influxdb3_local: InfluxDB client instance.
+        task_id: Identifier written into the log lines.
+        args: Trigger arguments, and the TOML file they name.
+        request_body: JSON body, parsed here as the other layers are.
+        request_headers: Headers spelled X-Influxdb3-Import-<SETTING>.
+        query_settings: Query parameters already selected by the action's spec,
+            since the action and the import id come off that same parse.
     """
     args = args or {}
     # trimmed, because a trigger argument arrives exactly as it was written and
@@ -326,6 +451,8 @@ def load_import_settings(
         parse_trigger_args(args, ARG_KEYS),
         parse_toml(config_file_path, SETTING_KEYS),
         parse_json_body(request_body, SETTING_KEYS),
+        parse_request_headers(request_headers, SETTING_HEADERS),
+        query_settings or {},
         validators=CONFIG_VALIDATORS,
     )
     if config_file_path:
@@ -3428,28 +3555,48 @@ def process_request(
     HTTP request handler for import plugin
 
     Endpoints:
-    - POST /api/v3/import?action=start - Start new import
-    - GET /api/v3/import?action=status&import_id=<id> - Get import status
-    - POST /api/v3/import?action=pause&import_id=<id> - Pause import
-    - POST /api/v3/import?action=resume&import_id=<id> - Resume import
-    - POST /api/v3/import?action=cancel&import_id=<id> - Cancel import
+    - POST /api/v3/engine/import?action=start - Start new import
+    - GET /api/v3/engine/import?action=status&import_id=<id> - Get import status
+    - POST /api/v3/engine/import?action=pause&import_id=<id> - Pause import
+    - POST /api/v3/engine/import?action=resume&import_id=<id> - Resume import
+    - POST /api/v3/engine/import?action=cancel&import_id=<id> - Cancel import
+
+    Each action accepts only the query parameters it reads; an unknown one is
+    refused and named. On start, a setting may also arrive as a query parameter
+    or an X-Influxdb3-Import-<SETTING> header, both above the request body.
+    Credentials are read from the Source-Token, Source-Username and
+    Source-Password headers.
     """
     task_id: str = str(uuid.uuid4())
     influxdb3_local.info(f"[{task_id}] Import plugin invoked")
 
-    # Determine action from query parameters
-    action = query_parameters.get("action", "start")
-    import_id = query_parameters.get("import_id")
-
-    # Extract credentials from request headers (available for all actions)
-    credentials = extract_credentials(request_headers)
-
     try:
+        action = query_parameters.get("action", "start")
+        spec = QUERY_KEYS_BY_ACTION.get(action)
+        if spec is None:
+            return {
+                "status": "error",
+                "error": f"Unknown action: {action}",
+                "available_actions": list(QUERY_KEYS_BY_ACTION),
+            }
+
+        # what is left once the control keys are taken off is the top settings layer
+        query_settings = parse_query_parameters(query_parameters, spec)
+        query_settings.pop("action", None)
+        import_id = query_settings.pop("import_id", None)
+
+        credentials = parse_request_headers(request_headers, CREDENTIAL_HEADERS)
+
         # Handle different actions
         if action == "start":
             try:
                 config = load_import_settings(
-                    influxdb3_local, task_id, args, request_body
+                    influxdb3_local,
+                    task_id,
+                    args,
+                    request_body,
+                    request_headers,
+                    query_settings,
                 )
             except Exception as e:
                 influxdb3_local.error(f"[{task_id}] Configuration error: {e}")
@@ -3504,22 +3651,6 @@ def process_request(
             if result.get("error"):
                 influxdb3_local.error(f"[{task_id}] tables failed: {result.get('error')}")
             return result
-
-        else:
-            return {
-                "status": "error",
-                "error": f"Unknown action: {action}",
-                "available_actions": [
-                    "start",
-                    "status",
-                    "pause",
-                    "resume",
-                    "cancel",
-                    "test_connection",
-                    "databases",
-                    "tables",
-                ],
-            }
 
     except Exception as e:
         influxdb3_local.error(f"[{task_id}] Failed to process request: {e}")

@@ -89,9 +89,20 @@ REQUIRED_ARGS = {
 }
 
 
-def load(args=None, body=None):
+def load(args=None, body=None, headers=None, query=None):
     return load_import_settings(
-        FakeLocal(), "task", args or {}, json.dumps(body) if body is not None else None
+        FakeLocal(),
+        "task",
+        args or {},
+        json.dumps(body) if body is not None else None,
+        headers,
+        query,
+    )
+
+
+def call_plugin(query, headers=None, body=None, args=None):
+    return import_module.process_request(
+        FakeLocal(), query, headers or {}, body, args or {}
     )
 
 
@@ -766,48 +777,117 @@ class TestQuerySourceInfluxdbV3Auth:
         assert "Authorization" not in headers
 
 
-class TestExtractCredentials:
-    """Tests for extract_credentials function"""
+def read_credentials(headers):
+    """The credentials a request carries, as process_request reads them."""
+    return import_module.parse_request_headers(
+        headers, import_module.CREDENTIAL_HEADERS
+    )
+
+
+class TestCredentialHeaders:
+    """Tests for the CREDENTIAL_HEADERS spec"""
 
     def test_extracts_token_from_headers(self):
-        extract_credentials = import_module.extract_credentials
         # a header that was not sent is absent, and every reader uses .get()
-        headers = {"source-token": "my-secret-token"}
-        result = extract_credentials(headers)
-        assert result == {"source_token": "my-secret-token"}
+        assert read_credentials({"source-token": "my-secret-token"}) == {
+            "source_token": "my-secret-token"
+        }
 
     def test_extracts_username_password_from_headers(self):
-        extract_credentials = import_module.extract_credentials
         headers = {
             "source-username": "admin",
             "source-password": "secret123",
         }
-        result = extract_credentials(headers)
-        assert result == {"source_username": "admin", "source_password": "secret123"}
+        assert read_credentials(headers) == {
+            "source_username": "admin",
+            "source_password": "secret123",
+        }
 
     def test_returns_nothing_for_missing_headers(self):
-        extract_credentials = import_module.extract_credentials
-        assert extract_credentials({}) == {}
+        assert read_credentials({}) == {}
 
     def test_a_header_the_plugin_did_not_ask_for_is_dropped(self):
-        extract_credentials = import_module.extract_credentials
         headers = {"user-agent": "curl", "host": "x", "Source-Token": "tok"}
-        assert extract_credentials(headers) == {"source_token": "tok"}
+        assert read_credentials(headers) == {"source_token": "tok"}
+
+    def test_a_setting_header_is_not_read_as_a_credential(self):
+        headers = {"X-Influxdb3-Import-Source-Url": "http://src", "Source-Token": "tok"}
+        assert read_credentials(headers) == {"source_token": "tok"}
 
     def test_extracts_all_credentials_when_present(self):
-        extract_credentials = import_module.extract_credentials
         # InfluxDB3 normalizes headers to lowercase
         headers = {
             "source-token": "token",
             "source-username": "user",
             "source-password": "pass",
         }
-        result = extract_credentials(headers)
-        assert result == {
+        assert read_credentials(headers) == {
             "source_token": "token",
             "source_username": "user",
             "source_password": "pass",
         }
+
+
+class TestActionQueryParameters:
+    """Tests for QUERY_KEYS_BY_ACTION: an action accepts only what it reads."""
+
+    def test_unknown_action_lists_the_available_ones(self):
+        result = call_plugin({"action": "stat"})
+        assert result["error"] == "Unknown action: stat"
+        assert result["available_actions"] == list(import_module.QUERY_KEYS_BY_ACTION)
+
+    @pytest.mark.parametrize(
+        "query, refusal",
+        [
+            (
+                {"action": "status", "import_ids": "abc"},
+                "may not set 'import_ids'; accepted keys: ['action', 'import_id']",
+            ),
+            (
+                {"action": "resume", "import_id": "i", "target_batch_size": "5000"},
+                "may not set 'target_batch_size'; accepted keys: ['action', 'import_id']",
+            ),
+            (
+                {"action": "databases", "source_url": "http://x"},
+                "may not set 'source_url'; accepted keys: ['action']",
+            ),
+            ({"action": "start", "import_id": "x"}, "may not set 'import_id'"),
+        ],
+    )
+    def test_a_parameter_the_action_does_not_read_is_refused(self, query, refusal):
+        assert refusal in call_plugin(query)["error"]
+
+    def test_an_absent_import_id_is_reported_as_before(self):
+        assert call_plugin({"action": "status"})["error"] == "import_id required"
+
+    @pytest.mark.parametrize("action", list(import_module.QUERY_KEYS_BY_ACTION))
+    def test_every_declared_action_is_dispatched(self, action, clean_environment):
+        # the dispatch has no fallback branch, so an action declared without one
+        # would answer with None instead of a response
+        assert isinstance(call_plugin({"action": action}), dict)
+
+    def test_start_reads_its_settings_and_credentials_from_the_request(
+        self, clean_environment
+    ):
+        captured = {}
+
+        def fake_start(influxdb3_local, config, credentials, task_id):
+            captured.update(config=config, credentials=credentials)
+            return {"status": "started"}
+
+        with patch.object(import_module, "start_import", fake_start):
+            result = call_plugin(
+                {"action": "start", **REQUIRED_ARGS, "target_batch_size": "5000"},
+                {"Source-Token": "tok"},
+            )
+
+        # ImportConfig has no action field, so the action left in the settings
+        # layer would have raised TypeError instead of loading
+        assert result == {"status": "started"}
+        # a query parameter arrives as text, so the validator cast has to run
+        assert captured["config"].target_batch_size == 5000
+        assert captured["config"].influxdb_version == 1
+        assert captured["credentials"] == {"source_token": "tok"}
 
 
 class TestConfigurationLayers:
@@ -864,6 +944,32 @@ class TestConfigurationLayers:
 
         args = {**REQUIRED_ARGS, "config_file_path": "from_args.toml"}
         assert load(args).dest_database == "args_toml"
+
+    def test_headers_and_the_query_string_sit_above_the_body(self, clean_environment):
+        body = {**REQUIRED_ARGS, "target_batch_size": "11"}
+        assert load(body=body).target_batch_size == 11
+
+        headers = {"X-Influxdb3-Import-Target-Batch-Size": "22"}
+        assert load(body=body, headers=headers).target_batch_size == 22
+
+        query = {"target_batch_size": "33"}
+        assert load(body=body, headers=headers, query=query).target_batch_size == 33
+
+    def test_a_setting_header_is_matched_whatever_its_casing(self, clean_environment):
+        headers = {"x-influxdb3-import-dest-database": "from-header"}
+        assert load(REQUIRED_ARGS, headers=headers).dest_database == "from-header"
+
+    def test_a_credential_under_the_setting_prefix_is_not_a_setting(
+        self, clean_environment
+    ):
+        # ImportConfig has no source_token field, so reading that header as a
+        # setting would have raised instead of loading
+        headers = {
+            "user-agent": "curl",
+            "X-Influxdb3-Import-Source-Token": "tok",
+            "X-Influxdb3-Import-Dest-Database": "from-header",
+        }
+        assert load(REQUIRED_ARGS, headers=headers).dest_database == "from-header"
 
     def test_body_may_not_name_a_config_file(self, clean_environment):
         with pytest.raises(ValueError) as failure:

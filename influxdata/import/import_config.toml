@@ -1,9 +1,10 @@
 # Import Plugin Configuration Template
 # Reference this file with `--trigger-arguments config_file_path=import_config.toml`
 # or with INFLUXDB3_IMPORT_CONFIG_FILE_PATH; the argument wins when both name a
-# file, and the request body may not name one. The path may be absolute or
+# file, and the request may not name one. The path may be absolute or
 # relative to the plugin directory. Values here override the same keys passed
-# inline; the request body overrides both. An unknown key is an error.
+# inline; the request body, the X-Influxdb3-Import-* headers and the query
+# string override both, in that order. An unknown key is an error.
 # This plugin is designed for HTTP-triggered importing between InfluxDB instances
 
 ########## Required Parameters ##########

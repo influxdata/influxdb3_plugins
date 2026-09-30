@@ -212,6 +212,10 @@ Start a new import from source InfluxDB to InfluxDB 3.
 }
 ```
 
+Any of these keys may arrive as a query parameter or as an
+`X-Influxdb3-Import-<PARAMETER>` header instead, both of which override the
+body. See "Configuration Priority and Loading" below.
+
 ### Get Import Status
 
 Check the status and progress of a import.
@@ -634,16 +638,30 @@ This plugin supports using TOML configuration files to specify all plugin argume
 
 The import plugin loads configuration from multiple sources with the following priority order (highest to lowest):
 
-1. **HTTP Request Body** (highest priority) - JSON parameters in POST request body
-2. **TOML Configuration File** - Parameters from file specified in `config_file_path`
-3. **Trigger Arguments** - Parameters from `--trigger-arguments` when creating trigger
-4. **Environment Variables** (lowest priority) - System environment variables
+1. **Query Parameters** (highest priority) - Parameters in the query string of the `action=start` request
+2. **Request Headers** - Parameters spelled `X-Influxdb3-Import-<PARAMETER>`
+3. **HTTP Request Body** - JSON parameters in POST request body
+4. **TOML Configuration File** - Parameters from file specified in `config_file_path`
+5. **Trigger Arguments** - Parameters from `--trigger-arguments` when creating trigger
+6. **Environment Variables** (lowest priority) - System environment variables
 
 Each source overrides only the keys it sets, so a TOML file may hold the stable
-settings while the request body supplies the time range for one import. The
+settings while the request supplies the time range for one import. The
 `config_file_path` comes from the trigger arguments or from
-`INFLUXDB3_IMPORT_CONFIG_FILE_PATH`, the argument winning; neither the TOML file
-nor the request body may point at a configuration file.
+`INFLUXDB3_IMPORT_CONFIG_FILE_PATH`, the argument winning; the request may not
+point at a configuration file, and neither may the file itself.
+
+Only `action=start` assembles its configuration from these layers. The other
+actions read less:
+
+- `action=resume` reads no settings from the request at all. It continues with
+  the configuration its import was started with, kept in the `import_config`
+  table.
+- `action=test_connection`, `action=databases` and `action=tables` take their
+  source parameters from the JSON request body only — never from the
+  environment, the trigger arguments or the TOML file. Each of these actions is
+  documented above with the keys it needs. `databases` and `tables` also read
+  the credential headers; `test_connection` only probes the URL and sends none.
 
 ### Configuration Loading Process
 
@@ -659,12 +677,63 @@ config_file_path=import_config.toml, source_url=http://localhost:8086, etc.
 # 3. Override with TOML file contents (if config_file_path specified)
 [from import_config.toml file]
 
-# 4. Override with HTTP request body (highest priority)
+# 4. Override with the HTTP request body
 {
     "source_url": "http://localhost:8086",
     ...
 }
+
+# 5. Override with request headers
+X-Influxdb3-Import-Source-Url: http://localhost:8086
+
+# 6. Override with query parameters (highest priority)
+?action=start&source_url=http://localhost:8086
 ```
+
+### Request Headers Supported
+
+Every parameter except `config_file_path` can come from a header named
+`X-Influxdb3-Import-<PARAMETER>` with underscores written as hyphens — for
+example, `X-Influxdb3-Import-Source-Url` sets `source_url` and
+`X-Influxdb3-Import-Target-Batch-Size` sets `target_batch_size`. Casing does not
+matter, as RFC 9110 asks. A header the plugin does not ask for is ignored, so
+the request still carries whatever else the client sends.
+
+Credentials are **not** among these. They keep their own unprefixed headers, and
+`X-Influxdb3-Import-Source-Token` is ignored rather than read as a token:
+
+```bash
+-H "Source-Token: my-super-secret-token"
+-H "Source-Username: admin" -H "Source-Password: my-password"
+```
+
+A header value must be ASCII. InfluxDB 3 closes the connection without a reply
+when one is not, and the plugin is never invoked, so a `table_filter` naming a
+measurement outside ASCII belongs in the request body or the query string.
+
+### Query Parameters Supported
+
+Every parameter except `config_file_path` can come from the query string of an
+`action=start` request, spelled exactly as the parameter is. Unlike a header,
+a query parameter is matched case-sensitively, so `Source_Url` is refused:
+
+```bash
+curl -X POST "http://localhost:8181/api/v3/engine/import?action=start&source_url=http://localhost:8086&source_database=telegraf&influxdb_version=1"
+```
+
+Each action accepts only the parameters it reads, and an unknown one is refused
+and named along with what that action accepts — `?action=status&import_ids=abc`
+answers `Query parameters may not set 'import_ids'; accepted keys: ['action',
+'import_id']`.
+
+Three cautions specific to the query string:
+
+- A `+` in a timestamp is decoded as a space, so write the offset as `Z` or
+  percent-encode it: `start_timestamp=2024-01-01T00%3A00%3A00%2B03%3A00`.
+- An empty value is ignored rather than treated as a value, so `?table_filter=`
+  does not clear a filter set by the TOML file.
+- A value outside ASCII is carried correctly when percent-encoded as UTF-8,
+  which makes the query string the way to name such a measurement.
 
 ### Environment Variables Supported
 
@@ -791,21 +860,18 @@ influxdb3 query --database mydb "SELECT * FROM import_pause_state WHERE import_i
 
 #### `process_request(influxdb3_local, query_parameters, request_headers, request_body, args)`
 
-HTTP request handler that routes to appropriate import actions based on the `action` query parameter. Extracts
-credentials from `request_headers` using `extract_credentials()` and passes them to action handlers.
+HTTP request handler that routes to appropriate import actions based on the `action` query parameter. Each action
+accepts only the query parameters it reads, so an unknown one is refused and named alongside the accepted keys. Reads
+the credentials from the `Source-Token`, `Source-Username` and `Source-Password` headers and passes them to the action
+handlers; a header that was not sent is absent from that dict.
 
-#### `extract_credentials(request_headers)`
+#### `load_import_settings(influxdb3_local, task_id, args, request_body, request_headers, query_settings)`
 
-Extracts authentication credentials from HTTP headers. Returns a dict with keys `source_token`, `source_username`,
-`source_password` (values are `None` if header not present).
-
-#### `load_import_settings(influxdb3_local, task_id, args, request_body)`
-
-Assembles the import configuration from environment variables, trigger arguments, the TOML file and the request body, in
-that order of precedence, then validates it: required parameters must be present, numeric and boolean parameters are
-coerced, and `influxdb_version` and `import_direction` must be one of their supported values. The TOML file path comes
-from the trigger arguments or from `INFLUXDB3_IMPORT_CONFIG_FILE_PATH`. Raises on the first problem, naming the
-parameter.
+Assembles the import configuration from environment variables, trigger arguments, the TOML file, the request body, the
+`X-Influxdb3-Import-*` headers and the query parameters, in that order of precedence, then validates it: required
+parameters must be present, numeric and boolean parameters are coerced, and `influxdb_version` and `import_direction`
+must be one of their supported values. The TOML file path comes from the trigger arguments or from
+`INFLUXDB3_IMPORT_CONFIG_FILE_PATH`. Raises on the first problem, naming the parameter.
 
 #### `start_import(influxdb3_local, config, credentials, task_id)`
 

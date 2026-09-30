@@ -52,11 +52,17 @@ import time
 import uuid
 
 import psutil
-from influxdata_plugin_utils.config import Validator, load_plugin_config
+from influxdata_plugin_utils.config import Config, Validator, load_config
 from influxdata_plugin_utils.parsing import parse_bool, parse_int
+from influxdata_plugin_utils.sources import (
+    KeySpec,
+    parse_env,
+    parse_toml,
+    parse_trigger_args,
+)
 from influxdata_plugin_utils.write import build_line_typed, write_data
 
-_VALIDATORS = [
+SETTING_VALIDATORS: list = [
     Validator("hostname", default="localhost", cast=str),
     Validator("include_cpu", default=True, cast=parse_bool),
     Validator("include_memory", default=True, cast=parse_bool),
@@ -64,6 +70,27 @@ _VALIDATORS = [
     Validator("include_network", default=True, cast=parse_bool),
     Validator("max_retries", default=3, cast=lambda raw: parse_int(raw, minimum=0)),
 ]
+
+SETTINGS = KeySpec(
+    allowlist=tuple(
+        dict.fromkeys(name for rule in SETTING_VALIDATORS for name in rule.names)
+    )
+)
+
+ENV_PREFIX = "INFLUXDB3_SYSTEM_METRICS_"
+
+
+def env_spec(*names: str) -> KeySpec:
+    """Read the named settings from ``INFLUXDB3_SYSTEM_METRICS_<SETTING>``.
+
+    The prefix is stripped again, so a variable merges with the same setting
+    coming from a trigger argument or the TOML file.
+    """
+    rename = {f"{ENV_PREFIX}{name.upper()}": name for name in names}
+    return KeySpec(allowlist=tuple(rename), rename=rename)
+
+
+ENV_SETTINGS = env_spec(*SETTINGS.allowlist)
 
 # Cached psutil counters, used to derive rates and shares between two runs
 _DISK_IO_STATE_KEY = "system_metrics:disk_io"
@@ -90,52 +117,6 @@ _CPU_TIME_FIELDS = (
     "guest",
     "guest_nice",
 )
-
-
-def _load_config(influxdb3_local, args: dict, task_id: str) -> dict | None:
-    """
-    Load the plugin configuration, applying defaults and type casts.
-
-    Values from a TOML file referenced by 'config_file_path' override the inline
-    trigger arguments. A config file that cannot be read is reported and skipped,
-    so collection continues with the inline arguments.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        args (dict): Runtime arguments of the trigger.
-        task_id (str): Unique task identifier.
-
-    Returns:
-        dict | None: Config values keyed by lower-case name, or None if the
-        inline arguments themselves are invalid.
-    """
-    args = args or {}
-    config_file_path = args.get("config_file_path")
-    if config_file_path and not str(config_file_path).endswith(".toml"):
-        influxdb3_local.error(
-            f"[{task_id}] Invalid config file format: expected a .toml file"
-        )
-        config_file_path = None
-
-    try:
-        loaded = load_plugin_config(args, validators=_VALIDATORS, source="args")
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Failed to load configuration: {e}")
-        return None
-
-    if config_file_path:
-        try:
-            loaded = load_plugin_config(args, validators=_VALIDATORS, source="merge")
-            influxdb3_local.info(
-                f"[{task_id}] Loaded configuration from {config_file_path}"
-            )
-        except Exception as e:
-            influxdb3_local.error(
-                f"[{task_id}] Failed to apply config file '{config_file_path}': {e}. "
-                f"Continuing with inline arguments"
-            )
-
-    return {key.lower(): value for key, value in loaded.as_dict().items()}
 
 
 def _float_fields(**values) -> dict:
@@ -528,9 +509,20 @@ def _collect_with_retry(
 
 def process_scheduled_call(influxdb3_local, call_time, args=None):
     task_id = str(uuid.uuid4())
+    args = args or {}
 
-    config: dict | None = _load_config(influxdb3_local, args, task_id)
-    if config is None:
+    try:
+        config_file_path = args.get("config_file_path") or parse_env(
+            env_spec("config_file_path")
+        ).get("config_file_path")
+        config: Config = load_config(
+            parse_env(ENV_SETTINGS),
+            parse_trigger_args(args, SETTINGS),
+            parse_toml(config_file_path, SETTINGS),
+            validators=SETTING_VALIDATORS,
+        )
+    except Exception as e:
+        influxdb3_local.error(f"[{task_id}] Configuration error: {e}")
         return
 
     hostname: str = config["hostname"]

@@ -141,7 +141,6 @@ from system_metrics import (
     _disk_io_sample,
     _disk_performance_fields,
     _float_fields,
-    _load_config,
     _uint_fields,
     collect_cpu_metrics,
     collect_disk_metrics,
@@ -209,37 +208,34 @@ def measurements(lines):
 # --------------------------------------------------------------------------
 
 
-def test_config_defaults(client):
-    config = _load_config(client, None, "task")
+def test_config_defaults(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
 
-    assert config["hostname"] == "localhost"
-    assert config["max_retries"] == 3
-    assert all(
-        config[key]
-        for key in ("include_cpu", "include_memory", "include_disk", "include_network")
-    )
+    process_scheduled_call(client, None, None)
+
+    assert [name for name, _ in calls] == ["cpu", "memory", "disk", "network"]
+    assert all(hostname == "localhost" for _, hostname in calls)
 
 
-def test_config_casts_inline_args(client):
-    config = _load_config(
+def test_config_casts_inline_args(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+
+    process_scheduled_call(
         client,
+        None,
         {
             "hostname": "web-1",
             "include_cpu": "no",
             "include_memory": "0",
             "include_disk": "off",
             "include_network": "yes",
-            "max_retries": "5",
         },
-        "task",
     )
 
-    assert config["hostname"] == "web-1"
-    assert config["include_cpu"] is False
-    assert config["include_memory"] is False
-    assert config["include_disk"] is False
-    assert config["include_network"] is True
-    assert config["max_retries"] == 5
+    assert [name for name, _ in calls] == ["network"]
+    assert all(hostname == "web-1" for _, hostname in calls)
 
 
 @pytest.mark.parametrize(
@@ -250,76 +246,97 @@ def test_config_casts_inline_args(client):
         ({"max_retries": "-1"}, "below minimum 0"),
     ],
 )
-def test_config_rejects_invalid_values(client, args, expected):
-    assert _load_config(client, args, "task") is None
+def test_config_rejects_invalid_values(client, monkeypatch, args, expected):
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+
+    process_scheduled_call(client, None, args)
+
+    assert not calls
+    assert "Configuration error" in client.messages("error")[0]
     assert expected in client.messages("error")[0]
 
 
-def test_config_toml_overrides_inline_args(client, plugin_dir):
-    (plugin_dir / "sm.toml").write_text(
-        'hostname = "from-toml"\ninclude_cpu = false\nmax_retries = 1\n'
+def test_config_toml_overrides_inline_args(client, monkeypatch, plugin_dir):
+    (plugin_dir / "sm.toml").write_text('hostname = "from-toml"\ninclude_cpu = false\n')
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+
+    process_scheduled_call(
+        client, None, {"hostname": "from-args", "config_file_path": "sm.toml"}
     )
 
-    config = _load_config(
-        client,
-        {"hostname": "from-args", "config_file_path": "sm.toml"},
-        "task",
-    )
-
-    assert config["hostname"] == "from-toml"
-    assert config["include_cpu"] is False
-    assert config["max_retries"] == 1
-    assert config["include_memory"] is True  # untouched default
-    assert "Loaded configuration from sm.toml" in client.messages("info")[0]
+    assert [name for name, _ in calls] == ["memory", "disk", "network"]
+    assert all(hostname == "from-toml" for _, hostname in calls)
 
 
-def test_config_missing_toml_keeps_inline_args(client, plugin_dir):
-    config = _load_config(
-        client,
-        {"hostname": "fallback", "config_file_path": "absent.toml"},
-        "task",
-    )
+@pytest.mark.parametrize(
+    "filename, contents, expected",
+    [
+        ("absent.toml", None, "Cannot read config file"),
+        ("sm.yaml", 'hostname = "from-file"\n', "expected a .toml file"),
+        ("sm.toml", 'include_cpu = "maybe"\n', "Invalid boolean: 'maybe'"),
+    ],
+)
+def test_config_file_that_cannot_be_used_stops_the_run(
+    client, monkeypatch, plugin_dir, filename, contents, expected
+):
+    if contents is not None:
+        (plugin_dir / filename).write_text(contents)
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
 
-    assert config["hostname"] == "fallback"
-    error = client.messages("error")[0]
-    assert "Failed to apply config file 'absent.toml'" in error
-    assert "Continuing with inline arguments" in error
+    process_scheduled_call(client, None, {"config_file_path": filename})
 
-
-def test_config_ignores_file_with_wrong_extension(client, plugin_dir):
-    (plugin_dir / "sm.yaml").write_text('hostname = "from-file"\n')
-
-    config = _load_config(
-        client,
-        {"hostname": "from-args", "config_file_path": "sm.yaml"},
-        "task",
-    )
-
-    assert config["hostname"] == "from-args"
-    assert "expected a .toml file" in client.messages("error")[0]
+    assert not calls
+    assert not client.writes
+    assert "Configuration error" in client.messages("error")[0]
+    assert expected in client.messages("error")[0]
 
 
-def test_config_invalid_toml_value_keeps_inline_args(client, plugin_dir):
-    (plugin_dir / "sm.toml").write_text('include_cpu = "maybe"\n')
-
-    config = _load_config(
-        client,
-        {"include_cpu": "false", "config_file_path": "sm.toml"},
-        "task",
-    )
-
-    assert config["include_cpu"] is False
-    assert "Invalid boolean: 'maybe'" in client.messages("error")[0]
-
-
-def test_config_accepts_absolute_toml_path(client, tmp_path, monkeypatch):
+def test_config_accepts_absolute_toml_path(client, monkeypatch, tmp_path):
     monkeypatch.delenv("PLUGIN_DIR", raising=False)
     config_file = tmp_path / "abs.toml"
     config_file.write_text('hostname = "abs-path"\n')
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
 
-    config = _load_config(client, {"config_file_path": str(config_file)}, "task")
+    process_scheduled_call(client, None, {"config_file_path": str(config_file)})
 
-    assert config["hostname"] == "abs-path"
+    assert calls and all(hostname == "abs-path" for _, hostname in calls)
+
+
+def test_config_reads_settings_from_the_environment(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_HOSTNAME", "from-env")
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_INCLUDE_CPU", "false")
+
+    process_scheduled_call(client, None, None)
+
+    assert [name for name, _ in calls] == ["memory", "disk", "network"]
+    assert all(hostname == "from-env" for _, hostname in calls)
+
+
+def test_config_inline_args_override_the_environment(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_HOSTNAME", "from-env")
+
+    process_scheduled_call(client, None, {"hostname": "from-args"})
+
+    assert calls and all(hostname == "from-args" for _, hostname in calls)
+
+
+def test_config_file_path_comes_from_the_environment(client, monkeypatch, plugin_dir):
+    (plugin_dir / "sm.toml").write_text('hostname = "from-toml"\n')
+    calls = []
+    monkeypatch.setattr(system_metrics, "_COLLECTORS", _fake_collectors(calls))
+    monkeypatch.setenv("INFLUXDB3_SYSTEM_METRICS_CONFIG_FILE_PATH", "sm.toml")
+
+    process_scheduled_call(client, None, None)
+
+    assert calls and all(hostname == "from-toml" for _, hostname in calls)
 
 
 # --------------------------------------------------------------------------

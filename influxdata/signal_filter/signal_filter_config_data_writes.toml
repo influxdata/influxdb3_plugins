@@ -3,8 +3,8 @@
 #   --trigger-arguments config_file_path=<relative_path>
 # Example: If the file is at /plugins/configs/signal_filter_config_data_writes.toml, use
 #   config_file_path=configs/signal_filter_config_data_writes.toml
-# This file supplies all parameters; it is mutually exclusive with inline
-# trigger arguments (passing both is rejected).
+# This file is layered over the inline trigger arguments: where both set a key,
+# the value here wins.
 
 ########## Required Parameters ##########
 # Filter type: 'lowpass', 'highpass', 'bandpass', or 'bandstop'.
@@ -62,8 +62,11 @@ init_from_first_sample = true  # e.g., true, false
 #output_field = "smoothed"  # e.g., "smoothed"
 
 # Output field name = field_prefix + (output_field or source field) + field_suffix.
-#field_prefix = ""  # e.g., "flt_"
-field_suffix = "_filtered"  # e.g., "_filtered"
+# Use "none" for no affix; an empty value counts as unset, so the default applies.
+# A suffix of "none" with no prefix writes into the source field, replacing its
+# samples: the plugin warns about it and the raw values are gone for good.
+#field_prefix = "flt_"  # e.g., "flt_", "none"
+field_suffix = "_filtered"  # e.g., "_filtered", "none"
 
 ###### Example: Create Trigger Using This Config ######
 # influxdb3 create trigger \

@@ -1,1 +1,2 @@
+influxdata-plugin-utils>=0.5.0
 requests

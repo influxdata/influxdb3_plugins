@@ -48,6 +48,8 @@
         },
 
         "cpu": {
+            "target_table": "cpu_clean",
+
             "tags": {
                 "host": {
                     "required": true

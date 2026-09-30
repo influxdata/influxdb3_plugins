@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "schema_validator"
-version = "0.2.0"
+version = "0.3.0"
 description = "Validates incoming line protocol data against a JSON schema."
 triggers = ["process_writes"]
 homepage = "https://www.influxdata.com/"
@@ -16,3 +16,4 @@ exclude = [
 
 [dependencies]
 database_version = ">=3.8.2"
+python = ["influxdata-plugin-utils>=0.5.0"]

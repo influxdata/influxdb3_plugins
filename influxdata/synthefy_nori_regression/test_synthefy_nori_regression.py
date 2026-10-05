@@ -1,9 +1,9 @@
-"""Unit tests for the nori_regression plugin.
+"""Unit tests for the synthefy_nori_regression plugin.
 
 Mirrors the mock-based approach used across this repo: a fake influxdb3_local, a fake LineBuilder
 and a fake `requests` module, so no engine and no network are needed.
 
-    pytest influxdata/nori_regression/test_nori_regression.py
+    pytest influxdata/synthefy_nori_regression/test_synthefy_nori_regression.py
 """
 
 import json
@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
-import nori_regression as nr  # noqa: E402
+import synthefy_nori_regression as nr  # noqa: E402
 
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 NS = 1_000_000_000
@@ -422,7 +422,7 @@ def test_toml_config_cannot_be_combined_with_inline_arguments(tmp_path):
 
 def test_the_shipped_toml_template_loads():
     """Catches drift between the template and the parameters the code accepts."""
-    template = os.path.join(os.path.dirname(__file__), "nori_regression_config_scheduler.toml")
+    template = os.path.join(os.path.dirname(__file__), "synthefy_nori_regression_config_scheduler.toml")
     cfg = nr._load_config({"config_file_path": template})
     assert cfg["measurement"] == "sensors"
     assert cfg["field"] == "pressure"

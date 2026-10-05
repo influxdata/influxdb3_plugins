@@ -1,4 +1,4 @@
-# Nori Regression Plugin
+# Synthefy Nori Regression Plugin
 
 ⚡ scheduled, http 🏷️ regression, tabular, machine-learning, imputation 🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
@@ -147,15 +147,15 @@ Set the `PLUGIN_DIR` environment variable and reference the file with the `confi
 argument (relative paths resolve against `PLUGIN_DIR`, then `INFLUXDB3_PLUGIN_DIR`, then the parent
 of `VIRTUAL_ENV`). The TOML file then supplies **all** parameters — it is mutually exclusive with
 inline trigger arguments and with an HTTP request body. See
-[`nori_regression_config_scheduler.toml`](nori_regression_config_scheduler.toml) for an annotated
+[`synthefy_nori_regression_config_scheduler.toml`](synthefy_nori_regression_config_scheduler.toml) for an annotated
 template.
 
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --path "gh:influxdata/nori_regression/nori_regression.py" \
+  --path "gh:influxdata/synthefy_nori_regression/synthefy_nori_regression.py" \
   --trigger-spec "every:1h" \
-  --trigger-arguments config_file_path=nori_regression_config_scheduler.toml \
+  --trigger-arguments config_file_path=synthefy_nori_regression_config_scheduler.toml \
   nori_from_toml
 ```
 
@@ -178,9 +178,9 @@ influxdb3 create trigger \
    ```
 
 2. Reference the plugin directly from this repository with the `gh:` prefix (the form used in the
-   examples below): `--path "gh:influxdata/nori_regression/nori_regression.py"`. Alternatively, copy
-   `nori_regression.py` into your plugin directory (the one passed to `influxdb3 serve
-   --plugin-dir`) and use `--path nori_regression.py`.
+   examples below): `--path "gh:influxdata/synthefy_nori_regression/synthefy_nori_regression.py"`. Alternatively, copy
+   `synthefy_nori_regression.py` into your plugin directory (the one passed to `influxdb3 serve
+   --plugin-dir`) and use `--path synthefy_nori_regression.py`.
 
 3. Set the Nori gateway key on the InfluxDB host, so the scheduled trigger can read it:
 
@@ -230,7 +230,7 @@ it from `temp` and `humidity`:
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --path "gh:influxdata/nori_regression/nori_regression.py" \
+  --path "gh:influxdata/synthefy_nori_regression/synthefy_nori_regression.py" \
   --trigger-spec "every:15m" \
   --trigger-arguments measurement=sensors,field=pressure,feature_fields="temp humidity",tags=site:A,model=synthefy/nori-30m \
   nori_sensors_pressure
@@ -244,7 +244,7 @@ no prediction. Once the window is fully imputed, the trigger stops calling the g
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --path "gh:influxdata/nori_regression/nori_regression.py" \
+  --path "gh:influxdata/synthefy_nori_regression/synthefy_nori_regression.py" \
   --trigger-spec "request:nori_regress" \
   nori_http
 ```
@@ -271,7 +271,7 @@ sensors,site=A temp=21.0,humidity=41.0 1767229260
 ```bash
 influxdb3 create trigger \
   --database mydb \
-  --path "gh:influxdata/nori_regression/nori_regression.py" \
+  --path "gh:influxdata/synthefy_nori_regression/synthefy_nori_regression.py" \
   --trigger-spec "every:15m" \
   --trigger-arguments measurement=sensors,field=pressure,feature_fields="temp humidity",tags=site:A,model=synthefy/nori-30m,min_history=3 \
   nori_example
@@ -433,9 +433,9 @@ pointed message rather than letting the gateway answer `404`. One API key from t
 
 ### Files
 
-- `nori_regression.py`: the plugin (metadata docstring and implementation).
-- `nori_regression_config_scheduler.toml`: annotated TOML configuration template.
-- `test_nori_regression.py`: unit tests (`pytest influxdata/nori_regression/`); no engine or
+- `synthefy_nori_regression.py`: the plugin (metadata docstring and implementation).
+- `synthefy_nori_regression_config_scheduler.toml`: annotated TOML configuration template.
+- `test_synthefy_nori_regression.py`: unit tests (`pytest influxdata/synthefy_nori_regression/`); no engine or
   network needed.
 - `requirements.txt`: Python dependencies.
 - `manifest.toml`: packaging metadata.

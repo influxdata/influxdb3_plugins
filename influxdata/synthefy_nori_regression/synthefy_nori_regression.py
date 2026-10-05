@@ -21,7 +21,7 @@
         {"name": "request_timeout", "example": "300s", "description": "Timeout for one gateway call. A cold start can take 60-130s, so keep this well above that.", "required": false},
         {"name": "max_retries", "example": "3", "description": "Maximum attempts per gateway call and per write (1 disables retry).", "required": false},
         {"name": "skip_existing", "example": "true", "description": "Skip rows that already hold a prediction in output_measurement, so a repeating schedule does not re-send and re-bill the same rows. Set false to refresh earlier predictions with newer training data.", "required": false},
-        {"name": "config_file_path", "example": "nori_regression_config_scheduler.toml", "description": "Path to a TOML file supplying all parameters, relative to PLUGIN_DIR. Mutually exclusive with inline trigger arguments.", "required": false}
+        {"name": "config_file_path", "example": "synthefy_nori_regression_config_scheduler.toml", "description": "Path to a TOML file supplying all parameters, relative to PLUGIN_DIR. Mutually exclusive with inline trigger arguments.", "required": false}
     ],
     "http_args_config": [
         {"name": "measurement", "example": "sensors", "description": "Source measurement. May also be provided in the JSON request body.", "required": false},
@@ -43,7 +43,7 @@
         {"name": "request_timeout", "example": "300s", "description": "Timeout for one gateway call. Trigger argument only.", "required": false},
         {"name": "max_retries", "example": "3", "description": "Maximum attempts per gateway call and per write. Trigger argument only.", "required": false},
         {"name": "skip_existing", "example": "true", "description": "Skip rows that already hold a prediction. Trigger argument only.", "required": false},
-        {"name": "config_file_path", "example": "nori_regression_config_scheduler.toml", "description": "Path to a TOML file supplying all parameters, relative to PLUGIN_DIR. Trigger argument only: the request body cannot name a file to read. Mutually exclusive with a request body.", "required": false}
+        {"name": "config_file_path", "example": "synthefy_nori_regression_config_scheduler.toml", "description": "Path to a TOML file supplying all parameters, relative to PLUGIN_DIR. Trigger argument only: the request body cannot name a file to read. Mutually exclusive with a request body.", "required": false}
     ]
 }
 """

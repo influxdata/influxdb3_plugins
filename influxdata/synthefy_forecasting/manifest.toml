@@ -11,6 +11,7 @@ documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influ
 exclude = [
   ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
   ".claude/", ".vscode/", ".idea/", ".DS_Store",
+  "logo.svg", "logo.png",
   "*.py", "!synthefy_forecasting.py",
 ]
 

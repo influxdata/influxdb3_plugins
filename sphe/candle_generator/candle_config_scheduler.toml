@@ -1,0 +1,84 @@
+# Candle Generator Plugin Scheduler Configuration Template
+# Copy this file to your PLUGIN_DIR and reference it with `--trigger-arguments config_file_path=candle_config_scheduler.toml`
+
+########## Required Parameters ##########
+# Name of the source measurement containing InfluxProchainDataPoint data
+# Specify the measurement name (string) from your source InfluxDB database
+source_measurement = "prochain_data"  # e.g., "prochain_data", "trades", "market_data"
+
+# Name of the target measurement to write candle data
+# Specify the target measurement name (string)
+target_measurement = "prochain_candles"  # e.g., "candles_30s", "candles_1m", "candles_5m"
+
+# Candle timeframe for aggregation
+# Supported timeframes: "30s", "60s", "300s"
+timeframe = "30s"  # e.g., "30s", "60s", "300s"
+
+# Time window for each candle generation job
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
+window = "1h"  # e.g., "30min", "1h", "6h", "1d"
+
+
+########## Optional Parameters ##########
+# Time offset to shift the window
+# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days), w (weeks)
+#offset = "10s"  # e.g., "10s", "1h"
+
+# Specific mint address to filter for candle generation
+# Leave commented or empty to process all mints
+#mint_filter = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # e.g., specific token mint address
+
+# Maximum number of retries for write operations
+# Integer value ≥ 0; default is typically 5
+#max_retries = 5  # e.g., 3, 10
+
+# Target database for writing candle data
+# Specify the target database name (string); if omitted, source database is used
+#target_database = "candles_db"  # e.g., "analytics_db", "candles_data"
+
+###### Example Configurations for Different Timeframes ######
+
+# 30-second candles
+# timeframe = "30s"
+# window = "30min"
+
+# 1-minute candles  
+# timeframe = "60s"
+# window = "1h"
+
+# 5-minute candles
+# timeframe = "300s"
+# window = "6h"
+
+###### Example: Create Trigger Using This Config ######
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --plugin-filename candle_generator.py \
+#   --trigger-spec "every:1h" \
+#   --trigger-arguments config_file_path=candle_config_scheduler.toml \
+#   prochain_candles_30s
+
+###### Example: Multiple Triggers for Different Timeframes ######
+# 30s candles - every 30 minutes
+# influxdb3 create trigger \
+#   --database prochain_db \
+#   --plugin-filename candle_generator.py \
+#   --trigger-spec "every:30min" \
+#   --trigger-arguments 'source_measurement=prochain_data,target_measurement=candles_30s,timeframe=30s,window=30min' \
+#   prochain_candles_30s
+
+# 60s candles - every hour
+# influxdb3 create trigger \
+#   --database prochain_db \
+#   --plugin-filename candle_generator.py \
+#   --trigger-spec "every:1h" \
+#   --trigger-arguments 'source_measurement=prochain_data,target_measurement=candles_60s,timeframe=60s,window=1h' \
+#   prochain_candles_60s
+
+# 300s candles - every 6 hours
+# influxdb3 create trigger \
+#   --database prochain_db \
+#   --plugin-filename candle_generator.py \
+#   --trigger-spec "every:6h" \
+#   --trigger-arguments 'source_measurement=prochain_data,target_measurement=candles_300s,timeframe=300s,window=6h' \
+#   prochain_candles_300s

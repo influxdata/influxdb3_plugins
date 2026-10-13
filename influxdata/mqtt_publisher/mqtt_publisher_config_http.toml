@@ -1,0 +1,217 @@
+# MQTT Publisher Plugin — HTTP backfill trigger configuration template
+# Copy this file to your PLUGIN_DIR and reference it with
+#   --trigger-arguments config_file_path=mqtt_publisher_config_http.toml
+# Example: if the file is at /plugins/configs/mqtt_publisher_config_http.toml, use
+#   config_file_path=configs/mqtt_publisher_config_http.toml
+#
+# An HTTP trigger builds a client per request, so give it its own client_id or
+# none at all: sharing an explicit identifier with a long-lived write trigger
+# makes the two evict each other on every call.
+#
+# The file ranks above the trigger arguments. A request body may override the
+# subset listed under "Settings a request may override" at the end; every other
+# setting comes only from this file, the arguments or the environment.
+
+########## Required Parameters ##########
+# Broker address and transport in one value:
+# mqtt://, mqtts://, ws://, wss://, unix:///path, or a bare host[:port].
+# The port defaults by scheme: 1883, 8883, 80, 443; TLS is chosen by the scheme
+broker_url = "mqtt://your-broker:1883"  # e.g., "mqtts://broker.example.com:8883"
+
+# Default table to backfill. One call handles one table; a request may name
+# another, and its schema is read on first use. An array or a space-separated
+# string, of which the first entry is used
+source_measurements = ["your_measurement"]  # e.g., ["press_line"]
+
+# Topic to publish to, overridable from a request so one trigger can replay into
+# a consumer's own namespace. {column} is replaced by that column's value in the
+# row, {_table} by the table name, {_field} by the field name under
+# layout="field". A substituted value may not contain /, + or #, and the topic
+# itself may not contain a wildcard or start with $
+topic = "replay/{machine}/{_table}"
+
+
+########## Credentials ##########
+# This file is the place for them: trigger arguments are readable from the
+# system tables, while the file is read from disk at PLUGIN_DIR
+#username = "publisher"
+#password = "your_password"
+
+
+########## Range ##########
+# backfill_start is inclusive, backfill_end exclusive: [start, end). Adjacent
+# calls therefore chain without republishing the row on the seam. RFC 3339
+# timestamps. Both may be omitted, and then the whole table is published, up to
+# max_backfill_messages. Overridable from a request
+#backfill_start = "2026-10-05T00:00:00Z"
+#backfill_end = "2026-10-05T06:00:00Z"
+
+# "oldest_first" (default) or "newest_first". Overridable from a request
+#backfill_order = "oldest_first"
+
+# Most messages one call publishes across all its pages. Reached, the call
+# answers complete=false with a resume_from to continue from, which keeps a
+# request with no range from replaying a whole table in one shot. Default
+# 1000000; 0 removes the cap
+#max_backfill_messages = 1000000
+
+# Source rows read per page. Default 10000, minimum 1
+#max_messages = 10000
+
+# Most rows read for a single timestamp when a whole page carries one; the group
+# is re-read in full up to this ceiling, and beyond it the surplus is dropped,
+# counted and logged. Default 100000, minimum 1
+#max_group_rows = 100000
+
+# How long the call waits at the end for its last page to be confirmed before
+# answering. Default 5s
+#publish_timeout = "5s"
+
+
+########## Message ##########
+# Encoder: "json" (default), "lineprotocol" or "template".
+# Ignored under layout="field", whose payload is the bare value
+#payload_format = "json"
+
+# Columns that reach the payload; empty (the default) means every field and tag
+# of the row. An array or a space-separated string
+#payload_fields = ["temp", "pressure"]
+
+# Required when payload_format="template". Same placeholders as topic; a brace
+# group that is not a placeholder stays literal, and {{ }} give literal braces
+#payload_template = '{"setpoint": 180, "reason": "temp {temp}"}'
+
+# "row" (default) one message per row, "batch" one per topic per page,
+# "field" one per field carrying the bare value
+#layout = "row"
+
+# How a timestamp is rendered in a json payload and in a {time} placeholder:
+# "rfc3339" (default), "ms" or "ns". Ignored by lineprotocol
+#time_format = "rfc3339"
+
+# Delivery guarantee asked of the broker: 0 (default), 1 or 2. 1 is recommended;
+# 2 is not exactly-once here and hides a refusal at PUBREC
+#qos = 0
+
+# Set the MQTT retain flag. Default false
+#retain = false
+
+# Substitute for a placeholder whose column is empty on a row. Unset, such a
+# row is skipped and counted
+#topic_missing_value = "unknown"
+
+
+########## Filtering ##########
+# Scalar comparisons compiled into the query. A row lacking the column fails a
+# positive test and passes "!=". Two forms — in a file the structured one reads
+# better. A numeric value compares numerically; quote it ('185') to compare as
+# text. Overridable from a request
+#filters = [["temp", ">=", 185], ["state", "!=", "error"]]
+#filters = "temp:'>=185' state:'!=error'"
+
+# Membership tests, matched as strings. A row lacking the column fails
+# allow_values and passes deny_values; a deny match wins. For a numeric or
+# boolean column use filters instead. Overridable from a request
+#allow_values = { machine = ["press7", "press8"], line = ["l1"] }
+#deny_values = { machine = ["press9"] }
+
+
+########## Connection ##########
+# Identifier sent in CONNECT, defaulting to influxdb3-pub-<random>. Give an HTTP
+# trigger its own, or none — do not share one with a write trigger
+#client_id = "plant-replay"
+
+# "3.1.1" (default), "5" or "3.1". Version 5 adds reason codes on
+# acknowledgements, message expiry and broker-declared limits
+#mqtt_version = "3.1.1"
+
+# Seconds declared in CONNECT, 300 by default. It also caps a TLS handshake and
+# a WebSocket upgrade, so lower it on an unreliable TLS path. Minimum 1
+#keep_alive = 300
+
+# How long the connection may be quiet before it is replaced rather than written
+# into blind. Defaults to half of keep_alive
+#max_silence = "150s"
+
+# Bounds the TCP connect and the CONNACK wait, minimum 1s. It does not bound a
+# TLS handshake, which keep_alive does
+#connect_timeout = "2s"
+
+# Shortest gap between connection attempts, doubling on each failure up to the
+# ceiling, reset once a CONNACK succeeds
+#reconnect_min_backoff = "1s"
+#reconnect_max_backoff = "120s"
+
+
+########## TLS ##########
+# For mqtts:// and wss://. A relative path is resolved under PLUGIN_DIR.
+# The key must be unencrypted; a passphrase-protected key is refused
+#tls_ca_cert = "certs/ca.pem"
+#tls_cert = "certs/client.pem"
+#tls_key = "certs/client.key"
+# Skip server certificate verification. Leave false outside a laboratory
+#tls_insecure = false
+
+# Path for a WebSocket connection; taken from broker_url when unset.
+# Ignored outside ws:// and wss://
+#ws_path = "/mqtt"
+
+# Extra headers on the WebSocket upgrade, for brokers that authenticate there.
+# A table of name to value, or space-separated name:'value' pairs.
+# Ignored outside ws:// and wss://
+#ws_headers = { Authorization = "Bearer abc", X-Tenant = "plant-1" }
+
+
+########## Limits ##########
+# Largest message built, counting topic and properties. A batch is split to
+# stay under it; a single row that still does not fit is dropped and counted.
+# Default 122880, minimum 1024
+#max_payload_bytes = 122880
+
+# Hand-overs before a message is treated as undeliverable, then dropped,
+# counted and logged. Default 3, minimum 1
+#max_delivery_attempts = 3
+
+# Bound on the in-memory buffer, counted as payload plus topic plus a
+# per-message overhead. Default 67108864, minimum 1024
+#max_queue_bytes = 67108864
+
+# At the buffer cap, "drop_oldest" (default) keeps the freshest data,
+# "drop_newest" the earliest
+#drop_policy = "drop_oldest"
+
+# Accepted for consistency but has NO effect here: publishing old rows is the
+# whole of what a backfill does, so a backfill is exempt from max_message_age
+#max_message_age = "0s"
+
+# Back-pressure threshold, as the total size handed over and not yet confirmed.
+# Default 16777216, minimum 65536
+#max_unconfirmed_bytes = 16777216
+
+# How many QoS >= 1 messages may await acknowledgement at once. Default 20,
+# minimum 1
+#max_inflight = 20
+
+
+########## Reporting ##########
+# How often counters are written to mqtt_publisher_stats and summarised in the
+# log. 0 writes no measurement but keeps the log summary. Default 60s
+#stats_interval = "1min"
+
+# Tag telling several triggers on one broker apart; defaults to a hash of
+# source_measurements and topic
+#instance_name = "replay"
+
+# When false (default), an exception's own message is withheld from the log.
+# Reason codes, errno and the setting an error names are logged either way
+#enable_full_logging = false
+
+
+########## Settings a request may override ##########
+# A request body (JSON) may override only: backfill_start, backfill_end,
+# backfill_order, source_measurements, filters, allow_values, deny_values,
+# topic, topic_missing_value, payload_format, payload_template, payload_fields,
+# layout and time_format. Everything else above comes only from this file, the
+# trigger arguments or the environment, and a request naming one is refused.
+# A blank value counts as absent in every layer, so a request can replace a
+# setting but not turn it off.

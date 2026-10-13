@@ -1,0 +1,177 @@
+# MQTT Publisher Plugin — write trigger configuration template
+# Copy this file to your PLUGIN_DIR and reference it with
+#   --trigger-arguments config_file_path=mqtt_publisher_config_data_writes.toml
+# Example: if the file is at /plugins/configs/mqtt_publisher_config_data_writes.toml, use
+#   config_file_path=configs/mqtt_publisher_config_data_writes.toml
+#
+# The file ranks above the trigger arguments, so a setting that must differ
+# between two triggers belongs in their arguments rather than here. That holds
+# for client_id in particular: two triggers connecting with the same one evict
+# each other continuously.
+
+########## Required Parameters ##########
+# Broker address and transport in one value
+# mqtt://, mqtts://, ws://, wss://, unix:///path, or a bare host[:port].
+# The port defaults by scheme: 1883, 8883, 80, 443
+broker_url = "mqtt://your-broker:1883"  # e.g., "mqtts://broker.example.com:8883"
+
+# Tables to publish; rows of other tables in the batch are ignored, so the
+# trigger specification may safely be all_tables
+# An array, or a space-separated string
+source_measurements = ["your_measurement"]  # e.g., ["press_line", "weld_line"]
+
+# Topic to publish to
+# A plain string is valid. {column} is replaced by that column's value in the
+# row, {_table} by the table name, {_field} by the field name under
+# layout="field". A substituted value may not contain /, + or #
+topic = "plant/{machine}/{_table}"  # e.g., "test4"
+
+
+########## Credentials ##########
+# This file is the place for them: trigger arguments are readable from the
+# system tables, while the file is read from disk at PLUGIN_DIR
+#username = "publisher"
+#password = "your_password"
+
+
+########## Message ##########
+# Encoder: "json" (default), "lineprotocol" or "template"
+# Ignored under layout="field", whose payload is the bare value
+#payload_format = "json"
+
+# Columns that reach the payload; empty means every field and tag of the row
+#payload_fields = ["temp", "pressure"]
+
+# Required when payload_format="template". Same placeholders as topic; a brace
+# group that is not a placeholder stays literal, and {{ }} give literal braces
+#payload_template = '{"setpoint": 180, "reason": "temp {temp}"}'
+
+# "row" (default) one message per row, "batch" one per topic per invocation,
+# "field" one per field carrying the bare value
+#layout = "row"
+
+# How a timestamp is rendered in a json payload and in a {time} placeholder:
+# "rfc3339" (default), "ms" or "ns". Ignored by lineprotocol, whose grammar
+# requires integer nanoseconds
+#time_format = "rfc3339"
+
+# Delivery guarantee asked of the broker. 1 is recommended for alerting;
+# 2 is not exactly-once here and hides a refusal at PUBREC
+#qos = 0
+
+# Set the MQTT retain flag
+#retain = false
+
+# Substitute for a placeholder whose column is empty on a row
+# Unset, such a row is skipped and counted
+#topic_missing_value = "unknown"
+
+
+########## Filtering ##########
+# Scalar comparisons applied before any message is built.
+# A row lacking the column fails a positive test and passes "!="
+# Two forms; in a file the structured one reads better
+#filters = [["temp", ">=", 185], ["state", "!=", "error"]]
+#filters = "temp:'>=185' state:'!=error'"
+
+# Membership tests. A row lacking the column fails allow_values and passes
+# deny_values; a deny match wins over an allow match
+#allow_values = { machine = ["press7", "press8"], line = ["l1"] }
+#deny_values = { machine = ["press9"] }
+
+
+########## Connection ##########
+# Identifier sent in CONNECT. Defaults to influxdb3-pub-<random>.
+# Set it only when the broker's ACLs require a known one — and then per
+# trigger, not in a file two triggers share
+#client_id = "plant-publisher"
+
+# "3.1.1" (default), "5" or "3.1". Version 5 adds reason codes on
+# acknowledgements, message expiry and broker-declared limits
+#mqtt_version = "3.1.1"
+
+# Seconds declared in CONNECT. Large on purpose, since nothing pings between
+# invocations; it also caps a TLS handshake, so lower it on an unreliable path
+#keep_alive = 300
+
+# How long the connection may be quiet before an invocation replaces it rather
+# than writing into it blind. Defaults to half of keep_alive
+#max_silence = "150s"
+
+# Bounds the TCP connect and the CONNACK wait. It does not bound a TLS
+# handshake, which keep_alive does
+#connect_timeout = "2s"
+
+# How long an invocation may spend running the network loop
+#pump_budget = "50ms"
+
+#reconnect_min_backoff = "1s"
+#reconnect_max_backoff = "120s"
+
+
+########## TLS ##########
+# For mqtts:// and wss://. A relative path is resolved under PLUGIN_DIR
+#tls_ca_cert = "certs/ca.pem"
+#tls_cert = "certs/client.pem"
+#tls_key = "certs/client.key"
+#tls_insecure = false
+
+# Path for a WebSocket connection; taken from broker_url when unset
+#ws_path = "/mqtt"
+
+# Extra headers on the WebSocket upgrade, for brokers that authenticate there
+# A table of name to value, or space-separated name:'value' pairs
+# Ignored outside ws:// and wss://
+#ws_headers = { Authorization = "Bearer abc", X-Tenant = "plant-1" }
+
+
+########## Availability ##########
+# Retained availability topic. The online payload goes out on every connect and
+# the offline one is registered as the will. Meaningful only when invocations
+# are more frequent than keep_alive
+#status_topic = "plant/publisher/status"
+#status_online_payload = "online"
+#status_offline_payload = "offline"
+
+
+########## Limits ##########
+# Source rows taken at a time; the message count follows from layout
+#max_messages = 10000
+
+# Largest message built, counting topic and properties
+#max_payload_bytes = 122880
+
+# How many times a message may be handed over before it is treated as
+# undeliverable, then dropped, counted and logged
+#max_delivery_attempts = 3
+
+# Bound on the buffer, counted as payload plus topic plus a per-message
+# overhead so that it tracks real memory
+#max_queue_bytes = 67108864
+
+# "drop_oldest" (default) keeps the freshest data; "drop_newest" the earliest
+#drop_policy = "drop_oldest"
+
+# Discard a message whose row is older than this, on both the direct and the
+# buffered path. Must exceed settle_delay when both are set
+#max_message_age = "5min"
+
+# Back-pressure threshold, as the total size handed over and not yet confirmed
+#max_unconfirmed_bytes = 16777216
+
+# How many QoS >= 1 messages may await acknowledgement at once
+#max_inflight = 20
+
+
+########## Reporting ##########
+# How often counters are written to mqtt_publisher_stats and summarised in the
+# log. 0 writes no measurement
+#stats_interval = "1min"
+
+# Tag telling several triggers on one broker apart; defaults to a hash of
+# source_measurements and topic
+#instance_name = "press-line"
+
+# When false, an exception's own message is withheld. Reason codes, errno and
+# the setting an error names are logged either way
+#enable_full_logging = false

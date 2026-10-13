@@ -1,0 +1,217 @@
+# MQTT Publisher Plugin — scheduled trigger configuration template
+# Copy this file to your PLUGIN_DIR and reference it with
+#   --trigger-arguments config_file_path=mqtt_publisher_config_scheduler.toml
+# Example: if the file is at /plugins/configs/mqtt_publisher_config_scheduler.toml, use
+#   config_file_path=configs/mqtt_publisher_config_scheduler.toml
+#
+# Create the trigger WITHOUT --run-asynchronous: a watermark describes one
+# reader, and two ticks overlapping on a cold cache publish the same first page
+# twice.
+#
+# The file ranks above the trigger arguments, so a setting that must differ
+# between two triggers belongs in their arguments rather than here. That holds
+# for client_id in particular: two triggers connecting with the same one evict
+# each other continuously.
+
+########## Required Parameters ##########
+# Broker address and transport in one value:
+# mqtt://, mqtts://, ws://, wss://, unix:///path, or a bare host[:port].
+# The port defaults by scheme: 1883, 8883, 80, 443; TLS is chosen by the scheme
+broker_url = "mqtt://your-broker:1883"  # e.g., "mqtts://broker.example.com:8883"
+
+# Tables the tick reads, each on its own watermark; an array or a
+# space-separated string
+source_measurements = ["your_measurement"]  # e.g., ["press_line_1m"]
+
+# Topic to publish to. {column} is replaced by that column's value in the row,
+# {_table} by the table name, {_field} by the field name under layout="field".
+# A substituted value may not contain /, + or #, and the topic itself may not
+# contain a wildcard or start with $
+topic = "plant/{machine}/rollup"
+
+
+########## Credentials ##########
+# This file is the place for them: trigger arguments are readable from the
+# system tables, while the file is read from disk at PLUGIN_DIR
+#username = "publisher"
+#password = "your_password"
+
+
+########## Reading ##########
+# Hold back the upper bound of the read range, so rows a batching source writes
+# late relative to their own timestamp are still above the watermark when they
+# appear. Telegraf's default flush_interval is 10s. A table another plugin
+# derives is late by that plugin's whole interval plus its offset and run time —
+# a minute rollup needs ~90s. At the default of 0 a late-arriving row can be
+# skipped. A WAL trigger on that table avoids the problem entirely
+#settle_delay = "0s"
+
+# How long one tick may keep working through pages before leaving the rest to
+# the next one. One page per tick cannot catch up with a source that writes
+# more than max_messages per interval; a tick that spends its budget with a
+# full page still to come logs a warning. Default 5s
+#tick_budget = "5s"
+
+# Source rows read per page. Default 10000, minimum 1
+#max_messages = 10000
+
+# Most rows read for a single timestamp when a whole page carries one. A page
+# cannot stop inside a timestamp group without losing the rest of it, so the
+# group is re-read in full up to this ceiling; beyond it the surplus is dropped,
+# counted and logged. Default 100000, minimum 1
+#max_group_rows = 100000
+
+
+########## Message ##########
+# Encoder: "json" (default), "lineprotocol" or "template".
+# Ignored under layout="field", whose payload is the bare value
+#payload_format = "json"
+
+# Columns that reach the payload; empty (the default) means every field and tag
+# of the row. An array or a space-separated string
+#payload_fields = ["temp", "pressure"]
+
+# Required when payload_format="template". Same placeholders as topic; a brace
+# group that is not a placeholder stays literal, and {{ }} give literal braces
+#payload_template = '{"setpoint": 180, "reason": "temp {temp}"}'
+
+# "row" (default) one message per row, "batch" one per topic per invocation,
+# "field" one per field carrying the bare value
+#layout = "row"
+
+# How a timestamp is rendered in a json payload and in a {time} placeholder:
+# "rfc3339" (default), "ms" or "ns". Ignored by lineprotocol, whose grammar
+# requires integer nanoseconds
+#time_format = "rfc3339"
+
+# Delivery guarantee asked of the broker: 0 (default), 1 or 2. 1 is recommended
+# for alerting; 2 is not exactly-once here and hides a refusal at PUBREC
+#qos = 0
+
+# Set the MQTT retain flag. Default false
+#retain = false
+
+# Substitute for a placeholder whose column is empty on a row. Unset, such a
+# row is skipped and counted
+#topic_missing_value = "unknown"
+
+
+########## Filtering ##########
+# Compiled into the query here rather than applied per row, so that
+# max_messages counts rows that will actually be published.
+# Scalar comparisons; a row lacking the column fails a positive test and passes
+# "!=". Two forms — in a file the structured one reads better. A numeric value
+# compares numerically; quote it ('185') to compare as text
+#filters = [["temp", ">=", 185], ["state", "!=", "error"]]
+#filters = "temp:'>=185' state:'!=error'"
+
+# Membership tests, matched as strings. A row lacking the column fails
+# allow_values and passes deny_values; a deny match wins over an allow match.
+# For a numeric or boolean column use filters instead
+#allow_values = { machine = ["press7", "press8"], line = ["l1"] }
+#deny_values = { machine = ["press9"] }
+
+
+########## Connection ##########
+# Identifier sent in CONNECT, defaulting to influxdb3-pub-<random> and kept
+# across reconnects. Set it only when the broker's ACLs require a known one —
+# and then per trigger, not in a file two triggers share
+#client_id = "plant-publisher"
+
+# "3.1.1" (default), "5" or "3.1". Version 5 adds reason codes on
+# acknowledgements, message expiry and broker-declared limits
+#mqtt_version = "3.1.1"
+
+# Seconds declared in CONNECT, 300 by default. Large on purpose since nothing
+# pings between invocations; it also caps a TLS handshake and a WebSocket
+# upgrade, so lower it on an unreliable TLS path. Minimum 1
+#keep_alive = 300
+
+# How long the connection may be quiet before an invocation replaces it rather
+# than writing into it blind. Defaults to half of keep_alive
+#max_silence = "150s"
+
+# Bounds the TCP connect and the CONNACK wait, minimum 1s. It does not bound a
+# TLS handshake, which keep_alive does
+#connect_timeout = "2s"
+
+# Shortest gap between connection attempts, doubling on each failure up to the
+# ceiling, reset once a CONNACK succeeds
+#reconnect_min_backoff = "1s"
+#reconnect_max_backoff = "120s"
+
+
+########## TLS ##########
+# For mqtts:// and wss://. A relative path is resolved under PLUGIN_DIR.
+# The key must be unencrypted; a passphrase-protected key is refused
+#tls_ca_cert = "certs/ca.pem"
+#tls_cert = "certs/client.pem"
+#tls_key = "certs/client.key"
+# Skip server certificate verification. Leave false outside a laboratory
+#tls_insecure = false
+
+# Path for a WebSocket connection; taken from broker_url when unset.
+# Ignored outside ws:// and wss://
+#ws_path = "/mqtt"
+
+# Extra headers on the WebSocket upgrade, for brokers that authenticate there.
+# A table of name to value, or space-separated name:'value' pairs.
+# Ignored outside ws:// and wss://
+#ws_headers = { Authorization = "Bearer abc", X-Tenant = "plant-1" }
+
+
+########## Availability ##########
+# Retained availability topic. The online payload goes out on every connect and
+# the offline one is registered as the MQTT will. Meaningful only when ticks are
+# more frequent than keep_alive; otherwise the will fires between ticks
+#status_topic = "plant/publisher/status"
+#status_online_payload = "online"
+#status_offline_payload = "offline"
+
+
+########## Limits ##########
+# Largest message built, counting topic and properties. A batch is split to
+# stay under it; a single row that still does not fit is dropped and counted.
+# Default 122880, minimum 1024
+#max_payload_bytes = 122880
+
+# Hand-overs before a message is treated as undeliverable, then dropped,
+# counted and logged. Default 3, minimum 1
+#max_delivery_attempts = 3
+
+# Bound on the in-memory buffer, counted as payload plus topic plus a
+# per-message overhead so it tracks real memory. Default 67108864, minimum 1024
+#max_queue_bytes = 67108864
+
+# At the buffer cap, "drop_oldest" (default) keeps the freshest data,
+# "drop_newest" the earliest
+#drop_policy = "drop_oldest"
+
+# Discard a message whose row is older than this, measured from the row's
+# timestamp. On a schedule it also clamps the watermark to now minus this value
+# on resuming. It MUST exceed settle_delay — the plugin refuses the pair
+# otherwise — and should exceed settle_delay plus the schedule interval, or each
+# tick skips part of its window. Default 0, which never discards
+#max_message_age = "0s"
+
+# Back-pressure threshold, as the total size handed over and not yet confirmed.
+# Default 16777216, minimum 65536
+#max_unconfirmed_bytes = 16777216
+
+# How many QoS >= 1 messages may await acknowledgement at once. Default 20,
+# minimum 1
+#max_inflight = 20
+
+
+########## Reporting ##########
+# How often counters are written to mqtt_publisher_stats and summarised in the
+# log. 0 writes no measurement but keeps the log summary. Default 60s
+#stats_interval = "1min"
+
+# Tag telling several triggers on one broker apart; defaults to a hash of
+# source_measurements and topic
+#instance_name = "press-line"
+
+# When false (default), an exception's own message is withheld from the log.
+# Reason codes, errno and the setting an error names are logged either way
+#enable_full_logging = false

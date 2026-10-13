@@ -34,6 +34,33 @@ Plugins in this repo are organized in a structured directory hierarchy that refl
 - Use snake_case for Python files and directory names
 - Plugin directories may contain additional files such as configuration templates, test data, and documentation
 
+### Multi-file plugins
+
+A multi-file plugin is a Python package: a directory with an `__init__.py` file that defines the entry-point function and the plugin metadata docstring.
+Supporting modules sit next to `__init__.py` and are imported with relative imports, for example `from .helpers import h`.
+
+```text
+my_plugin/
+├── __init__.py
+├── helpers.py
+└── sub/
+    └── utils.py
+```
+
+InfluxDB 3 imports the package by the name of its directory, so the directory name must:
+
+- Be a valid Python identifier: letters, digits, and underscores, not starting with a digit
+- Contain no dots or hyphens--`my_plugin-1.0.1` fails with `ModuleNotFoundError: No module named 'my_plugin-1'`
+- Be unique across all multi-file plugins on the server--packages with the same directory name in different paths run the same code
+- Not match the name of a standard library or installed module, such as `json`
+
+To keep several versions on one server, include the version in the package name, for example `my_plugin_1_0_1/`.
+A version in a parent directory alone, such as `1.0.0/my_plugin/` and `1.0.1/my_plugin/`, doesn't help because both packages are named `my_plugin`.
+
+To create a trigger, pass the directory path relative to the plugin directory, for example `--path my_plugin`.
+
+If the package fails to import, the error appears only in the server log, not in `system.processing_engine_logs`.
+
 ## Using Plugins
 
 To use a plugin, you create a trigger in InfluxDB 3 (via CLI or HTTP API) that specifies the trigger name, database, trigger specification, plugin file, and any additional parameters--for example:

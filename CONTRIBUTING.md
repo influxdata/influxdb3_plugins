@@ -21,6 +21,7 @@ Apply consistent documentation standards to the example plugins repository.
 ### File Naming
 
 - Use snake_case for Python files
+- Name multi-file plugin directories as described in [Multi-file plugins](README.md#multi-file-plugins)
 - Use kebab-case for documentation files
 - Use descriptive names that match functionality
 

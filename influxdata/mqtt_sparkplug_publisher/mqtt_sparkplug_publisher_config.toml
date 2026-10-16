@@ -1,0 +1,180 @@
+# MQTT Sparkplug B Publisher — configuration template
+# Copy this file into your PLUGIN_DIR and reference it when creating the trigger:
+#   --trigger-arguments config_file_path=mqtt_sparkplug_publisher_config.toml
+#
+# Create the trigger WITHOUT --run-asynchronous, and deploy on exactly one
+# process node: node_spec picks only the scheduler, while runs are placed
+# round-robin across every process node, so two of them stand up two sessions
+# for one Sparkplug node. A single `--mode all` node (the Docker default) or one
+# standalone `--mode process` node is the supported shape.
+
+########## Required ##########
+# Broker address and transport in one value: mqtt://, mqtts://, ws://, wss://,
+# unix:///path, or a bare host[:port]. Port defaults by scheme (1883/8883/80/443).
+broker_url = "mqtt://your-broker:1883"
+
+# Node identity. The group and node pair must be unique across the whole
+# infrastructure. No '/', '+' or '#'.
+sparkplug_group_id = "plant1"
+sparkplug_edge_node_id = "influxdb3"
+
+# Tables to publish. A single array; exactly one entry when sparkplug_device_from
+# names a tag. Any other table's writes are ignored, so the trigger spec may be
+# all_tables.
+source_measurements = ["press_line"]
+
+# Declared metric set, and therefore mandatory. Each entry is a column, optionally
+# "name:type" to override the inferred datatype (int8/16/32/64, uint8/16/32/64,
+# float, double, boolean, string, datetime), e.g. "count:int64". A datetime may
+# add a source time unit, "name:datetime:unit" with unit s, ms (default), us or
+# ns, converted to the milliseconds Sparkplug DateTime requires.
+payload_fields = ["temp", "pressure"]
+
+
+########## Sparkplug ##########
+# How a device is derived from a row:
+#   unset   node-level NDATA, metric names "table/field"
+#   table   one device per source table, metric names "field"
+#   tag:<n> one device per distinct value of tag <n> (needs one source table)
+#sparkplug_device_from = "tag:machine"
+
+# Publish DDEATH for a device idle this long, and DBIRTH again when it returns.
+# Duration or 0 (default): 0 never publishes DDEATH, since an idle device cannot
+# be told from a removed one.
+#sparkplug_device_timeout = "0"
+
+# Primary host STATE gating. Set to the host id to subscribe to
+# spBv1.0/STATE/<id> (QoS 1), wait for 'online' before the first NBIRTH, and on
+# 'offline' publish NDEATH and reconnect. Unset (default): no STATE handling.
+#sparkplug_primary_host_id = "scada1"
+
+# A row whose data timestamp is older than now minus this is published with
+# is_historical=true rather than as the current value, which keeps backfill, late
+# data and a WAL replay from rolling the live value back. Duration or 0 (off).
+#live_window = "5min"
+
+# What happens to rows marked historical by live_window: true (default)
+# republishes them with is_historical=true; false discards them.
+#sparkplug_replay_historical = true
+
+# Publish a metric only when its value changed from the last published for that
+# alias (the Sparkplug-recommended mode for periodically-polled sources). Default
+# false (every row is published as written).
+#report_by_exception = false
+
+# With report_by_exception, a numeric change smaller than this is treated as no
+# change, to suppress analog noise. Default 0 (publish on any change).
+#deadband = 0
+
+
+########## Credentials ##########
+# This file is the place for them: trigger arguments are readable from the system
+# tables, while the file is read from disk at PLUGIN_DIR.
+#username = "publisher"
+#password = "your_password"
+
+
+########## Filtering ##########
+# Scalar per-row comparisons. Structured list of [column, operator, value] triples
+# in a file, or the compact "field:'<op><value>'" string in a trigger argument. A
+# numeric value compares numerically; quote it ('185') to compare as text.
+#filters = [["temp", ">=", 185], ["state", "!=", "error"]]
+
+# Membership tests, matched as strings. Also the way to pin a non-device tag to a
+# single value so several series do not merge onto one metric.
+#allow_values = { machine = ["press7", "press8"] }
+#deny_values = { machine = ["press9"] }
+
+
+########## Connection ##########
+# Identifier sent in CONNECT. Defaults to influxdb3-spb-<hash of group and node>
+# and is stable so the broker evicts an orphan by takeover. Set only when ACLs
+# require a known one, and keep it stable across trigger recreations.
+#client_id = "plant-spb"
+
+# "3.1.1" (default) or "5". MQTT 5 is strongly recommended: it carries the 0x8E
+# takeover reason code and the broker's Maximum Packet Size, and makes orphan
+# handover deterministic.
+#mqtt_version = "3.1.1"
+
+# Seconds declared in CONNECT, default 60, minimum 1. A silently dropped link is
+# detected only after about 1.5x this, and QoS 0 data sent meanwhile is lost but
+# counted published, so 15-30 shortens that window at the cost of more PINGREQ.
+#keep_alive = 60
+
+# Shortest gap between connection attempts, doubling to the ceiling, reset on a
+# successful CONNACK.
+#reconnect_min_backoff = "1s"
+#reconnect_max_backoff = "120s"
+
+# MQTT 3.1.1 only: consecutive connections the broker closes within seconds of
+# CONNACK that are read as a takeover, after which this client stops. Integer >= 2,
+# default 3. Best-effort on 3.1.1; MQTT 5 is exact.
+#takeover_attempts = 3
+
+# After this long with no invocation the client's threads publish NDEATH and exit,
+# so an orphan cannot live until the server restarts. Minimum 1min, default 1h.
+# Use the all_tables trigger spec so a sparse source table does not idle it out.
+#idle_disconnect = "1h"
+
+
+########## TLS ##########
+# For mqtts:// and wss://. A relative path resolves under PLUGIN_DIR. The key must
+# be unencrypted; a passphrase-protected key is refused at configuration time.
+#tls_ca_cert = "certs/ca.pem"
+#tls_client_cert = "certs/client.pem"
+#tls_client_key = "certs/client.key"
+# Skip certificate chain and hostname verification. Leave false outside a lab.
+#tls_insecure_skip_verify = false
+# ALPN protocol name, how AWS IoT Core serves MQTT on port 443.
+#tls_alpn = "x-amzn-mqtt-ca"
+
+
+########## WebSocket ##########
+# For ws:// and wss://. Path defaults to the one in broker_url or /mqtt.
+#ws_path = "/mqtt"
+# Extra headers on the upgrade, for brokers that authenticate there.
+#ws_headers = { Authorization = "Bearer abc", X-Tenant = "plant-1" }
+
+
+########## Delivery ##########
+# Largest message built, counting topic and properties. A per-device batch is
+# split to stay under it; the birth size is checked against it before connecting.
+# Integer >= 1024, default 122880. Clamped by an MQTT 5 broker's Maximum Packet Size.
+#max_payload_bytes = 122880
+
+# The only bound on the in-memory buffer, charged against the Python footprint of
+# the buffered entries, so it bounds real process memory. Integer >= 1024, default
+# 67108864. Per trigger, and every trigger shares one engine process.
+#max_queue_bytes = 67108864
+
+# At the buffer cap, "drop_oldest" (default) keeps the freshest data, "drop_newest"
+# the earliest.
+#drop_policy = "drop_oldest"
+
+# "fifo" (default) drains strictly in order, so after a long outage live data waits
+# behind the history. "live_first" publishes recent rows first and drains historical
+# ones with the leftover rate budget, so current values stay prompt.
+#drain_order = "fifo"
+
+# On drain, a buffered entry older than this is discarded instead of published.
+# Duration or 0 (never discard), default 0.
+#max_message_age = "0"
+
+# Token-bucket cap on how fast the sender hands messages over. Integer >= 1 or 0
+# (no limit), default 0. Also paces the DBIRTH burst after a birth.
+#max_messages_per_second = 0
+
+# Back-pressure threshold, as the total size handed over and not yet reported back.
+# Integer >= 65536, default 16777216.
+#max_unconfirmed_bytes = 16777216
+
+
+########## Reporting ##########
+# How often counters are written to mqtt_sparkplug_publisher_stats and summarised
+# in the log. Duration or 0 (write no measurement, keep the log summary). Default 1min.
+#stats_interval = "1min"
+
+# When false (default), an exception is logged as its type only; reason codes and
+# errno are logged either way. Credentials are never logged under either setting.
+#enable_full_logging = false

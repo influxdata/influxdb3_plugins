@@ -303,9 +303,16 @@ BUFFER_METRIC_OVERHEAD = 96
 # --- codec ------------------------------------------------------------------
 #
 # The Sparkplug Payload type is built at runtime from the compiled
-# FileDescriptorSet embedded below, not from a generated sparkplug_b_pb2.py:
-# that avoids pinning one protobuf major and keeps the plugin a single file
-# (A-1). Regenerate the constant from the shipped sparkplug_b.proto with:
+# FileDescriptorSet embedded below, rather than from a generated
+# sparkplug_b_pb2.py or a codec library such as pysparkplug. Two reasons:
+#   - the whole plugin ships as a single file, with no second generated module
+#     to keep in sync;
+#   - every plugin on a node shares one virtual environment, so pinning a
+#     protobuf major (as generated code effectively does) or pulling pysparkplug
+#     (which pins paho-mqtt<2) would downgrade dependencies that mqtt_publisher
+#     and mqtt_subscriber also rely on and break them. The embedded descriptor
+#     is version-agnostic and loads under any modern protobuf.
+# Regenerate the constant from the shipped sparkplug_b.proto with:
 #
 #   python -m grpc_tools.protoc -I. --descriptor_set_out=sparkplug_b.desc sparkplug_b.proto
 #   base64 -w0 sparkplug_b.desc

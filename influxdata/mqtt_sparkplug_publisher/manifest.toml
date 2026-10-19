@@ -3,7 +3,7 @@ manifest_schema_version = "1.2"
 [plugin]
 name = "mqtt_sparkplug_publisher"
 version = "0.1.0"
-description = "Publishes InfluxDB 3 rows to an MQTT broker as a Sparkplug B Edge Node on write: spBv1.0 topics, Protocol Buffers payloads, NBIRTH/NDATA/NDEATH, bdSeq and seq, aliases, rebirth, STATE and store-and-forward."
+description = "Publishes InfluxDB 3 rows to an MQTT broker as a Sparkplug B Edge Node on write: spBv1.0 topics, Protobuf payloads, NBIRTH/NDATA/NDEATH, bdSeq/seq, aliases, rebirth, STATE and store-and-forward."
 triggers = ["process_writes"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/mqtt_sparkplug_publisher"

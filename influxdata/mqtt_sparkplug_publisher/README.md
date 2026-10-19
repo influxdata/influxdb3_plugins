@@ -2,7 +2,8 @@
 
 ⚡ data-write 🏷️ integration, iot, mqtt, sparkplug 🔧 InfluxDB 3 Core, InfluxDB 3 Enterprise
 
-> **Note:** This plugin requires InfluxDB 3.8.2 or later, `paho-mqtt>=2.1,<3`, `protobuf>=5` and `influxdata-plugin-utils>=0.5.0`.
+> **Note:** This plugin requires InfluxDB 3.8.2 or later, `paho-mqtt>=2.1,<3`, `protobuf>=5` and
+> `influxdata-plugin-utils>=0.5.0`.
 
 ## Description
 
@@ -20,8 +21,8 @@ host application consumes the data natively.
 - **Store-and-forward**: a broker outage buffers rows in memory under a byte
   budget and a drop policy, then replays them with `is_historical` so old data
   never overwrites the host's live value
-- **Survives across invocations**: one background sender owns the connection,
-  the sequence numbers and the buffer, held in the trigger's cache
+- **Survives across writes**: one background sender owns the connection, the
+  sequence numbers and the buffer, so a slow or down broker never blocks writes
 - **Rebirth, STATE and takeover handled**: answers a host's rebirth `NCMD`,
   gates on a primary host's `STATE`, and detects an orphan takeover
 
@@ -34,7 +35,7 @@ host application consumes the data natively.
 - [Rebirth, STATE and takeover](#rebirth-state-and-takeover)
 - [Setup](#setup) · [Examples](#examples) · [Parameters](#parameters)
 - [Where settings come from](#where-settings-come-from) · [Installation](#installation)
-- [Observability](#observability) · [Code overview](#code-overview) · [Troubleshooting](#troubleshooting)
+- [Observability](#observability) · [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -46,16 +47,16 @@ The plugin owns one Sparkplug Edge Node, identified by `sparkplug_group_id` and
 `sparkplug_edge_node_id`. Every topic is `spBv1.0/<group>/<type>/<edge_node>`,
 with a device appended for device-level messages:
 
-| Message  | Topic                                        | When                                        |
-|----------|----------------------------------------------|---------------------------------------------|
-| `NBIRTH` | `spBv1.0/<group>/NBIRTH/<node>`              | On connect: declares every node metric      |
-| `NDATA`  | `spBv1.0/<group>/NDATA/<node>`               | Node-level values                           |
-| `NDEATH` | `spBv1.0/<group>/NDEATH/<node>`              | Registered as the MQTT will; also on offline|
-| `DBIRTH` | `spBv1.0/<group>/DBIRTH/<node>/<device>`     | Declares a device's metrics                  |
-| `DDATA`  | `spBv1.0/<group>/DDATA/<node>/<device>`      | Device values                               |
-| `DDEATH` | `spBv1.0/<group>/DDEATH/<node>/<device>`     | A device idle past `sparkplug_device_timeout`|
-| `NCMD`   | `spBv1.0/<group>/NCMD/<node>` (subscribed)   | A host asks for a rebirth                    |
-| `STATE`  | `spBv1.0/STATE/<host>` (subscribed)          | Primary host online/offline                  |
+| Message  | Topic                                      | When                                          |
+|----------|--------------------------------------------|-----------------------------------------------|
+| `NBIRTH` | `spBv1.0/<group>/NBIRTH/<node>`            | On connect: declares every node metric        |
+| `NDATA`  | `spBv1.0/<group>/NDATA/<node>`             | Node-level values                             |
+| `NDEATH` | `spBv1.0/<group>/NDEATH/<node>`            | Registered as the MQTT will; also on offline  |
+| `DBIRTH` | `spBv1.0/<group>/DBIRTH/<node>/<device>`   | Declares a device's metrics                   |
+| `DDATA`  | `spBv1.0/<group>/DDATA/<node>/<device>`    | Device values                                 |
+| `DDEATH` | `spBv1.0/<group>/DDEATH/<node>/<device>`   | A device idle past `sparkplug_device_timeout` |
+| `NCMD`   | `spBv1.0/<group>/NCMD/<node>` (subscribed) | A host asks for a rebirth                     |
+| `STATE`  | `spBv1.0/STATE/<host>` (subscribed)        | Primary host online/offline                   |
 
 Each connect carries a fresh `bdSeq` (matching the will's) and starts `NBIRTH`
 at `seq=0`; every message after it increments `seq`, wrapping at 255. Each
@@ -64,16 +65,15 @@ every `NDATA`/`DDATA` carries only the alias, which keeps messages small.
 
 ### The background sender
 
-Publishing does not happen on the write path. An invocation validates its
-configuration, turns the batch into compact `(alias, value, timestamp)` entries,
-appends them to an in-memory buffer, and returns. A single **background sender
-thread**, built once and kept in `influxdb3_local.cache`, owns the MQTT client,
-the sequence numbers and the buffer: it connects, publishes the births, drains
-the buffer, answers rebirths and runs the watchdog. The MQTT network callbacks
-never touch the database or publish — they only hand work to the sender.
+Publishing does not happen on the write path. A write validates the
+configuration, turns the batch into compact buffered entries, and returns
+immediately. A **background sender** owns the MQTT connection, the sequence
+numbers and the buffer: it connects, publishes the births, drains the buffer,
+answers rebirths and runs the watchdog. A broker that is slow or down therefore
+never blocks writes into InfluxDB.
 
-If no invocation arrives for `idle_disconnect`, the sender publishes `NDEATH`
-and shuts the client down, so a deleted or idle trigger cannot leave an orphan
+If no write arrives for `idle_disconnect`, the sender publishes `NDEATH` and
+shuts the connection down, so a deleted or idle trigger cannot leave an orphan
 session alive until the server restarts.
 
 ---
@@ -84,10 +84,10 @@ session alive until the server restarts.
 `group`/`node` pair fight over the broker.** Deploy accordingly:
 
 - **Create the trigger WITHOUT `--run-asynchronous`.** A synchronous trigger
-  makes a cold-cache race impossible, so exactly one sender is ever built.
+  ensures exactly one sender is ever built.
 - **Run exactly one process node for this trigger.** On a multi-node cluster the
-  node specification picks only the owner, but runs are placed round-robin across
-  **every** process node, so two process nodes would stand up two sessions. A
+  node specification picks only the owner, but runs are placed round-robin across **every** process node, so two process
+  nodes would stand up two sessions. A
   single `--mode all` node (the Docker default) or one standalone `--mode
   process` node is the supported shape.
 - **Keep `client_id` stable** across trigger recreations (the default already is,
@@ -100,11 +100,11 @@ session alive until the server restarts.
 
 `sparkplug_device_from` decides how a row maps to a Sparkplug device:
 
-| `sparkplug_device_from` | Result                                          | Metric name    | Needs                     |
-|-------------------------|-------------------------------------------------|----------------|---------------------------|
-| *(unset)*               | Node-level `NDATA`                              | `table/field`  | —                         |
-| `table`                 | One device per source table                     | `field`        | —                         |
-| `tag:<name>`            | One device per distinct value of tag `<name>`  | `field`        | exactly one source table  |
+| `sparkplug_device_from` | Result                                        | Metric name   | Needs                    |
+|-------------------------|-----------------------------------------------|---------------|--------------------------|
+| *(unset)*               | Node-level `NDATA`                            | `table/field` | —                        |
+| `table`                 | One device per source table                   | `field`       | —                        |
+| `tag:<name>`            | One device per distinct value of tag `<name>` | `field`       | exactly one source table |
 
 `payload_fields` is the **declared metric set** of the birth certificate and is
 mandatory. Each entry is a column, optionally `name:type` to override the
@@ -127,9 +127,9 @@ collapse onto one metric name.
 ## Store-and-forward
 
 Nothing is handed to a disconnected client. While the broker is unreachable,
-entries accumulate in the buffer up to `max_queue_bytes`, charged against their
-real Python footprint. At the cap, `drop_policy` decides what goes:
-`drop_oldest` (default) keeps the freshest data, `drop_newest` the earliest.
+entries accumulate in the buffer up to `max_queue_bytes`, measured by their
+in-memory size. At the cap, `drop_policy` decides what goes: `drop_oldest`
+(default) keeps the freshest data, `drop_newest` the earliest.
 
 **Historical data.** A row whose own timestamp is older than `now − live_window`
 is published with `is_historical = true` rather than as the node's current value,
@@ -144,13 +144,12 @@ first and drains the historical ones with the leftover rate budget, so current
 values stay prompt.
 
 **Report by exception.** With `report_by_exception = true` a metric is published
-only when its value changed from the last published value for that alias — the
+only when its value changed from the last published value — the
 Sparkplug-recommended mode for periodically polled sources. `deadband` suppresses
 a numeric change smaller than itself.
 
-Entries are encoded into protobuf only at the moment they are drained, with the
-sequence number of the session that is actually open — never buffered as finished
-messages, which would carry a stale `seq`.
+After a reconnect the buffered data is replayed on the new session with correct,
+continuous sequence numbers.
 
 ---
 
@@ -248,84 +247,84 @@ tls_ca_cert = "certs/ca.pem"
 
 **Required**
 
-| Parameter                | Default      | Example                          | What it does                                                                                                                                             |
-|--------------------------|--------------|----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `broker_url`             | **required** | `mqtt://broker.example.com:1883` | Broker address and transport in one value: `mqtt://`, `mqtts://`, `ws://`, `wss://`, `unix:///path`, or a bare `host[:port]`. Port defaults by scheme.    |
-| `sparkplug_group_id`     | **required** | `plant1`                         | Sparkplug Group ID, the second topic token. No `/`, `+` or `#`. With the edge node id, must be unique across the infrastructure.                          |
-| `sparkplug_edge_node_id` | **required** | `influxdb3`                      | Sparkplug Edge Node ID, the fourth topic token. No `/`, `+` or `#`.                                                                                       |
-| `source_measurements`    | **required** | `press_line weld_line`           | Space-separated source tables; exactly one when `sparkplug_device_from` names a tag. Other tables are ignored, so `all_tables` is a safe spec.            |
+| Parameter                | Default      | Example                          | What it does                                                                                                                                                                                                                                                                                    |
+|--------------------------|--------------|----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `broker_url`             | **required** | `mqtt://broker.example.com:1883` | Broker address and transport in one value: `mqtt://`, `mqtts://`, `ws://`, `wss://`, `unix:///path`, or a bare `host[:port]`. Port defaults by scheme.                                                                                                                                          |
+| `sparkplug_group_id`     | **required** | `plant1`                         | Sparkplug Group ID, the second topic token. No `/`, `+` or `#`. With the edge node id, must be unique across the infrastructure.                                                                                                                                                                |
+| `sparkplug_edge_node_id` | **required** | `influxdb3`                      | Sparkplug Edge Node ID, the fourth topic token. No `/`, `+` or `#`.                                                                                                                                                                                                                             |
+| `source_measurements`    | **required** | `press_line weld_line`           | Space-separated source tables; exactly one when `sparkplug_device_from` names a tag. Other tables are ignored, so `all_tables` is a safe spec.                                                                                                                                                  |
 | `payload_fields`         | **required** | `temp pressure count:int64`      | Space-separated metric columns, each optionally `name:type` to override the inferred datatype; a datetime may add a source unit as `name:datetime:unit` (`s`/`ms`/`us`/`ns`, default `ms`), converted to the milliseconds Sparkplug requires. The declared metric set of the birth certificate. |
 
 **Connection**
 
-| Parameter               | Default                   | Example         | What it does                                                                                                                                              |
-|-------------------------|---------------------------|-----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `client_id`             | `influxdb3-spb-<8 hex>`   | `plant-spb`     | MQTT client identifier, stable by default so the broker evicts an orphan by takeover. Set only when ACLs require a known one; keep it stable.              |
-| `mqtt_version`          | `3.1.1`                   | `5`             | `3.1.1` (default) or `5`. MQTT 5 is strongly recommended: it carries the `0x8E` takeover reason code and the broker's Maximum Packet Size.                 |
-| `username`              | *(empty)*                 | `publisher`     | User name sent in CONNECT. Never logged.                                                                                                                  |
-| `password`              | *(empty)*                 | `<password>`    | Password. Prefer the TOML file: trigger arguments are readable from the system tables. Never logged.                                                       |
-| `keep_alive`            | `60`                      | `30`            | Seconds declared in CONNECT, minimum 1. A dropped link is detected after about 1.5× this; QoS 0 data sent meanwhile is lost but counted published.         |
-| `reconnect_min_backoff` | `1s`                      | `2s`            | Shortest gap between connection attempts, doubling to the ceiling, reset on a successful CONNACK.                                                          |
-| `reconnect_max_backoff` | `120s`                    | `60s`           | Ceiling for the backoff doubling.                                                                                                                         |
-| `takeover_attempts`     | `3`                       | `5`             | MQTT 3.1.1 only: consecutive quick post-connect closes read as a takeover, after which the client stops. Integer ≥ 2. MQTT 5 is exact and ignores it.     |
-| `idle_disconnect`       | `1h`                      | `30min`         | After this long with no invocation the sender publishes `NDEATH` and exits. Minimum 1min. Use the `all_tables` spec so a sparse table does not idle it out.|
+| Parameter               | Default                 | Example      | What it does                                                                                                                                                |
+|-------------------------|-------------------------|--------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `client_id`             | `influxdb3-spb-<8 hex>` | `plant-spb`  | MQTT client identifier, stable by default so the broker evicts an orphan by takeover. Set only when ACLs require a known one; keep it stable.               |
+| `mqtt_version`          | `3.1.1`                 | `5`          | `3.1.1` (default) or `5`. MQTT 5 is strongly recommended: it carries the `0x8E` takeover reason code and the broker's Maximum Packet Size.                  |
+| `username`              | *(empty)*               | `publisher`  | User name sent in CONNECT. Never logged.                                                                                                                    |
+| `password`              | *(empty)*               | `<password>` | Password. Prefer the TOML file: trigger arguments are readable from the system tables. Never logged.                                                        |
+| `keep_alive`            | `60`                    | `30`         | Seconds declared in CONNECT, minimum 1. A dropped link is detected after about 1.5× this; QoS 0 data sent meanwhile is lost but counted published.          |
+| `reconnect_min_backoff` | `1s`                    | `2s`         | Shortest gap between connection attempts, doubling to the ceiling, reset on a successful CONNACK.                                                           |
+| `reconnect_max_backoff` | `120s`                  | `60s`        | Ceiling for the backoff doubling.                                                                                                                           |
+| `takeover_attempts`     | `3`                     | `5`          | MQTT 3.1.1 only: consecutive quick post-connect closes read as a takeover, after which the client stops. Integer ≥ 2. MQTT 5 is exact and ignores it.       |
+| `idle_disconnect`       | `1h`                    | `30min`      | After this long with no invocation the sender publishes `NDEATH` and exits. Minimum 1min. Use the `all_tables` spec so a sparse table does not idle it out. |
 
 **Sparkplug**
 
-| Parameter                     | Default   | Example      | What it does                                                                                                                                             |
-|-------------------------------|-----------|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `sparkplug_device_from`       | *(empty)* | `tag:machine`| Empty (node-level `NDATA`, names `table/field`), `table` (per-table device), or `tag:<name>` (one device per tag value, needs one source table).         |
-| `sparkplug_device_timeout`    | `0`       | `5min`       | Publish `DDEATH` for a device idle this long, and `DBIRTH` again when it returns. `0` never does, since an idle device cannot be told from a removed one. |
-| `sparkplug_primary_host_id`   | *(empty)* | `scada1`     | Set to subscribe to `spBv1.0/STATE/<id>`, wait for `online` before the first `NBIRTH`, and on `offline` publish `NDEATH`, stop, and rebuild on the next write (awaiting `online` again). |
-| `live_window`                 | `5min`    | `0`          | A row older than `now − live_window` is published `is_historical = true` instead of as the current value. `0` turns the test off (every row live).        |
-| `sparkplug_replay_historical` | `true`    | `false`      | What happens to rows marked historical by `live_window`: `true` republishes them `is_historical = true`; `false` discards them. Live rows unaffected.     |
-| `report_by_exception`         | `false`   | `true`       | Publish a metric only when its value changed from the last published for that alias. The Sparkplug-recommended mode for periodically polled sources.      |
-| `deadband`                    | `0`       | `0.5`        | With `report_by_exception`, a numeric change smaller than this is treated as no change, to suppress analog noise.                                          |
+| Parameter                     | Default   | Example       | What it does                                                                                                                                                                             |
+|-------------------------------|-----------|---------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `sparkplug_device_from`       | *(empty)* | `tag:machine` | Empty (node-level `NDATA`, names `table/field`), `table` (per-table device), or `tag:<name>` (one device per tag value, needs one source table).                                         |
+| `sparkplug_device_timeout`    | `0`       | `5min`        | Publish `DDEATH` for a device idle this long, and `DBIRTH` again when it returns. `0` never does, since an idle device cannot be told from a removed one.                                |
+| `sparkplug_primary_host_id`   | *(empty)* | `scada1`      | Set to subscribe to `spBv1.0/STATE/<id>`, wait for `online` before the first `NBIRTH`, and on `offline` publish `NDEATH`, stop, and rebuild on the next write (awaiting `online` again). |
+| `live_window`                 | `5min`    | `0`           | A row older than `now − live_window` is published `is_historical = true` instead of as the current value. `0` turns the test off (every row live).                                       |
+| `sparkplug_replay_historical` | `true`    | `false`       | What happens to rows marked historical by `live_window`: `true` republishes them `is_historical = true`; `false` discards them. Live rows unaffected.                                    |
+| `report_by_exception`         | `false`   | `true`        | Publish a metric only when its value changed from the last published for that alias. The Sparkplug-recommended mode for periodically polled sources.                                     |
+| `deadband`                    | `0`       | `0.5`         | With `report_by_exception`, a numeric change smaller than this is treated as no change, to suppress analog noise.                                                                        |
 
 **TLS** (for `mqtts://` and `wss://`; a relative path resolves under `PLUGIN_DIR`)
 
-| Parameter                  | Default   | Example              | What it does                                                                                               |
-|----------------------------|-----------|----------------------|-----------------------------------------------------------------------------------------------------------|
-| `tls_ca_cert`              | *(empty)* | `certs/ca.pem`       | CA certificate; omit to use the system trust store.                                                        |
-| `tls_client_cert`          | *(empty)* | `certs/client.pem`   | Client certificate for mutual TLS.                                                                          |
-| `tls_client_key`           | *(empty)* | `certs/client.key`   | Client private key. Must be unencrypted; a passphrase-protected key is refused at configuration time.      |
-| `tls_insecure_skip_verify` | `false`   | `true`               | Skip certificate chain and hostname verification. Leave `false` outside a lab.                             |
-| `tls_alpn`                 | *(empty)* | `x-amzn-mqtt-ca`     | ALPN protocol name, how AWS IoT Core serves MQTT on port 443.                                              |
+| Parameter                  | Default   | Example            | What it does                                                                                          |
+|----------------------------|-----------|--------------------|-------------------------------------------------------------------------------------------------------|
+| `tls_ca_cert`              | *(empty)* | `certs/ca.pem`     | CA certificate; omit to use the system trust store.                                                   |
+| `tls_client_cert`          | *(empty)* | `certs/client.pem` | Client certificate for mutual TLS.                                                                    |
+| `tls_client_key`           | *(empty)* | `certs/client.key` | Client private key. Must be unencrypted; a passphrase-protected key is refused at configuration time. |
+| `tls_insecure_skip_verify` | `false`   | `true`             | Skip certificate chain and hostname verification. Leave `false` outside a lab.                        |
+| `tls_alpn`                 | *(empty)* | `x-amzn-mqtt-ca`   | ALPN protocol name, how AWS IoT Core serves MQTT on port 443.                                         |
 
 **WebSocket** (for `ws://` and `wss://`)
 
-| Parameter    | Default           | Example                              | What it does                                                                       |
-|--------------|-------------------|--------------------------------------|-----------------------------------------------------------------------------------|
-| `ws_path`    | from `broker_url` | `/mqtt`                              | Path for the WebSocket connection.                                                  |
-| `ws_headers` | *(empty)*         | `Authorization:'Bearer abc'`         | Extra headers on the upgrade: space-separated `name:'value'` pairs, or a TOML table.|
+| Parameter    | Default           | Example                      | What it does                                                                         |
+|--------------|-------------------|------------------------------|--------------------------------------------------------------------------------------|
+| `ws_path`    | from `broker_url` | `/mqtt`                      | Path for the WebSocket connection.                                                   |
+| `ws_headers` | *(empty)*         | `Authorization:'Bearer abc'` | Extra headers on the upgrade: space-separated `name:'value'` pairs, or a TOML table. |
 
 **Row selection**
 
-| Parameter      | Default   | Example                             | What it does                                                                                                                                                                 |
-|----------------|-----------|-------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `filters`      | *(empty)* | `temp:'>=185' state:'!=error'`      | Per-row comparisons with `=`, `!=`, `>`, `<`, `>=`, `<=`. As a string, space-separated `column:'op value'` pairs; in a file, `[column, op, value]` triples. A numeric value compares numerically; quote it (`'185'`) to compare as text. |
-| `allow_values` | *(empty)* | `machine:'press7 press8'`           | Membership tests, matched as strings. Only listed rows pass. Also the way to pin a non-device tag to one value so several series do not merge onto one metric.                |
-| `deny_values`  | *(empty)* | `machine:'press9'`                  | Rows whose value is listed are skipped; a deny wins over an allow.                                                                                                           |
+| Parameter      | Default   | Example                        | What it does                                                                                                                                                                                                                             |
+|----------------|-----------|--------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `filters`      | *(empty)* | `temp:'>=185' state:'!=error'` | Per-row comparisons with `=`, `!=`, `>`, `<`, `>=`, `<=`. As a string, space-separated `column:'op value'` pairs; in a file, `[column, op, value]` triples. A numeric value compares numerically; quote it (`'185'`) to compare as text. |
+| `allow_values` | *(empty)* | `machine:'press7 press8'`      | Membership tests, matched as strings. Only listed rows pass. Also the way to pin a non-device tag to one value so several series do not merge onto one metric.                                                                           |
+| `deny_values`  | *(empty)* | `machine:'press9'`             | Rows whose value is listed are skipped; a deny wins over an allow.                                                                                                                                                                       |
 
 **Delivery and buffering**
 
-| Parameter                 | Default       | Example       | What it does                                                                                                                                             |
-|---------------------------|---------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Parameter                 | Default       | Example       | What it does                                                                                                                                                                                                        |
+|---------------------------|---------------|---------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `max_payload_bytes`       | `122880`      | `262144`      | Largest message built, counting topic and properties. A per-device batch is split to stay under it; the birth size is checked before connecting. Integer ≥ 1024. Clamped by an MQTT 5 broker's Maximum Packet Size. |
-| `max_queue_bytes`         | `67108864`    | `16777216`    | The only bound on the in-memory buffer, charged against the entries' Python footprint. Integer ≥ 1024. Per trigger; every trigger shares one engine process. |
-| `drop_policy`             | `drop_oldest` | `drop_newest` | At the buffer cap: `drop_oldest` (default) keeps the freshest data, `drop_newest` the earliest.                                                           |
-| `drain_order`             | `fifo`        | `live_first`  | `fifo` (default) drains in order; `live_first` publishes recent rows first and drains historical ones with the leftover rate budget.                       |
-| `max_message_age`         | `0`           | `10min`       | On drain, a buffered entry older than this is discarded instead of published. Duration or `0` (never).                                                     |
-| `max_messages_per_second` | `0`           | `500`         | Token-bucket cap on how fast the sender hands messages over, and on the `DBIRTH` burst. Integer ≥ 1, or `0` (no limit).                                    |
-| `max_unconfirmed_bytes`   | `16777216`    | `4194304`     | Back-pressure threshold, as the total size handed over and not yet reported back. Integer ≥ 65536.                                                        |
+| `max_queue_bytes`         | `67108864`    | `16777216`    | The only bound on the in-memory buffer, measured by the entries' in-memory size. Integer ≥ 1024. Per trigger; every trigger shares one engine process.                                                              |
+| `drop_policy`             | `drop_oldest` | `drop_newest` | At the buffer cap: `drop_oldest` (default) keeps the freshest data, `drop_newest` the earliest.                                                                                                                     |
+| `drain_order`             | `fifo`        | `live_first`  | `fifo` (default) drains in order; `live_first` publishes recent rows first and drains historical ones with the leftover rate budget.                                                                                |
+| `max_message_age`         | `0`           | `10min`       | On drain, a buffered entry older than this is discarded instead of published. Duration or `0` (never).                                                                                                              |
+| `max_messages_per_second` | `0`           | `500`         | Token-bucket cap on how fast the sender hands messages over, and on the `DBIRTH` burst. Integer ≥ 1, or `0` (no limit).                                                                                             |
+| `max_unconfirmed_bytes`   | `16777216`    | `4194304`     | Back-pressure threshold, as the total size handed over and not yet reported back. Integer ≥ 65536.                                                                                                                  |
 
 **Common**
 
-| Parameter             | Default   | Example                               | What it does                                                                                                                                      |
-|-----------------------|-----------|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
-| `config_file_path`    | *(empty)* | `mqtt_sparkplug_publisher_config.toml`| TOML file under `PLUGIN_DIR` holding any of these settings. Read after the environment and the arguments and winning over both; the place for commas and credentials. |
-| `stats_interval`      | `1min`    | `5min`                                | How often counters are written to `mqtt_sparkplug_publisher_stats` and summarised in the log. Duration or `0` (log summary only, no measurement). |
-| `enable_full_logging` | `false`   | `true`                                | When `false`, an exception is logged as its type only; reason codes and errno are logged either way. Credentials are never logged.                |
+| Parameter             | Default   | Example                                | What it does                                                                                                                                                          |
+|-----------------------|-----------|----------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `config_file_path`    | *(empty)* | `mqtt_sparkplug_publisher_config.toml` | TOML file under `PLUGIN_DIR` holding any of these settings. Read after the environment and the arguments and winning over both; the place for commas and credentials. |
+| `stats_interval`      | `1min`    | `5min`                                 | How often counters are written to `mqtt_sparkplug_publisher_stats` and summarised in the log. Duration or `0` (log summary only, no measurement).                     |
+| `enable_full_logging` | `false`   | `true`                                 | When `false`, an exception is logged as its type only; reason codes and errno are logged either way. Credentials are never logged.                                    |
 
 ---
 
@@ -351,11 +350,12 @@ a documented template.
 - **InfluxDB 3 Core/Enterprise**: 3.8.2 or later, with the Processing Engine enabled
 - **Python packages**: `influxdata-plugin-utils>=0.5.0`, `paho-mqtt>=2.1,<3`, `protobuf>=5`
 
-> One virtual environment serves every plugin on a node. This plugin needs paho
-> 2.x (`CallbackAPIVersion.VERSION2`, the `on_pre_connect` hook and MQTT 5
-> reason codes), which it shares cleanly with `mqtt_publisher`. The Sparkplug
-> codec is loaded from a descriptor embedded in the plugin, so no `protobuf`
-> major is pinned.
+> One virtual environment serves every plugin on a node, so a package pinned by
+> one plugin affects the others. This plugin requires `paho-mqtt` 2.x and runs
+> alongside the other MQTT plugins without conflict. Its Sparkplug codec is built
+> from a descriptor embedded in the plugin rather than a generated module or a
+> library such as `pysparkplug`, so the plugin ships as a single file and pins no
+> `protobuf` version — it will not downgrade packages the other plugins rely on.
 
 1. Start InfluxDB 3 with the Processing Engine enabled:
 
@@ -382,23 +382,23 @@ a documented template.
 Counters reach the log as a summary line and the `mqtt_sparkplug_publisher_stats`
 table in the trigger's own database, at most once per `stats_interval`.
 
-| Field                 | Meaning                                                            |
-|-----------------------|-------------------------------------------------------------------|
-| `published`           | Data messages handed to the socket                                 |
-| `confirmed`           | Message ids the broker took (at QoS 0, the socket write)           |
-| `buffered`            | Metrics that entered the buffer                                     |
-| `dropped_policy`      | Discarded by `drop_policy` at `max_queue_bytes`                    |
-| `dropped_age`         | Discarded by `max_message_age`                                     |
-| `dropped_historical`  | Discarded by `sparkplug_replay_historical = false`                |
-| `dropped_unencodable` | A metric that could not be encoded, or alone exceeds the limit     |
-| `dropped_shutdown`    | Buffered metrics dropped when the watchdog reaped an idle client   |
-| `lost`                | QoS 0 messages a dropped connection took with it                   |
-| `reconnects`          | Connections after the first                                        |
-| `rebirths_served`     | Rebirth requests answered                                          |
-| `births`              | Birth sequences published                                          |
-| `command_errors`      | `NCMD`/`STATE` messages that failed to decode                     |
-| `sender_errors`       | Unexpected errors the sender caught and carried on from            |
-| `queue_depth`, `queue_bytes`, `devices_known` | The buffer and the live device set right now      |
+| Field                                         | Meaning                                                          |
+|-----------------------------------------------|------------------------------------------------------------------|
+| `published`                                   | Data messages handed to the socket                               |
+| `confirmed`                                   | Message ids the broker took (at QoS 0, the socket write)         |
+| `buffered`                                    | Metrics that entered the buffer                                  |
+| `dropped_policy`                              | Discarded by `drop_policy` at `max_queue_bytes`                  |
+| `dropped_age`                                 | Discarded by `max_message_age`                                   |
+| `dropped_historical`                          | Discarded by `sparkplug_replay_historical = false`               |
+| `dropped_unencodable`                         | A metric that could not be encoded, or alone exceeds the limit   |
+| `dropped_shutdown`                            | Buffered metrics dropped when the watchdog reaped an idle client |
+| `lost`                                        | QoS 0 messages a dropped connection took with it                 |
+| `reconnects`                                  | Connections after the first                                      |
+| `rebirths_served`                             | Rebirth requests answered                                        |
+| `births`                                      | Birth sequences published                                        |
+| `command_errors`                              | `NCMD`/`STATE` messages that failed to decode                    |
+| `sender_errors`                               | Unexpected errors the sender caught and carried on from          |
+| `queue_depth`, `queue_bytes`, `devices_known` | The buffer and the live device set right now                     |
 
 Rows are tagged with `broker` (`host:port`), `group` and `edge_node`.
 
@@ -406,29 +406,6 @@ Rows are tagged with `broker` (`host:port`), `group` and `edge_node`.
 the socket, nothing about the broker having received it. A low `keep_alive`
 shortens the window in which a silently dropped link counts QoS 0 data as
 published while it is actually lost.
-
----
-
-## Code overview
-
-| File                                    | Contents                                              |
-|-----------------------------------------|-------------------------------------------------------|
-| `mqtt_sparkplug_publisher.py`           | The plugin, with the metadata docstring               |
-| `sparkplug_b.proto`                     | The schema the embedded codec descriptor was built from|
-| `mqtt_sparkplug_publisher_config.toml`  | Configuration template                                |
-| `test_mqtt_sparkplug_publisher.py`      | Tests with a mocked MQTT client and runtime           |
-| `TEST_PLAN_mqtt_sparkplug_publisher.md` | Live-broker scenarios                                 |
-
-| Function                       | Role                                                             |
-|--------------------------------|-----------------------------------------------------------------|
-| `process_writes`               | WAL entry point: queues a batch for the sender                   |
-| `load_configuration`           | Layers and validates the settings                               |
-| `build_metric_model`           | Metric set and datatypes from the schema; tag and filter checks |
-| `build_payload_class`          | The Sparkplug codec, from the embedded descriptor               |
-| `obtain_state` / `build_state` | The one live client per node, built and rebuilt                 |
-| `sender_loop`                  | The single publisher and the watchdog                           |
-| `ingest`                       | WAL rows into compact buffered entries                          |
-| `build_nbirth` … `build_ddeath`| The Sparkplug payloads                                          |
 
 ---
 

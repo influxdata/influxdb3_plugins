@@ -169,7 +169,10 @@ os.environ["TQDM_DISABLE"] = "1"
 
 import json
 import re
+import sys
+import threading
 import time as _time
+import types
 import uuid
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
@@ -445,23 +448,104 @@ def _compute_step_ms(timestamps):
 # ---------------------------------------------------------------------------
 
 
-def _load_model(model_id, influxdb3_local, task_id):
-    """Load a Chronos model from HuggingFace.
+# The engine reloads this module on every run, but the interpreter and the
+# libraries it imported live on, shared by every run of every trigger. What
+# must outlive a run (the lock and the loaded models) is kept in a module
+# registered in sys.modules.
+_STATE_MODULE = "_influxdb3_chronos_forecasting_state"
+# Loaded models kept for later runs; the oldest is dropped past this many.
+_MAX_LOADED_MODELS = 2
 
-    The module is reloaded on every trigger run, so there is no in-process
-    model cache; subsequent loads are served from the on-disk HuggingFace
-    cache (HF_HOME), which keeps reloads fast.
+
+def _shared_state() -> types.ModuleType:
+    """Return the state shared by every run in this interpreter.
+
+    Returns:
+        A module holding `load_lock`, the loaded `pipelines` by model ID, and
+        `inference_locks` by pipeline.
     """
-    influxdb3_local.info(f"[{task_id}] Loading model {model_id}...")
-    t0 = _time.time()
-    pipeline = BaseChronosPipeline.from_pretrained(
-        model_id,
-        device_map="cpu",
-        dtype=torch.float32,
-    )
-    load_secs = _time.time() - t0
+    state = sys.modules.get(_STATE_MODULE)
+    if state is None:
+        candidate = types.ModuleType(_STATE_MODULE)
+        candidate.load_lock = threading.Lock()
+        candidate.pipelines = {}
+        candidate.inference_locks = {}
+        # setdefault is atomic, so two first runs agree on one state.
+        state = sys.modules.setdefault(_STATE_MODULE, candidate)
+    return state
+
+
+def _load_model(model_id: str, influxdb3_local, task_id: str):
+    """Load a Chronos model once per server, and reuse it in later runs.
+
+    `from_pretrained` is not thread-safe. While it builds a model,
+    transformers swaps process-wide functions (`PreTrainedModel.tie_weights`,
+    `torch.linspace`) and restores them afterwards. Two loads that overlap
+    restore each other's swaps out of order and can leave weight tying
+    switched off for good: from then on every model loads with weights still
+    on the meta device, and every forecast fails with "Tensor.item() cannot be
+    called on meta tensors" until InfluxDB restarts. Runs overlap whenever two
+    requests arrive together, or scheduled triggers fire together, as they all
+    do after a server wakes from sleep.
+
+    So loads take one lock across the interpreter, and a loaded model is kept:
+    after the first run, no run loads at all.
+
+    Args:
+        model_id: HuggingFace model ID, e.g. `amazon/chronos-bolt-tiny`.
+        influxdb3_local: The Processing Engine API, for logging.
+        task_id: The run's ID, for logging.
+
+    Returns:
+        The pipeline, and the seconds spent loading it (0.0 when reused).
+
+    Raises:
+        RuntimeError: If the model loaded with weights still on the meta
+            device.
+    """
+    state = _shared_state()
+    pipeline = state.pipelines.get(model_id)
+    if pipeline is not None:
+        return pipeline, 0.0
+    with state.load_lock:
+        pipeline = state.pipelines.get(model_id)
+        if pipeline is not None:
+            return pipeline, 0.0
+        influxdb3_local.info(f"[{task_id}] Loading model {model_id}...")
+        t0 = _time.time()
+        pipeline = BaseChronosPipeline.from_pretrained(
+            model_id,
+            device_map="cpu",
+            dtype=torch.float32,
+        )
+        load_secs = _time.time() - t0
+        # Something outside this plugin (another plugin loading a transformers
+        # model at the same moment) can still break loading the same way; say
+        # so rather than keep a model that can't forecast.
+        if any(t.is_meta for t in pipeline.model.parameters()):
+            raise RuntimeError(
+                "The model loaded with weights missing. Another model loading "
+                "at the same time may have broken the transformers library; "
+                "restart InfluxDB."
+            )
+        while len(state.pipelines) >= _MAX_LOADED_MODELS:
+            state.pipelines.pop(next(iter(state.pipelines)))
+        state.pipelines[model_id] = pipeline
     influxdb3_local.info(f"[{task_id}] Model loaded in {load_secs:.1f}s")
     return pipeline, load_secs
+
+
+def _inference_lock(pipeline) -> threading.Lock:
+    """Return the lock that keeps forecasts on a shared model one at a time.
+
+    Args:
+        pipeline: A loaded Chronos pipeline.
+
+    Returns:
+        The pipeline's lock, created on first use.
+    """
+    locks = _shared_state().inference_locks
+    return locks.setdefault(id(pipeline), threading.Lock())
 
 
 # ---------------------------------------------------------------------------
@@ -611,11 +695,12 @@ def _run_inference(pipeline, tensor, horizon, target_channel=0):
     quantiles_transposed has shape [len(_QUANTILE_LEVELS), horizon] — rows are
     quantile levels in _QUANTILE_LEVELS order.
     """
-    t0 = _time.time()
-    quantiles, _ = pipeline.predict_quantiles(
-        inputs=tensor, prediction_length=horizon, quantile_levels=_QUANTILE_LEVELS
-    )
-    inference_ms = (_time.time() - t0) * 1000
+    with _inference_lock(pipeline):
+        t0 = _time.time()
+        quantiles, _ = pipeline.predict_quantiles(
+            inputs=tensor, prediction_length=horizon, quantile_levels=_QUANTILE_LEVELS
+        )
+        inference_ms = (_time.time() - t0) * 1000
 
     # Extract quantile matrix for the target channel
     if isinstance(quantiles, list):

@@ -12,7 +12,18 @@ from unittest.mock import Mock, patch
 import builtins
 import importlib
 
-builtins.LineBuilder = getattr(builtins, "LineBuilder", object)
+
+class _PlaceholderLineBuilder:
+    """Default test LineBuilder: constructs for any measurement name."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def build(self):
+        return ""
+
+
+builtins.LineBuilder = getattr(builtins, "LineBuilder", _PlaceholderLineBuilder)
 import_module = importlib.import_module("import")
 
 _parse_url_with_port_inference = import_module._parse_url_with_port_inference
@@ -1208,9 +1219,10 @@ def run_import_table(monkeypatch, answers, pause_after_windows, direction="oldes
     monkeypatch.setattr(
         import_module,
         "convert_influxql_to_line_protocol",
-        lambda local, measurement, series, *a, **k: [
-            FakeBuilder("line") for _ in series["values"]
-        ],
+        lambda local, measurement, series, *a, **k: (
+            [FakeBuilder("line") for _ in series["values"]],
+            0,
+        ),
     )
 
     config = ImportConfig(
@@ -1364,9 +1376,10 @@ class TestRowCountAcrossResume:
         monkeypatch.setattr(
             import_module,
             "convert_influxql_to_line_protocol",
-            lambda local, measurement, series, *a, **k: [
-                FakeBuilder("line") for _ in series["values"]
-            ],
+            lambda local, measurement, series, *a, **k: (
+                [FakeBuilder("line") for _ in series["values"]],
+                0,
+            ),
         )
 
         config = ImportConfig(
@@ -1486,9 +1499,10 @@ def walk_table(monkeypatch, answers, pause_after=None, direction="oldest_first",
     monkeypatch.setattr(
         import_module,
         "convert_influxql_to_line_protocol",
-        lambda local, measurement, series, *a, **k: [
-            FakeBuilder("line") for _ in series["values"]
-        ],
+        lambda local, measurement, series, *a, **k: (
+            [FakeBuilder("line") for _ in series["values"]],
+            0,
+        ),
     )
 
     config = ImportConfig(
@@ -1722,7 +1736,7 @@ class TestResumeCountsSkippedTables:
             "task",
         )
 
-        assert report["tables"] == {"total": 2, "completed": 2}
+        assert report["tables"] == {"total": 2, "completed": 2, "failed": 0}
         assert report["rows_imported"] == 300  # 60 skipped plus 240 imported
         assert report["errors"] == 7  # the skipped table's failures count too
 
@@ -1987,9 +2001,9 @@ def stream_table(monkeypatch, replies, window=(20, 8), direction="oldest_first",
     monkeypatch.setattr(
         import_module,
         "convert_influxql_to_line_protocol",
-        lambda local, measurement, series, *a, **k: [
-            FakeBuilder(row[0]) for row in series["values"]
-        ],
+        lambda local, measurement, series, *a, **k: (
+            [FakeBuilder(row[0]) for row in series["values"]], 0
+        ),
     )
 
     config = ImportConfig(
@@ -2278,9 +2292,9 @@ class TestStreamedImportEndToEnd:
         )
         monkeypatch.setattr(
             import_module, "convert_influxql_to_line_protocol",
-            lambda local, measurement, series, *a, **k: [
-                FakeBuilder(row[0]) for row in series["values"]
-            ],
+            lambda local, measurement, series, *a, **k: (
+                [FakeBuilder(row[0]) for row in series["values"]], 0
+            ),
         )
 
         result = import_module.import_table(
@@ -2409,3 +2423,199 @@ class TestSampledRateIsReused:
 
         import_module._run_import(FakeLocal(), stream_config(), {}, "imp", "task")
         assert handed == {"W": 2.5, "%": None}
+
+
+class TestStoredTableFilter:
+    """table_filter is stored as JSON so dotted and spaced names round-trip."""
+
+    def test_a_json_array_round_trips(self):
+        parse = import_module.parse_stored_table_filter
+        assert parse(json.dumps(["srv.web01.cpu", "weather station"])) == [
+            "srv.web01.cpu",
+            "weather station",
+        ]
+
+    def test_a_legacy_dot_joined_row_still_reads(self):
+        # a row written by an earlier version is a plain dot-joined string
+        assert import_module.parse_stored_table_filter("cpu.mem.disk") == [
+            "cpu",
+            "mem",
+            "disk",
+        ]
+
+    def test_a_scalar_json_value_is_read_as_a_legacy_string(self):
+        parse = import_module.parse_stored_table_filter
+        # only a JSON array counts as JSON; a scalar is a legacy dot-joined name
+        assert parse("1.50") == ["1", "50"]  # not ["1", "5"] from a decoded float
+        assert parse("null") == ["null"]  # not ["None"] from decoded None
+        assert parse("true") == ["true"]
+
+    def test_empty_is_no_filter(self):
+        assert import_module.parse_stored_table_filter("") is None
+        assert import_module.parse_stored_table_filter(None) is None
+
+
+class TestMeasurementNameSanitize:
+    """A space in a measurement name is sanitized to an underscore, not failed."""
+
+    def test_sanitize_replaces_spaces(self):
+        assert import_module.sanitize_measurement_name("weather station") == "weather_station"
+        assert import_module.sanitize_measurement_name("plain") == "plain"
+
+    def test_a_space_name_reaches_the_import_instead_of_failing(self, monkeypatch):
+        class SpaceRejectingBuilder(FakeBuilder):
+            def __init__(self, measurement):
+                if " " in measurement:
+                    raise ValueError("Measurement name cannot contain spaces")
+                super().__init__(measurement)
+
+        monkeypatch.setattr(builtins, "LineBuilder", SpaceRejectingBuilder)
+
+        reached = {"prepare": False}
+
+        def prepared(*a, **k):
+            reached["prepare"] = True
+            return (None, None, 0, {}, [], [])  # no data, so it returns cleanly
+
+        monkeypatch.setattr(import_module, "prepare_table_import", prepared)
+        monkeypatch.setattr(import_module, "write_import_state", lambda *a, **k: None)
+
+        config = ImportConfig(
+            source_url="http://src", source_database="telegraf", influxdb_version=1
+        )
+        result = import_module.import_table(
+            FakeLocal(), config, {}, "imp", "weather station", None, None, "task"
+        )
+
+        # the name sanitizes to a writable one, so it imports rather than failing
+        assert reached["prepare"] is True
+        assert result["status"] != "failed"
+
+
+class TestMeasurementCollision:
+    """Two names that sanitize to the same destination name do not merge."""
+
+    def test_collision_map_marks_the_later_name(self):
+        assert import_module.measurement_collisions(
+            ["cpu_load", "cpu load", "mem"]
+        ) == {"cpu_load": None, "cpu load": "cpu_load", "mem": None}
+
+    def test_a_colliding_table_fails_before_any_query(self, monkeypatch):
+        written = []
+
+        def record_state(local, import_id, table, status, rows, task_id,
+                         paused_at_time=None, no_sync=False, errors=None,
+                         failed_windows=None, error_limit=None):
+            written.append({"status": status, "rows": rows,
+                            "failed_windows": failed_windows, "errors": errors})
+
+        def must_not_run(*a, **k):
+            raise AssertionError("the source was queried for a colliding name")
+
+        monkeypatch.setattr(import_module, "write_import_state", record_state)
+        monkeypatch.setattr(import_module, "prepare_table_import", must_not_run)
+
+        config = ImportConfig(
+            source_url="http://src", source_database="telegraf", influxdb_version=1
+        )
+        result = import_module.import_table(
+            FakeLocal(), config, {}, "imp", "cpu load", None, None, "task",
+            collision_with="cpu_load",
+        )
+
+        assert result["status"] == "failed"
+        assert result["rows_imported"] == 0
+        assert result["failed_windows"] >= 1
+        assert "collides" in result["errors"][0]["error"]
+        assert written[-1]["status"] == "failed"
+
+
+class TestSkippedRowsAreFlagged:
+    """Rows dropped in conversion are recorded through failed_windows, not lost."""
+
+    def test_a_window_with_skips_counts_as_a_failed_window(self, monkeypatch):
+        written = []
+
+        def record_state(local, import_id, table, status, rows, task_id,
+                         paused_at_time=None, no_sync=False, errors=None,
+                         failed_windows=None, error_limit=None):
+            written.append({"status": status, "rows": rows,
+                            "failed_windows": failed_windows, "errors": errors})
+
+        monkeypatch.setattr(import_module, "write_import_state", record_state)
+        monkeypatch.setattr(import_module, "get_import_pause_state",
+                            lambda *a, **k: import_module.ImportPauseState.RUNNING)
+        monkeypatch.setattr(import_module, "write_to_destination", lambda *a: (True, None))
+        monkeypatch.setattr(
+            import_module, "prepare_table_import",
+            lambda *a, **k: (START, START + timedelta(seconds=20), 30, {}, [], []),
+        )
+        monkeypatch.setattr(
+            import_module, "stream_source_influxdb",
+            lambda *a, **k: as_stream(window_series(0, 7)),
+        )
+        # one row converts, two are dropped
+        monkeypatch.setattr(
+            import_module, "convert_influxql_to_line_protocol",
+            lambda local, measurement, series, *a, **k: ([FakeBuilder("line")], 2),
+        )
+
+        config = ImportConfig(
+            source_url="http://src", source_database="telegraf", influxdb_version=1,
+            query_interval_ms=0,
+        )
+        result = import_module.import_table(
+            FakeLocal(), config, {}, "imp", "cpu", None, None, "task"
+        )
+
+        assert result["status"] == "completed"
+        assert result["rows_imported"] == 1
+        assert result["failed_windows"] == 1
+        assert "Skipped 2" in result["errors"][0]["error"]
+        assert written[-1]["failed_windows"] == 1
+
+
+class TestAllWindowsFailedIsFailed:
+    """A table that wrote nothing while windows failed ends failed, not completed."""
+
+    def test_zero_rows_with_failures_is_failed(self, monkeypatch):
+        written = []
+
+        def record_state(local, import_id, table, status, rows, task_id,
+                         paused_at_time=None, no_sync=False, errors=None,
+                         failed_windows=None, error_limit=None):
+            written.append({"status": status, "rows": rows,
+                            "failed_windows": failed_windows})
+
+        monkeypatch.setattr(import_module, "write_import_state", record_state)
+        monkeypatch.setattr(import_module, "get_import_pause_state",
+                            lambda *a, **k: import_module.ImportPauseState.RUNNING)
+        # every window's write is refused, so nothing lands
+        monkeypatch.setattr(import_module, "write_to_destination",
+                            lambda *a: (False, "destination refused the write"))
+        monkeypatch.setattr(
+            import_module, "prepare_table_import",
+            lambda *a, **k: (START, START + timedelta(seconds=20), 30, {}, [], []),
+        )
+        monkeypatch.setattr(
+            import_module, "stream_source_influxdb",
+            lambda *a, **k: as_stream(window_series(0, 7)),
+        )
+        monkeypatch.setattr(
+            import_module, "convert_influxql_to_line_protocol",
+            lambda local, measurement, series, *a, **k: ([FakeBuilder("line")], 0),
+        )
+
+        config = ImportConfig(
+            source_url="http://src", source_database="telegraf", influxdb_version=1,
+            query_interval_ms=0,
+        )
+        result = import_module.import_table(
+            FakeLocal(), config, {}, "imp", "cpu", None, None, "task"
+        )
+
+        assert result["status"] == "failed"
+        assert result["rows_imported"] == 0
+        assert result["failed_windows"] >= 1
+        assert written[-1]["status"] == "failed"
+

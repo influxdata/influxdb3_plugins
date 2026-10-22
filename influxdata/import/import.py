@@ -59,7 +59,7 @@
         {
             "name": "table_filter",
             "example": "cpu.mem.disk",
-            "description": "Dot-separated list of specific tables to import (or all if not specified).",
+            "description": "Tables to import: a dot-separated string, or a JSON array (request body or TOML) for a name containing a dot. All tables if not specified.",
             "required": false
         },
         {
@@ -133,7 +133,7 @@
         {
             "name": "table_filter",
             "example": "cpu.mem.disk",
-            "description": "Dot-separated list of specific tables to import (or all if not specified).",
+            "description": "Tables to import: a dot-separated string, or a JSON array (request body or TOML) for a name containing a dot. All tables if not specified.",
             "required": false
         },
         {
@@ -241,10 +241,12 @@ def trimmed(value) -> str:
 
 def table_list(value) -> Optional[List[str]]:
     """
-    A dot-separated table filter, or a list as TOML delivers one.
+    A dot-separated table filter, or a list as the body or TOML delivers one.
 
     An empty filter is no filter, and reads as None so that leaving the setting
-    out and giving it an empty value end up the same.
+    out and giving it an empty value end up the same. A list is taken as the
+    filter directly, with each item trimmed and blanks dropped, so a name
+    containing a dot must come as a list, not a string.
     """
     return parse_delimited_list(value, sep=".") or None
 
@@ -835,6 +837,7 @@ def estimate_import_time(
     """
     total_estimated_rows = 0
     per_table_estimates = []
+    collisions = measurement_collisions(measurements)
 
     # Rough benchmark: assume we can process ~1000 rows/second
     # This is conservative and accounts for network, parsing, writing
@@ -844,6 +847,17 @@ def estimate_import_time(
     TABLE_OVERHEAD_SECONDS = 2
 
     for measurement in measurements:
+        if collisions.get(measurement):
+            # a colliding table is skipped (failed) on the real run, so it
+            # contributes no rows and is not queried here
+            per_table_estimates.append(
+                {
+                    "measurement": measurement,
+                    "estimated_rows": 0,
+                    "estimated_seconds": 0,
+                }
+            )
+            continue
         try:
             # Get actual data boundaries
             actual_start, actual_end = find_actual_data_boundaries(
@@ -1332,6 +1346,34 @@ def sanitize_field_name(field_name: str) -> str:
     return sanitized
 
 
+def sanitize_measurement_name(name: str) -> str:
+    """
+    Make a measurement name writable: the runtime rejects a space, so replace
+    spaces with underscores, the same way field names are sanitized.
+    """
+    return name.replace(" ", "_")
+
+
+def measurement_collisions(measurements: List[str]) -> Dict[str, Optional[str]]:
+    """
+    Map each measurement to the earlier one it would overwrite after sanitizing,
+    or None when its destination name is unique.
+
+    Two source names that sanitize to the same destination name would merge into
+    one table, so the first one wins and the rest are reported as collisions.
+    """
+    claimed: Dict[str, str] = {}
+    result: Dict[str, Optional[str]] = {}
+    for name in measurements:
+        write_name = sanitize_measurement_name(name)
+        if write_name in claimed:
+            result[name] = claimed[write_name]
+        else:
+            claimed[write_name] = name
+            result[name] = None
+    return result
+
+
 def parse_timestamp_to_nanoseconds(timestamp) -> int:
     """
     Parse timestamp to nanoseconds with full precision support.
@@ -1546,7 +1588,7 @@ def analyze_column_schema(
 
 def build_line_protocol_row(
     influxdb3_local,
-    measurement: str,
+    write_name: str,
     row: List,
     time_idx: int,
     tags_dict: Dict[str, Any],
@@ -1558,10 +1600,12 @@ def build_line_protocol_row(
     """
     Build a single LineBuilder from a row of data
 
+    write_name is the measurement name to write under, already sanitized.
+
     Returns:
         LineBuilder if successful, None if row should be skipped
     """
-    builder = LineBuilder(measurement)
+    builder = LineBuilder(write_name)
     timestamp = row[time_idx]
 
     # Add tags from tags_dict (these are GROUP BY tags in the query result)
@@ -1625,7 +1669,8 @@ def convert_influxql_to_line_protocol(
     field_types: Dict[str, str],
     task_id: str,
     tag_renames: Dict[str, str] | None = None,
-) -> List[LineBuilder]:
+    write_name: Optional[str] = None,
+) -> Tuple[List[LineBuilder], int]:
     """
     Convert InfluxQL query result to LineBuilder objects
 
@@ -1639,10 +1684,13 @@ def convert_influxql_to_line_protocol(
         task_id: Task ID for logging
 
     Returns:
-        List of LineBuilder objects ready for writing
+        A tuple of (LineBuilder objects ready for writing, count of rows that
+        could not be converted to line protocol and were skipped)
     """
     if tag_renames is None:
         tag_renames = {}
+    if write_name is None:
+        write_name = sanitize_measurement_name(measurement)
 
     builders = []
 
@@ -1652,7 +1700,7 @@ def convert_influxql_to_line_protocol(
 
     # Early return if no data
     if not values or len(values) == 0:
-        return []
+        return [], 0
 
     # Analyze column schema
     tag_columns, field_columns = analyze_column_schema(
@@ -1668,7 +1716,7 @@ def convert_influxql_to_line_protocol(
         try:
             builder = build_line_protocol_row(
                 influxdb3_local,
-                measurement,
+                write_name,
                 row,
                 time_idx,
                 tags_dict,
@@ -1677,20 +1725,25 @@ def convert_influxql_to_line_protocol(
                 tag_renames,
                 task_id,
             )
-            if builder:
-                builders.append(builder)
         except Exception as e:
             skipped += 1
             influxdb3_local.warn(
                 f"[{task_id}] Skipping invalid row in '{measurement}': {e}"
             )
+            continue
+        if builder:
+            builders.append(builder)
+        else:
+            # row had no writable field (all fields null, or the only field was
+            # reclassified as a tag) — count it rather than lose it silently
+            skipped += 1
 
     if skipped > 0:
         influxdb3_local.warn(
             f"[{task_id}] Skipped {skipped} invalid rows in '{measurement}'"
         )
 
-    return builders
+    return builders, skipped
 
 
 def write_to_destination(
@@ -1718,6 +1771,24 @@ def write_to_destination(
         return False, error_msg
 
 
+def parse_stored_table_filter(stored) -> Optional[List[str]]:
+    """
+    Read a stored table_filter back into a list.
+
+    A current row stores a JSON array; only a JSON array is read as JSON. Any
+    other stored value is a dot-joined string from an earlier version and is
+    split from the original text on the dot.
+    """
+    if not stored:
+        return None
+    try:
+        parsed = json.loads(stored)
+    except (ValueError, TypeError):
+        parsed = None
+    value = parsed if isinstance(parsed, list) else stored
+    return parse_delimited_list(value, sep=".") or None
+
+
 def save_import_config(
     influxdb3_local, import_id: str, config: ImportConfig, task_id: str
 ) -> None:
@@ -1726,8 +1797,8 @@ def save_import_config(
     Token, username and password are not saved for security reasons and must be provided when resuming
     """
     try:
-        # Convert table_filter list to comma-separated string
-        table_filter_str = ".".join(config.table_filter) if config.table_filter else ""
+        # Store table_filter as JSON so names with dots or spaces round-trip intact
+        table_filter_str = json.dumps(config.table_filter) if config.table_filter else ""
 
         # Build LineBuilder for config storage
         builder = LineBuilder("import_config")
@@ -1784,13 +1855,8 @@ def load_import_config(
 
         row = result[0]
 
-        # Convert table_filter from dot-separated string back to list
-        table_filter_str = row.get("table_filter", "")
-        table_filter = (
-            [t.strip() for t in table_filter_str.split(".") if t.strip()]
-            if table_filter_str
-            else None
-        )
+        # table_filter is stored as JSON; tolerate rows written as a dot-joined string
+        table_filter = parse_stored_table_filter(row.get("table_filter", ""))
 
         # Reconstruct ImportConfig from saved data
         config = ImportConfig(
@@ -2030,6 +2096,7 @@ def write_window(
     tag_renames: Dict[str, str],
     direction: int,
     task_id: str,
+    write_name: Optional[str] = None,
 ) -> Iterator[Dict[str, Any]]:
     """
     Stream one window from the source and write it a chunk at a time.
@@ -2044,8 +2111,13 @@ def write_window(
             or None when it wrote nothing that moves it
         error: why the write failed, or None
         time_range: the span of rows the write covered
+    A chunk with rows that could not be converted yields a second entry, a
+    failure naming how many, so the loss is counted rather than only logged.
     Exceptions from stream_source_influxdb propagate; whatever was yielded
     before one is written.
+
+    Args:
+        write_name: The measurement name to write under, already sanitized
     """
     held: List[Dict[str, Any]] = []
     for statement in stream_source_influxdb(
@@ -2066,12 +2138,23 @@ def write_window(
             continue
 
         line_protocol = []
+        skipped = 0
         for series in series_list:
-            line_protocol.extend(
-                convert_influxql_to_line_protocol(
-                    influxdb3_local, measurement, series, tags, fields, task_id, tag_renames
-                )
+            lines, series_skipped = convert_influxql_to_line_protocol(
+                influxdb3_local, measurement, series, tags, fields, task_id,
+                tag_renames, write_name,
             )
+            line_protocol.extend(lines)
+            skipped += series_skipped
+        if skipped:
+            # the chunk writes the rest, but these rows are lost, so the table
+            # is flagged rather than reported clean
+            yield {
+                "rows": 0,
+                "frontier_ns": None,
+                "error": f"Skipped {skipped} rows that could not be converted to line protocol",
+                "time_range": time_range_of(series_list),
+            }
         success, error = write_to_destination(
             influxdb3_local, config.dest_database, line_protocol, task_id
         )
@@ -2128,6 +2211,7 @@ def import_table(
     windows_already_failed: int = 0,
     errors_already_recorded: Optional[List[Dict[str, Any]]] = None,
     rows_per_second: Optional[float] = None,
+    collision_with: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Import a single table from source to destination
@@ -2156,6 +2240,35 @@ def import_table(
     frontier_ns: Optional[int] = imported_up_to_ns
     failed_windows = windows_already_failed
     errors = list(errors_already_recorded or [])
+    write_name = sanitize_measurement_name(measurement)
+
+    if collision_with:
+        # Another table sanitizes to the same destination name; import the first
+        # and fail this one instead of silently merging their rows.
+        message = (
+            f"Table name collides with '{collision_with}': both import as "
+            f"'{write_name}'. Imported '{collision_with}', skipped this one."
+        )
+        influxdb3_local.error(f"[{task_id}] {message}")
+        errors.append({"time_range": "n/a", "error": message})
+        write_import_state(
+            influxdb3_local,
+            import_id,
+            measurement,
+            "failed",
+            rows_imported,
+            task_id,
+            no_sync=True,
+            errors=errors,
+            failed_windows=max(failed_windows, 1),
+        )
+        return {
+            "measurement": measurement,
+            "status": "failed",
+            "rows_imported": rows_imported,
+            "errors": errors,
+            "failed_windows": max(failed_windows, 1),
+        }
 
     try:
         actual_start, actual_end, optimal_window_seconds, fields, tags, conflicts = (
@@ -2194,11 +2307,14 @@ def import_table(
         influxdb3_local.info(
             f"[{task_id}] No data found in specified range for '{measurement}'"
         )
+        # same rule as the end of a walked table: nothing landed while windows
+        # failed is failed, not an empty success
+        final_status = "failed" if rows_imported == 0 and failed_windows > 0 else "completed"
         write_import_state(
             influxdb3_local,
             import_id,
             measurement,
-            "completed",
+            final_status,
             rows_imported,
             task_id,
             no_sync=True,
@@ -2207,7 +2323,7 @@ def import_table(
         )
         return {
             "measurement": measurement,
-            "status": "completed",
+            "status": final_status,
             "rows_imported": rows_imported,
             "errors": errors,
             "failed_windows": failed_windows,
@@ -2225,6 +2341,19 @@ def import_table(
         influxdb3_local.warn(
             f"[{task_id}] Measurement '{measurement}' has tag/field conflicts: {conflicts}. "
             "Will rename tags with '_tag' suffix."
+        )
+
+    if write_name != measurement and metadata is not None:
+        metadata["schema_issues"].append(
+            {
+                "measurement": measurement,
+                "type": "measurement_name_sanitized",
+                "resolution": f"Imported as '{write_name}' (spaces replaced with underscores)",
+            }
+        )
+        influxdb3_local.warn(
+            f"[{task_id}] Measurement '{measurement}' written as '{write_name}' "
+            "(name cannot contain spaces)."
         )
 
     # Create tag rename map
@@ -2351,6 +2480,7 @@ def import_table(
                     tag_renames,
                     direction,
                     task_id,
+                    write_name,
                 ):
                     wrote_any = True
                     if written["error"] is not None:
@@ -2474,16 +2604,21 @@ def import_table(
         # Rate limiting
         time.sleep(config.query_interval_ms / 1000.0)
 
+    # A table that wrote nothing while windows failed never landed, so it is
+    # failed rather than an empty success; a table that wrote some rows stays
+    # completed even with failures, which tables_with_errors already surfaces.
+    final_status = "failed" if rows_imported == 0 and failed_windows > 0 else "completed"
+
     influxdb3_local.info(
-        f"[{task_id}] Completed import for '{measurement}': {rows_imported} rows imported"
+        f"[{task_id}] Finished import for '{measurement}' as {final_status}: "
+        f"{rows_imported} rows imported, {failed_windows} windows failed"
     )
 
-    # Write final completion status
     write_import_state(
         influxdb3_local,
         import_id,
         measurement,
-        "completed",
+        final_status,
         rows_imported,
         task_id,
         no_sync=True,
@@ -2493,7 +2628,7 @@ def import_table(
 
     return {
         "measurement": measurement,
-        "status": "completed",
+        "status": final_status,
         "rows_imported": rows_imported,
         "errors": errors,
         "failed_windows": failed_windows,
@@ -2506,6 +2641,7 @@ def _stopped_import_report(
     status: str,
     table_result: Dict[str, Any],
     completed_tables: int,
+    failed_tables: int,
     total_tables: int,
     total_rows: int,
     task_id: str,
@@ -2522,7 +2658,7 @@ def _stopped_import_report(
         f"[{task_id}] Import {status} by user on table '{measurement}'"
     )
     influxdb3_local.info(
-        f"[{task_id}] Tables completed before {noun}: {completed_tables}/{total_tables}"
+        f"[{task_id}] Tables completed before {noun}: {completed_tables}/{total_tables}, {failed_tables} failed"
     )
     influxdb3_local.info(f"[{task_id}] Rows imported before {noun}: {total_rows}")
 
@@ -2531,12 +2667,13 @@ def _stopped_import_report(
         "status": status,
         f"{status}_on_table": measurement,
         "tables_completed": completed_tables,
+        "tables_failed": failed_tables,
         "total_tables": total_tables,
         "rows_imported": total_rows,
         f"{status}_at_time": table_result.get(f"{status}_at_time"),
         "message": (
             f"Import {status} by user. Completed {completed_tables}/{total_tables} "
-            f"tables, {total_rows} rows imported."
+            f"tables ({failed_tables} failed), {total_rows} rows imported."
         ),
     }
 
@@ -2595,7 +2732,10 @@ def resume_incomplete_import(
     started_at = datetime.now(timezone.utc)
     total_rows = 0
     completed_tables = 0
+    failed_tables = 0
     total_failed_windows = 0
+
+    collisions = measurement_collisions(all_measurements)
 
     for idx, measurement in enumerate(all_measurements, 1):
         # Check if table needs restart from beginning (DB crash scenario)
@@ -2613,6 +2753,7 @@ def resume_incomplete_import(
                 start_dt,
                 end_dt,
                 task_id,
+                collision_with=collisions.get(measurement),
             )
         # Check if table needs resumption from checkpoint
         elif measurement in tables_to_resume:
@@ -2646,6 +2787,7 @@ def resume_incomplete_import(
                 imported_up_to_ns=checkpoint_ns,
                 windows_already_failed=tables_to_resume[measurement]["failed_windows"],
                 errors_already_recorded=tables_to_resume[measurement]["errors"],
+                collision_with=collisions.get(measurement),
             )
         else:
             # Check if already completed
@@ -2658,14 +2800,20 @@ def resume_incomplete_import(
                 LIMIT 1
                 """
                 check_result = influxdb3_local.query(check_query)
-                if check_result and check_result[0].get("status") == "completed":
+                if check_result and check_result[0].get("status") in ("completed", "failed"):
+                    row = check_result[0]
+                    status_now = row.get("status")
                     influxdb3_local.info(
-                        f"[{task_id}] Table {measurement} already completed, skipping"
+                        f"[{task_id}] Table {measurement} already {status_now}, skipping"
                     )
-                    completed_tables += 1
+                    # a failed table cannot be resumed, so it is skipped like a
+                    # completed one but is never counted as completed
+                    if status_now == "completed":
+                        completed_tables += 1
+                    else:  # already failed
+                        failed_tables += 1
                     # counted here because the table is skipped, so what it
                     # imported and what it failed would be missing from the report
-                    row = check_result[0]
                     total_rows += row.get("rows_imported", 0)
                     stored_errors = json.loads(row["errors"]) if row.get("errors") else {}
                     total_failed_windows += stored_errors.get("failed_windows", 0)
@@ -2686,6 +2834,7 @@ def resume_incomplete_import(
                 start_dt,
                 end_dt,
                 task_id,
+                collision_with=collisions.get(measurement),
             )
 
         if table_result["status"] in ["completed"]:
@@ -2699,15 +2848,18 @@ def resume_incomplete_import(
                 table_result["status"],
                 table_result,
                 completed_tables,
+                failed_tables,
                 len(all_measurements),
                 total_rows,
                 task_id,
             )
+        elif table_result["status"] == "failed":
+            failed_tables += 1
 
         total_failed_windows += table_result.get("failed_windows", 0)
 
         influxdb3_local.info(
-            f"[{task_id}] Progress: {completed_tables}/{len(all_measurements)} tables completed"
+            f"[{task_id}] Progress: {completed_tables}/{len(all_measurements)} tables completed, {failed_tables} failed"
         )
 
     import_duration = time.time() - import_start
@@ -2725,7 +2877,7 @@ def resume_incomplete_import(
         "start_time": started_at.isoformat(),
         "duration_seconds": import_duration,
         "time_range": {"start": config.start_timestamp, "end": config.end_timestamp},
-        "tables": {"total": len(all_measurements), "completed": completed_tables},
+        "tables": {"total": len(all_measurements), "completed": completed_tables, "failed": failed_tables},
         "rows_imported": total_rows,
         "errors": total_failed_windows,
     }
@@ -2777,6 +2929,7 @@ def generate_import_plan(
 
     # Collect schema conflicts for all tables
     schema_conflicts = []
+    collisions = measurement_collisions(measurements)
     for measurement in measurements:
         try:
             fields = get_field_keys(influxdb3_local, config, credentials, measurement, task_id)
@@ -2792,6 +2945,26 @@ def generate_import_plan(
                         "resolution": f"Tags will be renamed with '_tag' suffix: {', '.join([f'{c} -> {c}_tag' for c in conflicts])}",
                     }
                 )
+
+            collision_with = collisions.get(measurement)
+            if collision_with:
+                schema_conflicts.append(
+                    {
+                        "measurement": measurement,
+                        "type": "measurement_name_collision",
+                        "resolution": f"Collides with '{collision_with}' after sanitizing; skipped (failed) to avoid merging rows",
+                    }
+                )
+            else:
+                sanitized_name = sanitize_measurement_name(measurement)
+                if sanitized_name != measurement:
+                    schema_conflicts.append(
+                        {
+                            "measurement": measurement,
+                            "type": "measurement_name_sanitized",
+                            "resolution": f"Imported as '{sanitized_name}' (spaces replaced with underscores)",
+                        }
+                    )
         except Exception as e:
             influxdb3_local.warn(
                 f"[{task_id}] Failed to check schema for '{measurement}': {e}"
@@ -2846,8 +3019,9 @@ def generate_import_plan(
     influxdb3_local.info(f"[{task_id}] Schema conflicts: {len(schema_conflicts)}")
     if schema_conflicts:
         for conflict in schema_conflicts:
+            detail = ", ".join(conflict["conflicts"]) if conflict.get("conflicts") else conflict.get("resolution", conflict["type"])
             influxdb3_local.info(
-                f"[{task_id}]   - {conflict['measurement']}: {', '.join(conflict['conflicts'])}"
+                f"[{task_id}]   - {conflict['measurement']}: {detail}"
             )
     influxdb3_local.info(
         f"[{task_id}] ============================================================"
@@ -3039,12 +3213,14 @@ def _run_import(
     started_at = datetime.now(timezone.utc)
     total_rows = 0
     completed_tables = 0
+    failed_tables = 0
     all_errors = []
     # sampled by the estimate over the same range, so not sampled again
     sampled_rates = {
         table["measurement"]: table.get("rows_per_second")
         for table in time_estimate["per_table_estimates"]
     }
+    collisions = measurement_collisions(measurements)
 
     for idx, measurement in enumerate(measurements, 1):
         influxdb3_local.info(
@@ -3062,6 +3238,7 @@ def _run_import(
             task_id,
             metadata=metadata,
             rows_per_second=sampled_rates.get(measurement),
+            collision_with=collisions.get(measurement),
         )
 
         if table_result["status"] in ["completed"]:
@@ -3075,16 +3252,19 @@ def _run_import(
                 table_result["status"],
                 table_result,
                 completed_tables,
+                failed_tables,
                 total_tables,
                 total_rows,
                 task_id,
             )
+        elif table_result["status"] == "failed":
+            failed_tables += 1
 
         if "errors" in table_result:
             all_errors.extend(table_result["errors"])
 
         influxdb3_local.info(
-            f"[{task_id}] Progress: {completed_tables}/{total_tables} tables completed"
+            f"[{task_id}] Progress: {completed_tables}/{total_tables} tables completed, {failed_tables} failed"
         )
 
     import_duration = time.time() - import_start
@@ -3102,7 +3282,7 @@ def _run_import(
         "start_time": started_at.isoformat(),
         "duration_seconds": import_duration,
         "time_range": {"start": config.start_timestamp, "end": config.end_timestamp},
-        "tables": {"total": total_tables, "completed": completed_tables},
+        "tables": {"total": total_tables, "completed": completed_tables, "failed": failed_tables},
         "rows_imported": total_rows,
         "schema_issues": metadata.get("schema_issues", []),
         "errors": all_errors,
@@ -3319,7 +3499,7 @@ def resume_import(
             state
             for table_name, state in latest_states.items()
             if table_name != "all"
-            and state["status"] not in ["completed", "cancelled"]
+            and state["status"] not in ["completed", "cancelled", "failed"]
         ]
 
         if not incomplete_tables:
@@ -3466,6 +3646,13 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
                 if t != "all" and s["status"] == "pending"
             ]
         )
+        failed_tables = len(
+            [
+                t
+                for t, s in latest_table_states.items()
+                if t != "all" and s["status"] == "failed"
+            ]
+        )
 
         total_rows_imported = sum(
             s["rows_imported"] for t, s in latest_table_states.items() if t != "all"
@@ -3497,7 +3684,11 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
             and latest_table_states["all"]["status"] == "cancelled"
         ):
             overall_status = "cancelled"
-        elif is_completed or (completed_tables == total_tables and total_tables > 0):
+        elif is_completed or (
+            completed_tables + failed_tables == total_tables and total_tables > 0
+        ):
+            # a table that failed is done too, so an import whose tables are all
+            # completed or failed is completed, not left polling as 'unknown'
             overall_status = "completed"
         elif is_paused:
             overall_status = "paused"
@@ -3536,7 +3727,7 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
                 "import_direction": config_row.get("import_direction"),
                 "target_batch_size": config_row.get("target_batch_size"),
                 "query_interval_ms": config_row.get("query_interval_ms"),
-                "table_filter": config_row.get("table_filter"),
+                "table_filter": parse_stored_table_filter(config_row.get("table_filter")),
             }
 
         # Calculate duration if possible
@@ -3545,10 +3736,11 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
             # Convert nanoseconds to seconds
             duration_seconds = (latest_time - earliest_time) / 1_000_000_000
 
-        # Calculate progress percentage
+        # Calculate progress percentage; a failed table is done too, so it
+        # counts toward progress and a finished import reaches 100%
         progress_percentage = 0.0
         if total_tables > 0:
-            progress_percentage = (completed_tables / total_tables) * 100
+            progress_percentage = ((completed_tables + failed_tables) / total_tables) * 100
 
         # Build final statistics
         stats = {
@@ -3561,6 +3753,7 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
                 "paused_tables": paused_tables,
                 "cancelled_tables": cancelled_tables,
                 "pending_tables": pending_tables,
+                "failed_tables": failed_tables,
                 "tables_with_errors": tables_with_errors,
                 "total_rows_imported": total_rows_imported,
                 "progress_percentage": round(progress_percentage, 2),

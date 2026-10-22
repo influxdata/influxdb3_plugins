@@ -101,7 +101,7 @@ curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
 | `query_interval_ms` | integer | 100            | Delay between queries in milliseconds to avoid overloading source database (0 or greater)                                                                   |
 | `import_direction`  | string  | "oldest_first" | Import direction: "oldest_first" or "newest_first"                                                                                                          |
 | `target_batch_size` | integer | 2000           | Target number of rows per query batch (1 or greater)                                                                                                        |
-| `table_filter`      | string  | none           | Dot-separated list of tables to import (e.g., "cpu.mem.disk"). If not specified, imports all tables                                                         |
+| `table_filter`      | string \| array | none   | Tables to import: a JSON array (request body or TOML), e.g. `["cpu", "mem", "disk"]`, which keeps a name containing a dot intact; or a dot-separated string elsewhere, e.g. `cpu.mem.disk`. A space in a name is written as an underscore (noted under schema issues); if two names sanitize to the same one, only the first imports and the rest are reported `failed`. If not specified, imports all tables |
 | `dry_run`           | boolean | false          | If true, generates import plan without processing data (shows estimates, schema conflicts, and configuration)                                               |
 
 ### TOML configuration
@@ -208,7 +208,7 @@ Start a new import from source InfluxDB to InfluxDB 3.
   "dest_database": "imported_data",
   "start_timestamp": "2024-01-01T00:00:00Z",
   "end_timestamp": "2024-12-31T23:59:59Z",
-  "table_filter": "cpu.mem.disk"
+  "table_filter": ["cpu", "mem", "disk"]
 }
 ```
 
@@ -226,7 +226,12 @@ The answer holds `summary` with the table counts and `total_rows_imported`,
 `table_details` with one entry per table, and `config` with the settings the
 import was started with. A table that failed to write some of its windows
 reports them under `table_details[].errors`, and `summary.tables_with_errors`
-counts such tables.
+counts such tables. A space in a measurement name is written as an underscore
+and noted under schema issues; a table that wrote no rows while windows failed,
+or whose sanitized name collides with another table's (only the first of the two
+imports), ends with status `failed`;
+`summary.failed_tables` counts these, and `overall_status` stays `completed`
+once every table is either completed or failed.
 
 ### Pause Import
 
@@ -424,7 +429,7 @@ curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
     "dest_database": "production_metrics",
     "start_timestamp": "2024-01-01T00:00:00Z",
     "end_timestamp": "2024-12-31T23:59:59Z",
-    "table_filter": "cpu.mem.disk.network",
+    "table_filter": ["cpu", "mem", "disk", "network"],
     "import_direction": "newest_first",
     "target_batch_size": 5000
   }'
@@ -611,7 +616,7 @@ This plugin supports using TOML configuration files to specify all plugin argume
    dest_database = "imported_data"
    start_timestamp = "2024-01-01T00:00:00Z"
    end_timestamp = "2024-12-31T23:59:59Z"
-   table_filter = "cpu.mem.disk"
+   table_filter = ["cpu", "mem", "disk"]
    ```
 
 > **Note**: Credentials are NOT stored in TOML files. Provide them via HTTP headers on each request.
@@ -837,7 +842,12 @@ A table that failed nothing records `{"failed_windows": 0, "errors": []}`.
 first 50 of them — a table that fails on every window repeats one reason, and
 the whole list would outgrow a single point. Rows written while the import is
 still running sample 3 of them instead of 50, to keep a row per window small;
-`failed_windows` is exact on every row.
+`failed_windows` is exact on every row. Rows that cannot be converted to line
+protocol count their window as failed too, so they are recorded rather than
+dropped silently. A space in a measurement name is written as an underscore (and
+noted under schema issues); a table ends with status `failed` when it wrote no
+rows while windows failed, or when its sanitized name collides with another
+table's (only the first of the two imports).
 
 `action=status` returns the same object for each table under
 `table_details[].errors`, and counts the tables that failed anything as

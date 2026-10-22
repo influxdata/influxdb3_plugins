@@ -1168,6 +1168,11 @@ def window_series(*offsets_in_seconds):
 EMPTY_ANSWER = {"results": [{"statement_id": 0}]}
 
 
+def as_stream(answer):
+    """A whole query answer as stream_source_influxdb yields it."""
+    return iter(answer.get("results") or [])
+
+
 def run_import_table(monkeypatch, answers, pause_after_windows, direction="oldest_first"):
     """Walk import_table over scripted window answers, pausing part way."""
     state = {}
@@ -1198,7 +1203,7 @@ def run_import_table(monkeypatch, answers, pause_after_windows, direction="oldes
         lambda *a, **k: (START, START + timedelta(seconds=20), 8, {}, [], []),
     )
     monkeypatch.setattr(
-        import_module, "query_source_influxdb", lambda *a, **k: next(replies)
+        import_module, "stream_source_influxdb", lambda *a, **k: as_stream(next(replies))
     )
     monkeypatch.setattr(
         import_module,
@@ -1352,7 +1357,9 @@ class TestRowCountAcrossResume:
             lambda *a, **k: (START, START + timedelta(seconds=20), 30, {}, [], []),
         )
         monkeypatch.setattr(
-            import_module, "query_source_influxdb", lambda *a, **k: window_series(0, 7)
+            import_module,
+            "stream_source_influxdb",
+            lambda *a, **k: as_stream(window_series(0, 7)),
         )
         monkeypatch.setattr(
             import_module,
@@ -1463,9 +1470,9 @@ def walk_table(monkeypatch, answers, pause_after=None, direction="oldest_first",
             "error_limit": error_limit,
         })
 
-    def query(local, config, credentials, sql, task_id):
+    def query(local, config, credentials, sql, task_id, chunk_size=None):
         queries.append(sql)
-        return next(replies)
+        return as_stream(next(replies))
 
     monkeypatch.setattr(import_module, "get_import_pause_state", pause_state)
     monkeypatch.setattr(import_module, "write_import_state", record_state)
@@ -1475,7 +1482,7 @@ def walk_table(monkeypatch, answers, pause_after=None, direction="oldest_first",
         "prepare_table_import",
         lambda *a, **k: (START, START + timedelta(seconds=20), 8, {}, [], []),
     )
-    monkeypatch.setattr(import_module, "query_source_influxdb", query)
+    monkeypatch.setattr(import_module, "stream_source_influxdb", query)
     monkeypatch.setattr(
         import_module,
         "convert_influxql_to_line_protocol",
@@ -1718,3 +1725,572 @@ class TestResumeCountsSkippedTables:
         assert report["tables"] == {"total": 2, "completed": 2}
         assert report["rows_imported"] == 300  # 60 skipped plus 240 imported
         assert report["errors"] == 7  # the skipped table's failures count too
+
+
+# --- streaming a window chunk by chunk ---
+
+
+def answer_document(*offsets, partial=False):
+    """One chunk of a chunked answer, a row per offset in seconds."""
+    document = window_series(*offsets)
+    if partial:
+        document["results"][0]["partial"] = True
+        document["results"][0]["series"][0]["partial"] = True
+    return document
+
+
+def encode_answer(documents, separator):
+    """A chunked answer as a source sends it: 1.x and 2.x end each document
+    with a newline, 3.x writes them back to back."""
+    return b"".join(json.dumps(d, separators=(",", ":")).encode() + separator for d in documents)
+
+
+class FakeStreamResponse:
+    """A streamed HTTP answer that records how much of it has been read."""
+
+    def __init__(self, blocks, status_error=None):
+        self.blocks = list(blocks)
+        self.read = 0
+        self.status_error = status_error
+        self.closed = False
+
+    def raise_for_status(self):
+        if self.status_error:
+            raise self.status_error
+
+    def iter_content(self, chunk_size=None):
+        for block in self.blocks:
+            if isinstance(block, Exception):
+                raise block
+            self.read += 1
+            yield block
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+        return False
+
+
+class FakeStreamSession:
+    def __init__(self, responses):
+        self.responses = iter(responses)
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append(kwargs)
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def stream_config(**overrides):
+    settings = dict(
+        source_url="http://src", source_database="homeassistant", influxdb_version=1
+    )
+    settings.update(overrides)
+    return ImportConfig(**settings)
+
+
+class TestIterAnswerDocuments:
+    """A chunked answer is split into its documents without reading it whole."""
+
+    @pytest.mark.parametrize("separator", [b"\n", b""], ids=["v1-v2", "v3"])
+    def test_both_chunk_spellings_split(self, separator):
+        documents = [answer_document(0, partial=True), answer_document(1)]
+        body = encode_answer(documents, separator)
+        assert list(import_module.iter_answer_documents([body])) == documents
+
+    @pytest.mark.parametrize("separator", [b"\n", b""], ids=["v1-v2", "v3"])
+    def test_a_boundary_split_across_reads_is_found(self, separator):
+        documents = [answer_document(0, partial=True), answer_document(1, partial=True),
+                     answer_document(2)]
+        body = encode_answer(documents, separator)
+        one_byte_reads = [body[i:i + 1] for i in range(len(body))]
+        assert list(import_module.iter_answer_documents(one_byte_reads)) == documents
+
+    def test_braces_inside_a_string_do_not_split_a_document(self):
+        document = {"results": [{"series": [{"columns": ["time", "attr"],
+                                             "values": [["t", 'a}{"b":1}{c']]}]}]}
+        body = encode_answer([document, answer_document(1)], b"")
+        assert list(import_module.iter_answer_documents([body])) == [
+            document, answer_document(1)
+        ]
+
+    def test_a_document_past_the_limit_stops_the_read(self):
+        # a source that ignores chunking sends the window as one document
+        reads = {"count": 0}
+
+        def endless_document():
+            yield b'{"results":[{"series":[{"values":['
+            while True:
+                reads["count"] += 1
+                yield b'["2026-01-01T00:00:00Z",1],' * 100
+
+        with pytest.raises(import_module.AnswerTooLargeError):
+            for _ in import_module.iter_answer_documents(
+                endless_document(), max_document_bytes=10_000
+            ):
+                pass
+        # stopped as soon as the limit passed, holding no more than it
+        assert reads["count"] <= 10_000 // 2_700 + 1
+
+    def test_a_cut_off_last_document_is_an_error(self):
+        body = encode_answer([answer_document(0)], b"\n")[:-20]
+        with pytest.raises(ValueError):
+            list(import_module.iter_answer_documents([body]))
+
+    def test_an_empty_answer_holds_no_documents(self):
+        assert list(import_module.iter_answer_documents([b"", b"\n"])) == []
+
+
+class TestStreamSourceInfluxdb:
+    """Rows are requested chunked and handed on as each chunk arrives."""
+
+    def stream(self, monkeypatch, responses, **config):
+        session = FakeStreamSession(responses)
+        monkeypatch.setattr(import_module, "get_http_session", lambda: session)
+        statements = import_module.stream_source_influxdb(
+            FakeLocal(), stream_config(**config), {}, "SELECT * FROM m", "task",
+            chunk_size=500,
+        )
+        return session, statements
+
+    def test_the_answer_is_requested_chunked_and_streamed(self, monkeypatch):
+        response = FakeStreamResponse([encode_answer([answer_document(0)], b"\n")])
+        session, statements = self.stream(monkeypatch, [response])
+        list(statements)
+
+        call = session.calls[0]
+        assert call["stream"] is True
+        assert call["params"]["chunked"] == "true"
+        assert call["params"]["chunk_size"] == "500"
+        assert call["params"]["q"] == "SELECT * FROM m"
+        assert response.closed
+
+    def test_a_chunk_is_handed_on_before_the_next_is_read(self, monkeypatch):
+        blocks = [encode_answer([answer_document(i, partial=True)], b"") for i in range(5)]
+        blocks.append(encode_answer([answer_document(5)], b""))
+        response = FakeStreamResponse(blocks)
+        _, statements = self.stream(monkeypatch, [response])
+
+        for index, statement in enumerate(statements):
+            # a document is known to be complete once the next one starts
+            assert response.read <= index + 2
+        assert index == 5
+
+    def test_an_empty_answer_is_a_window_without_rows(self, monkeypatch):
+        # 3.x sends nothing at all for a statement without rows
+        _, statements = self.stream(monkeypatch, [FakeStreamResponse([b""])])
+        assert list(statements) == []
+
+    def test_an_answer_ending_partial_is_incomplete(self, monkeypatch):
+        response = FakeStreamResponse([encode_answer([answer_document(0, partial=True)], b"\n")])
+        _, statements = self.stream(monkeypatch, [response])
+        with pytest.raises(import_module.IncompleteAnswerError):
+            list(statements)
+
+    def test_a_connection_lost_mid_answer_is_incomplete(self, monkeypatch):
+        response = FakeStreamResponse([
+            encode_answer([answer_document(0, partial=True)], b"\n"),
+            import_module.requests.exceptions.ChunkedEncodingError("connection reset"),
+        ])
+        _, statements = self.stream(monkeypatch, [response])
+        received = []
+        with pytest.raises(import_module.IncompleteAnswerError):
+            for statement in statements:
+                received.append(statement)
+        assert len(received) == 1  # what arrived before the break is still handed on
+
+    def test_a_statement_error_mid_answer_is_raised(self, monkeypatch):
+        failed = {"results": [{"statement_id": 0, "error": "resources exhausted"}]}
+        response = FakeStreamResponse([
+            encode_answer([answer_document(0, partial=True), failed], b"")
+        ])
+        _, statements = self.stream(monkeypatch, [response], influxdb_version=3)
+        with pytest.raises(SourceQueryError, match="resources exhausted"):
+            list(statements)
+
+    def test_a_bare_error_document_is_raised(self, monkeypatch):
+        response = FakeStreamResponse([b'{"error":"failed to serialize response"}'])
+        _, statements = self.stream(monkeypatch, [response], influxdb_version=3)
+        with pytest.raises(SourceQueryError):
+            list(statements)
+
+
+def stream_table(monkeypatch, replies, window=(20, 8), direction="oldest_first",
+                 target_batch_size=2000, pause_after=None, on_write=None, log=None,
+                 refuse_writes=(), **carry):
+    """
+    import_table over scripted streamed answers.
+
+    Each reply is the list of statements one window query yields; an exception
+    in it is raised when the stream reaches it. Each write records the row
+    times it carried, and the writes numbered in refuse_writes fail. Pass log,
+    a dict, to keep the records when it raises.
+    """
+    log = {} if log is None else log
+    states = log.setdefault("states", [])
+    writes = log.setdefault("writes", [])
+    queries = log.setdefault("queries", [])
+    replies = iter(replies)
+    checks = {"count": 0}
+
+    def stream(local, config, credentials, sql, task_id, chunk_size=None):
+        queries.append(sql)
+        # windows past the scripted ones hold no rows
+        reply = next(replies, [])
+
+        def statements():
+            for item in reply:
+                if isinstance(item, Exception):
+                    raise item
+                if callable(item):
+                    item = item()
+                yield item
+
+        return statements()
+
+    def record_write(local, database, builders, task_id):
+        writes.append([builder.line for builder in builders])
+        if on_write:
+            on_write(writes[-1])
+        if len(writes) - 1 in refuse_writes:
+            return False, "write refused"
+        return True, None
+
+    def record_state(local, import_id, table, status, rows, task_id,
+                     paused_at_time=None, no_sync=False, errors=None,
+                     failed_windows=None, error_limit=None):
+        states.append({"status": status, "rows": rows, "checkpoint": paused_at_time,
+                       "errors": list(errors or []), "failed": failed_windows})
+
+    def pause_state(*args, **kwargs):
+        checks["count"] += 1
+        if pause_after is not None and checks["count"] > pause_after:
+            return import_module.ImportPauseState.PAUSED
+        return import_module.ImportPauseState.RUNNING
+
+    span, window_seconds = window
+    monkeypatch.setattr(import_module, "get_import_pause_state", pause_state)
+    monkeypatch.setattr(import_module, "write_import_state", record_state)
+    monkeypatch.setattr(import_module, "write_to_destination", record_write)
+    monkeypatch.setattr(import_module, "stream_source_influxdb", stream)
+    monkeypatch.setattr(import_module.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        import_module,
+        "prepare_table_import",
+        lambda *a, **k: (START, START + timedelta(seconds=span), window_seconds, {}, [], []),
+    )
+    monkeypatch.setattr(
+        import_module,
+        "convert_influxql_to_line_protocol",
+        lambda local, measurement, series, *a, **k: [
+            FakeBuilder(row[0]) for row in series["values"]
+        ],
+    )
+
+    config = ImportConfig(
+        source_url="http://src",
+        source_database="homeassistant",
+        influxdb_version=1,
+        import_direction=direction,
+        query_interval_ms=0,
+        target_batch_size=target_batch_size,
+    )
+    result = import_module.import_table(
+        FakeLocal(), config, {}, "imp", "sensor", None, None, "task", **carry
+    )
+    return result, states, writes, queries
+
+
+def statement(*offsets, partial=False):
+    return answer_document(*offsets, partial=partial)["results"][0]
+
+
+def at(offset):
+    """The time text of a row at an offset in seconds."""
+    return (START + timedelta(seconds=offset)).isoformat()
+
+
+def ns_at(offset):
+    return BASE_NS + int(offset * 10**9)
+
+
+def bounds(query):
+    import re
+    lower, upper = re.search(r"time >= '([^']*)' AND time < '([^']*)'", query).groups()
+    return lower, upper
+
+
+class TestChunkedWindow:
+    """A window is written chunk by chunk, never held whole."""
+
+    def test_each_chunk_is_written_before_the_next_is_read(self, monkeypatch):
+        chunk_count = 50
+        writes = []
+        writes_before_read = []
+
+        def chunk(index):
+            def produce():
+                writes_before_read.append(len(writes))
+                return statement(*(index * 4 + i for i in range(4)),
+                                 partial=index < chunk_count - 1)
+            return produce
+
+        result, _, recorded, _ = stream_table(
+            monkeypatch, [[chunk(i) for i in range(chunk_count)]], window=(300, 300),
+            on_write=writes.append,
+        )
+
+        assert result["status"] == "completed"
+        assert result["rows_imported"] == chunk_count * 4
+        # chunk n is read only once the chunks before it are written
+        assert writes_before_read == list(range(chunk_count))
+        # one write per chunk, each the size of a chunk rather than the window:
+        # a chunk's last instant moves to the next write
+        assert len(recorded) == chunk_count
+        assert max(len(lines) for lines in recorded) <= 4 + 1
+
+    def test_the_checkpoint_moves_with_every_chunk(self, monkeypatch):
+        result, states, _, _ = stream_table(
+            monkeypatch,
+            [[statement(0, 1, partial=True), statement(2, 3, partial=True), statement(4)]],
+        )
+        progress = [s["checkpoint"] for s in states if s["status"] == "in_progress"]
+        # the last instant of a partial chunk is held back, so it is not checkpointed yet
+        assert progress == [
+            format_nanoseconds_iso(ns_at(0)),
+            format_nanoseconds_iso(ns_at(2)),
+            format_nanoseconds_iso(ns_at(4)),
+        ]
+
+    def test_rows_at_a_chunk_edge_instant_are_written_together(self, monkeypatch):
+        # two series report at +1s, and the chunk cut falls between them
+        result, states, writes, _ = stream_table(
+            monkeypatch,
+            [[statement(0, 1, partial=True), statement(1, 2)]],
+        )
+        assert writes == [[at(0)], [at(1), at(1), at(2)]]
+        assert result["rows_imported"] == 4
+        # no checkpoint ever names +1s while one of its rows is unwritten
+        progress = [s["checkpoint"] for s in states if s["status"] == "in_progress"]
+        assert progress == [format_nanoseconds_iso(ns_at(0)), format_nanoseconds_iso(ns_at(2))]
+
+    def test_a_chunk_of_one_instant_is_carried_whole(self, monkeypatch):
+        result, _, writes, _ = stream_table(
+            monkeypatch,
+            [[statement(1, 1, partial=True), statement(1, 1, partial=True), statement(1, 3)]],
+        )
+        assert writes == [[at(1)] * 5 + [at(3)]]
+        assert result["rows_imported"] == 6
+
+    def test_newest_first_holds_back_the_oldest_instant(self, monkeypatch):
+        result, states, writes, _ = stream_table(
+            monkeypatch,
+            [[statement(19, 15, partial=True), statement(15, 12)]],
+            direction="newest_first",
+        )
+        assert writes == [[at(19)], [at(15), at(15), at(12)]]
+        progress = [s["checkpoint"] for s in states if s["status"] == "in_progress"]
+        assert progress[-1] == format_nanoseconds_iso(ns_at(12))
+
+
+class TestFailedChunkWrite:
+    """A chunk the destination refuses is recorded, as a refused window was."""
+
+    def test_it_is_recorded_with_its_span_and_the_import_goes_on(self, monkeypatch):
+        result, states, writes, _ = stream_table(
+            monkeypatch,
+            [[statement(0, 1, partial=True), statement(2, 3, partial=True), statement(4, 5)]],
+            refuse_writes={1},
+        )
+        assert result["status"] == "completed"
+        assert result["failed_windows"] == 1
+        assert result["errors"] == [{
+            "time_range": f"{format_nanoseconds_iso(ns_at(1))} to {format_nanoseconds_iso(ns_at(2))}",
+            "error": "write refused",
+        }]
+        # the refused rows are not counted, and later chunks still are
+        assert result["rows_imported"] == 4
+        progress = [s["checkpoint"] for s in states if s["status"] == "in_progress"]
+        assert progress == [format_nanoseconds_iso(ns_at(0)), format_nanoseconds_iso(ns_at(5))]
+
+
+class TestMidWindowFailure:
+    """A window that breaks off part way goes on from its last written row."""
+
+    def test_the_retry_starts_past_the_last_written_row(self, monkeypatch):
+        broke_off = import_module.IncompleteAnswerError("connection reset")
+        result, states, writes, queries = stream_table(
+            monkeypatch,
+            [
+                [statement(0, 1, 2, partial=True), statement(3, 4, partial=True), broke_off],
+                [statement(4, 5, 6, 7)],
+                [],  # the window after it
+            ],
+            window=(16, 8),
+        )
+
+        assert result["status"] == "completed"
+        # +3s was written; +4s was held back, so it is read again, once
+        lower, _ = bounds(queries[1])
+        assert lower == format_nanoseconds_iso(ns_at(3) + 1)
+        flat = [line for lines in writes for line in lines]
+        assert flat == [at(t) for t in range(8)]
+        assert result["rows_imported"] == 8
+
+    def test_a_pause_after_a_break_keeps_the_mid_window_checkpoint(self, monkeypatch):
+        broke_off = import_module.IncompleteAnswerError("connection reset")
+        result, states, _, _ = stream_table(
+            monkeypatch,
+            [[statement(0, 1, partial=True), statement(2, 3, partial=True), broke_off]],
+            pause_after=1,
+        )
+        assert result["status"] == "paused"
+        assert result["paused_at_time"] == format_nanoseconds_iso(ns_at(2))
+        assert result["rows_imported"] == 3
+
+    def test_a_table_that_keeps_failing_pauses_at_its_last_written_row(self, monkeypatch):
+        timeout = import_module.requests.exceptions.ReadTimeout("read timed out")
+        broke_off = import_module.IncompleteAnswerError("connection reset")
+        # progress, then the source stops answering altogether
+        replies = [[statement(0, 1, partial=True), statement(2, 3, partial=True), broke_off]]
+        replies += [[timeout]] * 40
+        log = {}
+        with pytest.raises(import_module.requests.exceptions.ReadTimeout):
+            stream_table(monkeypatch, replies, window=(16, 8), log=log)
+
+        # +3s was held back unwritten, so the table resumes past +2s
+        last = log["states"][-1]
+        assert (last["status"], last["rows"], last["checkpoint"]) == (
+            "paused", 3, format_nanoseconds_iso(ns_at(2))
+        )
+
+
+class TestWindowSplitting:
+    """A window the source cannot answer is halved, then grows back."""
+
+    def test_a_timed_out_window_is_retried_at_half_its_size(self, monkeypatch):
+        timeout = import_module.requests.exceptions.ReadTimeout("read timed out")
+        result, _, _, queries = stream_table(
+            monkeypatch, [[timeout], [statement(0)], [statement(5)], []], window=(16, 8)
+        )
+        assert result["status"] == "completed"
+        assert bounds(queries[0]) == (at(0), at(8))
+        assert bounds(queries[1]) == (at(0), at(4))
+        # and back to the sampled size once a window succeeds
+        assert bounds(queries[2]) == (at(4), at(12))
+
+    def test_an_answer_too_large_to_hold_is_split(self, monkeypatch):
+        too_large = import_module.AnswerTooLargeError("past the limit")
+        _, _, _, queries = stream_table(
+            monkeypatch, [[too_large], [too_large], [statement(0)], [], [], []],
+            window=(8, 8),
+        )
+        assert [bounds(q)[1] for q in queries[:3]] == [at(8), at(4), at(2)]
+
+    def test_a_source_refusing_a_large_window_gets_smaller_ones(self, monkeypatch):
+        # a v3 source reports running out of memory as a failed statement
+        refused = SourceQueryError("Source query failed: resources exhausted")
+        result, _, _, queries = stream_table(
+            monkeypatch, [[refused], [statement(0)], [statement(5)]], window=(8, 8)
+        )
+        assert result["status"] == "completed"
+        assert bounds(queries[1]) == (at(0), at(4))
+
+    def test_a_refusal_at_the_smallest_window_pauses_the_table(self, monkeypatch):
+        refused = SourceQueryError("Source query failed: no such measurement")
+        with pytest.raises(SourceQueryError):
+            stream_table(monkeypatch, [[refused]] * 10, window=(8, 8))
+
+    def test_a_split_never_goes_below_the_minimum(self, monkeypatch):
+        timeout = import_module.requests.exceptions.ReadTimeout("read timed out")
+        log = {}
+        with pytest.raises(import_module.requests.exceptions.ReadTimeout):
+            stream_table(monkeypatch, [[timeout]] * 40, window=(8, 8), log=log)
+
+        upper_bounds = [bounds(query)[1] for query in log["queries"]]
+        # 8s, 4s, 2s, 1s, then the retries of a source that cannot answer 1s
+        assert upper_bounds == [at(8), at(4), at(2)] + [at(1)] * import_module.MAX_RETRIES
+
+    def test_the_last_window_is_split_by_its_real_length(self, monkeypatch):
+        timeout = import_module.requests.exceptions.ReadTimeout("read timed out")
+        # the sampled window is far larger than the range left
+        _, _, _, queries = stream_table(
+            monkeypatch, [[timeout], [statement(0)], [statement(3)]],
+            window=(4, 86400),
+        )
+        assert bounds(queries[1]) == (at(0), at(2))
+
+    def test_an_unreachable_source_is_retried_without_splitting(self, monkeypatch):
+        refused = import_module.requests.exceptions.ConnectionError("connection refused")
+        result, _, _, queries = stream_table(
+            monkeypatch, [[refused], [refused], [statement(0)], []], window=(16, 8)
+        )
+        assert result["status"] == "completed"
+        assert {bounds(q) for q in queries[:3]} == {(at(0), at(8))}
+
+    def test_an_unreachable_source_pauses_after_the_retries(self, monkeypatch):
+        refused = import_module.requests.exceptions.ConnectionError("connection refused")
+        with pytest.raises(import_module.requests.exceptions.ConnectionError):
+            stream_table(monkeypatch, [[refused]] * import_module.MAX_RETRIES, window=(16, 8))
+
+
+class TestStreamedImportEndToEnd:
+    """The real stream reader and window writer against a fake source."""
+
+    @pytest.mark.parametrize("separator", [b"\n", b""], ids=["v1-v2", "v3"])
+    def test_a_large_window_is_written_in_chunks(self, monkeypatch, separator):
+        rows, chunk_size = 1000, 50
+        session_calls = []
+
+        def answer_blocks(chunk):
+            # produced lazily, as a source streams them
+            for start in range(0, rows, chunk):
+                offsets = [i / 100 for i in range(start, min(start + chunk, rows))]
+                last = start + chunk >= rows
+                yield encode_answer([answer_document(*offsets, partial=not last)], separator)
+
+        class Session:
+            def get(self, url, **kwargs):
+                session_calls.append(kwargs)
+                chunk = int(kwargs["params"]["chunk_size"])
+                return FakeStreamResponse(answer_blocks(chunk))
+
+        writes = []
+
+        def record_write(local, database, builders, task_id):
+            writes.append(len(builders))
+            return True, None
+
+        monkeypatch.setattr(import_module, "get_http_session", lambda: Session())
+        monkeypatch.setattr(import_module, "write_to_destination", record_write)
+        monkeypatch.setattr(import_module, "write_import_state", lambda *a, **k: None)
+        monkeypatch.setattr(import_module, "get_import_pause_state",
+                            lambda *a, **k: import_module.ImportPauseState.RUNNING)
+        monkeypatch.setattr(import_module.time, "sleep", lambda seconds: None)
+        monkeypatch.setattr(
+            import_module, "prepare_table_import",
+            lambda *a, **k: (START, START + timedelta(seconds=20), 20, {}, [], []),
+        )
+        monkeypatch.setattr(
+            import_module, "convert_influxql_to_line_protocol",
+            lambda local, measurement, series, *a, **k: [
+                FakeBuilder(row[0]) for row in series["values"]
+            ],
+        )
+
+        result = import_module.import_table(
+            FakeLocal(),
+            stream_config(query_interval_ms=0, target_batch_size=chunk_size),
+            {}, "imp", "sensor", None, None, "task",
+        )
+
+        assert result["rows_imported"] == rows
+        assert session_calls[0]["params"]["chunk_size"] == str(chunk_size)
+        assert len(writes) == rows // chunk_size
+        # a chunk, give or take the rows at its last instant
+        assert max(writes) <= chunk_size + 1

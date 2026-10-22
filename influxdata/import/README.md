@@ -14,6 +14,7 @@ resume, cancel, and monitor imports through simple HTTP requests.
 Key features:
 - Import data from InfluxDB v1, v2, or v3 to InfluxDB 3
 - Automatic data sampling for optimal batch sizing
+- Memory bounded by `target_batch_size`, however much data a time window holds
 - Resume interrupted imports from the last checkpoint
 - Pause and cancel running imports
 - Crash recovery with stale import detection
@@ -100,7 +101,7 @@ curl -X POST http://localhost:8181/api/v3/engine/import?action=start \
 | `end_timestamp`     | string  | none           | Import end time, same formats as `start_timestamp`. If not specified, imports to newest data                                                                |
 | `query_interval_ms` | integer | 100            | Delay between queries in milliseconds to avoid overloading source database (0 or greater)                                                                   |
 | `import_direction`  | string  | "oldest_first" | Import direction: "oldest_first" or "newest_first"                                                                                                          |
-| `target_batch_size` | integer | 2000           | Target number of rows per query batch (1 or greater)                                                                                                        |
+| `target_batch_size` | integer | 2000           | Rows per chunk read from the source and per write, and the target rows per query window (1 or greater)                                                      |
 | `table_filter`      | string  | none           | Dot-separated list of tables to import (e.g., "cpu.mem.disk"). If not specified, imports all tables                                                         |
 | `dry_run`           | boolean | false          | If true, generates import plan without processing data (shows estimates, schema conflicts, and configuration)                                               |
 
@@ -262,8 +263,9 @@ actually running. The resume action handles this with **stale import detection**
 - If no `import_state` records exist at all (the import crashed before processing any tables), the import is restarted
   from the beginning.
 
-Each table then continues from its own checkpoint. A table that had written windows resumes after the last of them; a
-table that had written none, including one that never started, is imported from the beginning.
+Each table then continues from its own checkpoint. A table that had written rows resumes after the last of them, even
+part way through a window; a table that had written none, including one that never started, is imported from the
+beginning.
 
 If the plugin itself crashes (e.g., source database becomes unavailable), it writes a paused state before exiting, so
 the import can be resumed with a regular resume call after fixing the issue.
@@ -810,15 +812,15 @@ influxdb3 query --database mydb "SELECT * FROM import_config WHERE import_id = '
 
 #### `import_state`
 
-Tracks per-table import progress. One row per query window, holding the table's
+Tracks per-table import progress. One row per chunk written, holding the table's
 status, its running row count and the timestamp of the last row written, to the
 nanosecond. That checkpoint is what a resume continues from, so an import
-continues from its last written window whether it was paused or interrupted.
+continues from its last written chunk whether it was paused or interrupted.
 The row count, the checkpoint and the failures all carry across a resume, so the
 latest row of a table always holds its totals.
 
-Every row also carries an `errors` column, holding the windows the table failed
-to write, as JSON:
+Every row also carries an `errors` column, holding the chunks the table failed
+to write, as JSON (the key is still named `failed_windows`):
 
 ```json
 {
@@ -833,10 +835,10 @@ to write, as JSON:
 ```
 
 A table that failed nothing records `{"failed_windows": 0, "errors": []}`.
-`failed_windows` counts every window that failed, while `errors` holds only the
-first 50 of them — a table that fails on every window repeats one reason, and
+`failed_windows` counts every chunk that failed, while `errors` holds only the
+first 50 of them — a table that fails on every chunk repeats one reason, and
 the whole list would outgrow a single point. Rows written while the import is
-still running sample 3 of them instead of 50, to keep a row per window small;
+still running sample 3 of them instead of 50, to keep a row per chunk small;
 `failed_windows` is exact on every row.
 
 `action=status` returns the same object for each table under
@@ -888,9 +890,9 @@ Imports a single table:
 1. Finds actual data boundaries within specified range
 2. Samples data to determine optimal batch window size
 3. Detects and resolves tag/field conflicts
-4. Queries data in batches and converts to line protocol
-5. Writes to destination database
-6. Tracks progress and checks for pause/cancel signals
+4. Queries each window as a chunked answer and reads it a chunk at a time
+5. Converts each chunk to line protocol and writes it before reading the next
+6. Tracks progress per chunk, splits windows the source cannot answer, and checks for pause/cancel signals
 
 #### `resume_import(influxdb3_local, import_id, credentials, task_id)`
 
@@ -950,6 +952,38 @@ The plugin samples data at different time intervals to determine optimal window 
 optimal_window = target_batch_size / avg_rows_per_second
 ```
 
+#### Streaming windows in chunks
+
+The sampled window size is an estimate from a few counts, and data is rarely
+even: a window sized for a quiet month can hold millions of rows from a busy
+week. So the plugin never reads a window whole:
+
+- Each window is requested with `chunked=true&chunk_size=<target_batch_size>`,
+  which InfluxDB v1, v2 and v3 all support on `/query`, and the answer is read
+  as a stream.
+- Each chunk is converted and written before the next one is read, and the
+  checkpoint moves with every chunk. Memory follows `target_batch_size`, not
+  the size of the window.
+- Rows at the instant of a chunk's last row can continue in the next chunk, so
+  they are held back and written with it. A checkpoint therefore never names an
+  instant with rows still unwritten.
+- An answer that breaks off, or ends while still marked partial, is never taken
+  for a finished window.
+
+A window that fails is retried as follows:
+
+- **The answer broke off after some chunks were written**: the plugin continues
+  from the last written row.
+- **No answer within 30 seconds, an answer that broke off before any row, a
+  statement error, or one answer document over 64 MiB** (what a source that
+  ignores chunking sends): the plugin retries the window at half its size, down
+  to one second. The size grows back by doubling once windows succeed again.
+- **The source cannot be reached**: the plugin retries with backoff
+  (1s → 2s → 4s → 8s).
+
+When a one-second window still fails, the table is paused at its checkpoint,
+ready for `action=resume`.
+
 #### Tag/field conflict resolution
 
 When a column name exists as both tag and field in source data:
@@ -969,11 +1003,12 @@ When a column name exists as both tag and field in source data:
 During import, the plugin saves checkpoints:
 
 ```python
-# Save paused_at_time (data timestamp, not record timestamp)
+# Save paused_at_time after every chunk written
+# (data timestamp of the last row written, not record timestamp)
 # On resume:
 # 1. Load last paused_at_time
-# 2. Add 1 microsecond offset to avoid duplicates
-# 3. Continue import from (paused_at_time + 1µs)
+# 2. Add 1 nanosecond to avoid duplicates
+# 3. Continue import from (paused_at_time + 1ns)
 ```
 
 ## Troubleshooting
@@ -987,10 +1022,11 @@ statement — a point limit, a series limit, or a query it could not plan.
 InfluxDB reports these with HTTP 200 and the reason inside the body, so the
 plugin raises on them rather than reading an empty answer as "no data".
 
-**Solution**: the reason is in the message and in
-`system.processing_engine_logs`. The table is left `paused` with its checkpoint,
-so `action=resume` continues it once the source is able to answer. Lowering
-`target_batch_size` helps when the source refuses a window for its size.
+**Solution**: the plugin first retries the window at half its size, down to
+one second, since a source may refuse a window for its size. If even that fails,
+the reason is in the message and in `system.processing_engine_logs`. The table
+is left `paused` with its checkpoint, so `action=resume` continues it once the
+source is able to answer.
 
 #### Issue: "Failed to connect to source database" error
 
@@ -1058,6 +1094,16 @@ influxdb3 create trigger \
 - Original tag `temperature` → `temperature_tag`
 - Field `temperature` remains unchanged
 
+#### Issue: InfluxDB 3 runs out of memory during an import
+
+**Cause**: Versions before 0.3.1 read each query window whole, and built every
+row of it in memory inside the InfluxDB 3 server before writing. On uneven data
+a single window could hold millions of rows, which took the server down.
+
+**Solution**: update the plugin. It now reads each window as a stream and holds
+no more than one chunk of `target_batch_size` rows at a time. If memory is still
+tight, lower `target_batch_size`.
+
 #### Issue: Slow import performance
 
 **Solution**:
@@ -1075,6 +1121,8 @@ influxdb3 create trigger \
   with `target_batch_size`.
 - **Connection pooling**: Plugin uses HTTP session with connection pooling for better performance.
 - **Retry logic**: Built-in exponential backoff (1s → 2s → 4s → 8s → 16s) for transient errors.
+- **Memory**: Bounded by `target_batch_size` rows per chunk, whatever the window size. A larger value means fewer,
+  larger writes and more memory per chunk.
 
 ## Import best practices
 

@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "chronos_forecasting"
-version = "0.1.0"
+version = "0.1.1"
 description = "Enables zero-shot time-series forecasting with Amazon Chronos models from HuggingFace, supporting scheduled batch forecasts and on-demand HTTP forecasts."
 triggers = ["process_scheduled_call", "process_request"]
 homepage = "https://www.influxdata.com/"

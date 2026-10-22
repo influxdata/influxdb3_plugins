@@ -1884,11 +1884,12 @@ class TestStreamSourceInfluxdb:
         assert call["params"]["q"] == "SELECT * FROM m"
         assert response.closed
 
-    def test_a_chunk_is_handed_on_before_the_next_is_read(self, monkeypatch):
-        blocks = [encode_answer([answer_document(i, partial=True)], b"") for i in range(5)]
-        blocks.append(encode_answer([answer_document(5)], b""))
+    @pytest.mark.parametrize("version,separator", [(1, b"\n"), (3, b"")], ids=["v1", "v3"])
+    def test_a_chunk_is_handed_on_before_the_next_is_read(self, monkeypatch, version, separator):
+        blocks = [encode_answer([answer_document(i, partial=True)], separator) for i in range(5)]
+        blocks.append(encode_answer([answer_document(5)], separator))
         response = FakeStreamResponse(blocks)
-        _, statements = self.stream(monkeypatch, [response])
+        _, statements = self.stream(monkeypatch, [response], influxdb_version=version)
 
         for index, statement in enumerate(statements):
             # a document is known to be complete once the next one starts
@@ -2299,7 +2300,8 @@ class TestStreamedImportEndToEnd:
 
         result = import_module.import_table(
             FakeLocal(),
-            stream_config(query_interval_ms=0, target_batch_size=chunk_size),
+            stream_config(query_interval_ms=0, target_batch_size=chunk_size,
+                          influxdb_version=1 if separator else 3),
             {}, "imp", "sensor", None, None, "task",
         )
 
@@ -2619,3 +2621,93 @@ class TestAllWindowsFailedIsFailed:
         assert result["failed_windows"] >= 1
         assert written[-1]["status"] == "failed"
 
+
+class TestSplitterStaysLinear:
+    """Braces inside string values must not make the splitter re-parse."""
+
+    def answer(self, rows, separator):
+        payload = "".join('{"%s":%d}' % (chr(97 + i), i) for i in range(8))
+        documents = [
+            {"results": [{"statement_id": 0, "partial": True, "series": [{
+                "columns": ["time", "payload"],
+                "values": [[f"2026-01-01T00:00:{i % 60:02d}Z", payload] for i in range(rows)],
+            }]}]},
+            answer_document(1),
+        ]
+        return documents, encode_answer(documents, separator)
+
+    @pytest.mark.parametrize(
+        "separator,newline_delimited",
+        [(b"\n", True), (b"\n", False), (b"", False)],
+        ids=["v1-v2 by line", "v1-v2 by structure", "v3"],
+    )
+    def test_each_document_is_parsed_once(self, monkeypatch, separator, newline_delimited):
+        documents, body = self.answer(2000, separator)
+        parses = []
+        real_loads = json.loads
+        monkeypatch.setattr(import_module.json, "loads",
+                            lambda raw, *a, **k: parses.append(1) or real_loads(raw, *a, **k))
+        reads = [body[i:i + 4096] for i in range(0, len(body), 4096)]
+        assert list(import_module.iter_answer_documents(
+            reads, newline_delimited=newline_delimited)) == documents
+        assert len(parses) == len(documents)
+
+    def test_an_escaped_quote_does_not_end_a_string(self):
+        document = {"results": [{"series": [{"columns": ["v"],
+                                             "values": [['say \\"}{\\" and }']]}]}]}
+        body = encode_answer([document, answer_document(1)], b"")
+        # split right after the backslash, so the escape spans two reads
+        cut = body.index(b"\\\\") + 1
+        reads = [body[:cut], body[cut:]]
+        assert list(import_module.iter_answer_documents(reads)) == [
+            document, answer_document(1)
+        ]
+
+    def test_an_answer_cut_inside_a_document_is_an_error(self):
+        body = encode_answer([answer_document(0)], b"\n")
+        with pytest.raises(ValueError):
+            list(import_module.iter_answer_documents([body[:-5]]))
+
+
+class TestNewlineDelimitedAnswers:
+    """A 1.x or 2.x answer is split on newlines, which no document holds."""
+
+    def test_documents_split_across_reads(self):
+        documents = [answer_document(0, partial=True), answer_document(1)]
+        body = encode_answer(documents, b"\n")
+        reads = [body[i:i + 7] for i in range(0, len(body), 7)]
+        assert list(import_module.iter_answer_documents(reads, newline_delimited=True)) == documents
+
+    def test_a_last_document_without_a_newline_is_read(self):
+        body = encode_answer([answer_document(0)], b"\n").rstrip(b"\n")
+        assert list(import_module.iter_answer_documents([body], newline_delimited=True)) == [
+            answer_document(0)
+        ]
+
+    def test_an_endless_line_stops_at_the_limit(self):
+        def endless():
+            yield b'{"results":[{"series":[{"values":['
+            while True:
+                yield b'[1,2],' * 1000
+
+        with pytest.raises(import_module.AnswerTooLargeError):
+            for _ in import_module.iter_answer_documents(
+                endless(), max_document_bytes=50_000, newline_delimited=True
+            ):
+                pass
+
+    @pytest.mark.parametrize("version,expected", [(1, True), (2, True), (3, False)])
+    def test_the_source_version_picks_the_split(self, monkeypatch, version, expected):
+        seen = {}
+
+        def split(blocks, newline_delimited=False, **k):
+            seen["newline_delimited"] = newline_delimited
+            return iter([])
+
+        monkeypatch.setattr(import_module, "iter_answer_documents", split)
+        session = FakeStreamSession([FakeStreamResponse([b""])])
+        monkeypatch.setattr(import_module, "get_http_session", lambda: session)
+        list(import_module.stream_source_influxdb(
+            FakeLocal(), stream_config(influxdb_version=version), {}, "q", "task", chunk_size=10
+        ))
+        assert seen["newline_delimited"] is expected

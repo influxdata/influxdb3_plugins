@@ -590,72 +590,118 @@ def query_source_influxdb(
     raise Exception(f"[{task_id}] Query failed after all retries")
 
 
-# Where one JSON document of a chunked answer can end and the next begin.
-# InfluxDB 1.x and 2.x end each chunk with a newline, 3.x writes them back to
-# back; in compact JSON a closing brace followed by an opening one occurs
-# nowhere else outside a string.
-DOCUMENT_BOUNDARY = re.compile(rb"\}\s*\{")
+# The bytes that shape a JSON document: string quotes, the backslash that
+# escapes within a string, and the brackets that open and close it
+JSON_STRUCTURE = re.compile(rb'["\\\[\]{}]')
+WHITESPACE = b" \t\r\n"
 
 
 def iter_answer_documents(
-    blocks: Iterable[bytes], max_document_bytes: int = MAX_ANSWER_DOCUMENT_BYTES
+    blocks: Iterable[bytes],
+    max_document_bytes: int = MAX_ANSWER_DOCUMENT_BYTES,
+    newline_delimited: bool = False,
 ) -> Iterator[Any]:
     """
     Split a streamed answer into the JSON documents it is made of, one at a time.
 
-    Only the document being read is held, so memory follows the chunk size of
-    the answer rather than its length.
+    InfluxDB 1.x and 2.x end each chunk with a newline, and compact JSON holds
+    no newline inside a document (a string encodes it as \\n), so with
+    newline_delimited each line is a document. 3.x writes them back to back:
+    a document then ends where its outermost brace closes, which the scan
+    finds by tracking nesting outside strings, so braces inside a string value
+    never count. Either way each byte is scanned once and each document parsed
+    once, so the cost stays linear whatever the values hold. Only the document
+    being read is held, so memory follows the chunk size of the answer rather
+    than its length.
 
     Raises:
         AnswerTooLargeError: A document grew past max_document_bytes, which is
             what a source that ignores chunking does with a large window.
         ValueError: The last document is cut off.
     """
+    if newline_delimited:
+        yield from _iter_answer_lines(blocks, max_document_bytes)
+        return
     pending = bytearray()
-    scan_from = 0
+    scanned = 0  # how much of pending the scan has read
+    depth = 0
+    in_string = False
+    literal_until = 0  # an escaped byte inside a string is not structure
     for block in blocks:
         if not block:
             continue
         pending += block
         while True:
-            boundary = DOCUMENT_BOUNDARY.search(pending, scan_from)
-            if boundary is None:
-                # a boundary not found yet starts at the last brace at the
-                # earliest, and may be completed by the next block
-                last_brace = pending.rfind(b"}", scan_from)
-                scan_from = last_brace if last_brace >= 0 else len(pending)
+            if depth == 0 and not in_string:
+                # skip the whitespace between documents
+                start = 0
+                while start < len(pending) and pending[start] in WHITESPACE:
+                    start += 1
+                if start:
+                    del pending[:start]
+                    scanned = max(scanned - start, 0)
+                    literal_until = max(literal_until - start, 0)
+            end = None
+            for mark in JSON_STRUCTURE.finditer(pending, scanned):
+                at = mark.start()
+                if at < literal_until:
+                    continue
+                byte = pending[at]
+                if in_string:
+                    if byte == 0x5C:  # backslash
+                        literal_until = at + 2
+                    elif byte == 0x22:  # quote
+                        in_string = False
+                elif byte == 0x22:
+                    in_string = True
+                elif byte in (0x7B, 0x5B):  # { [
+                    depth += 1
+                else:  # } ]
+                    depth -= 1
+                    if depth == 0:
+                        end = at + 1
+                        break
+            if end is None:
+                scanned = len(pending)
                 break
-            end = boundary.start() + 1
-            try:
-                document = json.loads(bytes(pending[:end]))
-            except ValueError:
-                # the braces sat inside a string, so the document goes on; a
-                # cut inside a string or an open object never parses
-                scan_from = end
-                continue
-            # keep the opening brace of the next document
-            del pending[: boundary.end() - 1]
-            scan_from = 0
+            document = json.loads(bytes(pending[:end]))
+            del pending[:end]
+            scanned = 0
+            literal_until = 0
             yield document
-        # A read that ends on a closing brace often ends a document, which is
-        # then handed on now rather than once the next one starts, so a break
-        # in the answer loses less. Rows are arrays, so a closing brace inside
-        # a document is rare and a failed attempt costs little. Only the tail
-        # is looked at, as the buffer can be large.
-        if pending[-16:].rstrip().endswith(b"}"):
-            try:
-                document = json.loads(bytes(pending))
-            except ValueError:
-                pass
-            else:
-                pending.clear()
-                scan_from = 0
-                yield document
         if len(pending) > max_document_bytes:
             raise AnswerTooLargeError(
                 f"a single answer document passed {max_document_bytes} bytes"
             )
     if pending.strip():
+        # the scan never saw this document close
+        raise ValueError("the answer ended inside a document")
+
+
+def _iter_answer_lines(blocks: Iterable[bytes], max_document_bytes: int) -> Iterator[Any]:
+    """The documents of an answer that ends each one with a newline."""
+    pending = bytearray()
+    scanned = 0
+    for block in blocks:
+        if not block:
+            continue
+        pending += block
+        while True:
+            newline = pending.find(b"\n", scanned)
+            if newline < 0:
+                scanned = len(pending)
+                break
+            line = bytes(pending[:newline])
+            del pending[: newline + 1]
+            scanned = 0
+            if line.strip():
+                yield json.loads(line)
+        if len(pending) > max_document_bytes:
+            raise AnswerTooLargeError(
+                f"a single answer document passed {max_document_bytes} bytes"
+            )
+    if pending.strip():
+        # the last document need not end with a newline
         yield json.loads(bytes(pending))
 
 
@@ -702,7 +748,8 @@ def stream_source_influxdb(
         complete = True
         try:
             for document in iter_answer_documents(
-                response.iter_content(chunk_size=STREAM_READ_BYTES)
+                response.iter_content(chunk_size=STREAM_READ_BYTES),
+                newline_delimited=config.influxdb_version in (1, 2),
             ):
                 # 3.x reports a failure to encode a chunk as a bare 'error'
                 if document.get("error"):

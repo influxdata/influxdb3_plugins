@@ -826,6 +826,12 @@ def estimate_import_time(
         'estimated_duration_human': str,
         'per_table_estimates': [...]
     }
+
+    Row counts are estimated from the sampled rate rather than counted: a
+    COUNT(*) over a whole measurement makes the source read every point of
+    every field, which on a large, wide measurement can exhaust its memory.
+    Each table's sampled rate is kept as rows_per_second, so the import that
+    follows sizes its windows without sampling again.
     """
     total_estimated_rows = 0
     per_table_estimates = []
@@ -854,18 +860,28 @@ def estimate_import_time(
                 )
                 continue
 
-            # Sample data to estimate row count
-            # Use COUNT(*) for quick estimation
-            count_query = f"""
-            SELECT COUNT(*) FROM {quote_influxql_identifier(measurement)}
-            WHERE time >= '{actual_start.isoformat()}' AND time <= '{actual_end.isoformat()}'
-            """
-
-            result = query_source_influxdb(
-                influxdb3_local, config, credentials, count_query, task_id
+            duration = (actual_end - actual_start).total_seconds()
+            rows_per_second = sample_rows_per_second(
+                influxdb3_local, config, credentials, measurement,
+                actual_start, actual_end, task_id,
             )
-
-            row_count = count_rows_in_result(result)
+            if rows_per_second is not None:
+                row_count = int(rows_per_second * duration)
+            elif duration < SAMPLE_INTERVALS[0][1]:
+                # shorter than the smallest sample, so counting it whole is
+                # as bounded as sampling it
+                count_query = f"""
+                SELECT COUNT(*) FROM {quote_influxql_identifier(measurement)}
+                WHERE time >= '{actual_start.isoformat()}' AND time <= '{actual_end.isoformat()}'
+                """
+                row_count = count_rows_in_result(
+                    query_source_influxdb(
+                        influxdb3_local, config, credentials, count_query, task_id
+                    )
+                )
+            else:
+                # the samples found no rows, so the rate is unknown
+                row_count = 0
 
             # Estimate time for this table
             table_seconds = (row_count / ROWS_PER_SECOND) + TABLE_OVERHEAD_SECONDS
@@ -875,6 +891,7 @@ def estimate_import_time(
                     "measurement": measurement,
                     "estimated_rows": row_count,
                     "estimated_seconds": table_seconds,
+                    "rows_per_second": rows_per_second,
                 }
             )
 
@@ -1123,7 +1140,16 @@ def find_actual_data_boundaries(
     return actual_start, actual_end
 
 
-def sample_data_density(
+# Sample intervals to test: 1 hour, 10 hours, 1 day, 5 days
+SAMPLE_INTERVALS = [
+    ("1h", 3600),
+    ("10h", 36000),
+    ("1d", 86400),
+    ("5d", 432000),
+]
+
+
+def sample_rows_per_second(
     influxdb3_local,
     config: ImportConfig,
     credentials: Dict[str, Optional[str]],
@@ -1131,34 +1157,25 @@ def sample_data_density(
     start: datetime,
     end: datetime,
     task_id: str,
-) -> int:
+) -> Optional[float]:
     """
-    Sample data to determine optimal time window for target batch size
-    Returns: optimal window size in seconds
+    Measure how many rows a measurement holds per second, from a few counts.
+
+    Each count covers no more than five days, so the source never counts a
+    whole measurement; a full-range COUNT(*) on a wide measurement can
+    exhaust a source's memory.
+
+    Returns the average rate, or None when the range is shorter than the
+    smallest sample or no sample found any rows.
     """
-    # Calculate total time range
     total_duration = (end - start).total_seconds()
 
-    # Sample intervals to test: 1 hour, 10 hours, 1 day, 5 days
     # Only test intervals that fit within the time range
-    test_intervals = [
-        ("1h", 3600),
-        ("10h", 36000),
-        ("1d", 86400),
-        ("5d", 432000),
-    ]
-
-    # Filter intervals that are smaller than total duration
     viable_intervals = [
-        (name, secs) for name, secs in test_intervals if secs <= total_duration
+        (name, secs) for name, secs in SAMPLE_INTERVALS if secs <= total_duration
     ]
-
     if not viable_intervals:
-        # If even 1 second is too long, use the entire duration
-        influxdb3_local.warn(
-            f"[{task_id}] Time range too short for sampling, using entire duration: {total_duration:.1f}s"
-        )
-        return max(1, int(total_duration))
+        return None
 
     samples = []
     time_delta = end - start
@@ -1197,33 +1214,78 @@ def sample_data_density(
                 influxdb3_local.warn(f"[{task_id}] Error sampling {interval_name}: {e}")
 
     if not samples:
-        # Default to 1 hour if no samples
-        influxdb3_local.warn(
-            f"[{task_id}] No samples obtained for '{measurement}', defaulting to 1-hour windows"
-        )
-        return 3600
+        return None
+    return sum(samples) / len(samples)
 
-    # Calculate average rows per second
-    avg_rows_per_second = sum(samples) / len(samples)
 
-    if avg_rows_per_second == 0:
+def window_for_rate(
+    influxdb3_local,
+    config: ImportConfig,
+    measurement: str,
+    rows_per_second: float,
+    task_id: str,
+) -> int:
+    """The window, in seconds, expected to hold target_batch_size rows at this rate."""
+    if rows_per_second == 0:
         influxdb3_local.warn(
             f"[{task_id}] Average rows per second is 0, defaulting to 1-day window"
         )
         return 86400
 
     # Calculate window size to get target batch size
-    optimal_window = int(config.target_batch_size / avg_rows_per_second)
+    optimal_window = int(config.target_batch_size / rows_per_second)
 
     # Clamp between 1 second and 1 month (30.5 days)
     optimal_window = max(1, min(optimal_window, int(86400 * 30.5)))
 
     influxdb3_local.info(
-        f"[{task_id}] Measurement '{measurement}': {avg_rows_per_second:.2f} rows/sec "
-        f"({len(samples)} samples), optimal window: {optimal_window}s"
+        f"[{task_id}] Measurement '{measurement}': {rows_per_second:.2f} rows/sec, "
+        f"optimal window: {optimal_window}s"
     )
 
     return optimal_window
+
+
+def sample_data_density(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    measurement: str,
+    start: datetime,
+    end: datetime,
+    task_id: str,
+    rows_per_second: Optional[float] = None,
+) -> int:
+    """
+    Sample data to determine optimal time window for target batch size
+    Returns: optimal window size in seconds
+
+    Args:
+        rows_per_second: A rate already sampled for this range, by the
+            estimate before the import, so the source is not sampled twice
+    """
+    # Calculate total time range
+    total_duration = (end - start).total_seconds()
+
+    if total_duration < SAMPLE_INTERVALS[0][1]:
+        # The whole range fits in the smallest sample, so it is one window
+        influxdb3_local.warn(
+            f"[{task_id}] Time range too short for sampling, using entire duration: {total_duration:.1f}s"
+        )
+        return max(1, int(total_duration))
+
+    if rows_per_second is None:
+        rows_per_second = sample_rows_per_second(
+            influxdb3_local, config, credentials, measurement, start, end, task_id
+        )
+    if rows_per_second is None:
+        # Default to 1 hour if no samples
+        influxdb3_local.warn(
+            f"[{task_id}] No samples obtained for '{measurement}', defaulting to 1-hour windows"
+        )
+        return 3600
+
+    return window_for_rate(influxdb3_local, config, measurement, rows_per_second, task_id)
 
 
 def check_influx_type_to_python_type(influx_type: str, value) -> bool:
@@ -1839,6 +1901,7 @@ def prepare_table_import(
     start_time: Optional[Any],
     end_time: Optional[Any],
     task_id: str,
+    rows_per_second: Optional[float] = None,
 ) -> Tuple[
     Optional[datetime], Optional[datetime], int, Dict[str, str], List[str], List[str]
 ]:
@@ -1847,7 +1910,8 @@ def prepare_table_import(
     window size to walk it with, and the schema the rows are built against.
 
     Returns (actual_start, actual_end, window_seconds, fields, tags, conflicts);
-    actual_start is None when the range holds no data.
+    actual_start is None when the range holds no data. rows_per_second is a
+    rate the estimate already sampled for this range, if there is one.
     """
     actual_start, actual_end = find_actual_data_boundaries(
         influxdb3_local, config, credentials, measurement, start_time, end_time, task_id
@@ -1860,7 +1924,8 @@ def prepare_table_import(
     )
 
     window_seconds = sample_data_density(
-        influxdb3_local, config, credentials, measurement, actual_start, actual_end, task_id
+        influxdb3_local, config, credentials, measurement, actual_start, actual_end, task_id,
+        rows_per_second=rows_per_second,
     )
 
     fields = get_field_keys(influxdb3_local, config, credentials, measurement, task_id)
@@ -2062,6 +2127,7 @@ def import_table(
     imported_up_to_ns: Optional[int] = None,
     windows_already_failed: int = 0,
     errors_already_recorded: Optional[List[Dict[str, Any]]] = None,
+    rows_per_second: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Import a single table from source to destination
@@ -2079,6 +2145,8 @@ def import_table(
         windows_already_failed: How many windows it failed, which is more than
             errors_already_recorded once the sample is full
         errors_already_recorded: The sample of those failures kept in import_state
+        rows_per_second: The rate the estimate sampled for this table over the
+            same range, so its windows are sized without sampling again
     """
     influxdb3_local.info(f"[{task_id}] Starting import for table: {measurement}")
 
@@ -2099,6 +2167,7 @@ def import_table(
                 start_time,
                 end_time,
                 task_id,
+                rows_per_second=rows_per_second,
             )
         )
     except Exception as e:
@@ -2971,6 +3040,11 @@ def _run_import(
     total_rows = 0
     completed_tables = 0
     all_errors = []
+    # sampled by the estimate over the same range, so not sampled again
+    sampled_rates = {
+        table["measurement"]: table.get("rows_per_second")
+        for table in time_estimate["per_table_estimates"]
+    }
 
     for idx, measurement in enumerate(measurements, 1):
         influxdb3_local.info(
@@ -2987,6 +3061,7 @@ def _run_import(
             end_dt,
             task_id,
             metadata=metadata,
+            rows_per_second=sampled_rates.get(measurement),
         )
 
         if table_result["status"] in ["completed"]:

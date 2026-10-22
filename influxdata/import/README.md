@@ -545,12 +545,14 @@ The response returns immediately with a detailed import plan:
       {
         "measurement": "cpu",
         "estimated_rows": 1000000,
-        "estimated_seconds": 900
+        "estimated_seconds": 900,
+        "rows_per_second": 0.38
       },
       {
         "measurement": "mem",
         "estimated_rows": 800000,
-        "estimated_seconds": 720
+        "estimated_seconds": 720,
+        "rows_per_second": 0.31
       }
     ]
   },
@@ -571,8 +573,9 @@ The response returns immediately with a detailed import plan:
 }
 ```
 
-**Note**: Dry run mode is fast and lightweight - it does not query or process any actual data points, only metadata. Use
-it to:
+**Note**: Dry run mode is lightweight: it reads no rows, and its row counts are
+estimates from a few sample counts of five days or less per table (see
+[Automatic batch sizing](#automatic-batch-sizing)). Use it to:
 
 - Preview import scope and estimates
 - Identify schema conflicts before import
@@ -951,6 +954,13 @@ The plugin samples data at different time intervals to determine optimal window 
 # Determine window size to achieve target_batch_size
 optimal_window = target_batch_size / avg_rows_per_second
 ```
+
+The same rate gives the row counts of the import estimate (`rows_per_second`
+times the table's time range), and the import reuses it rather than sampling
+again. The plugin never counts a whole measurement: on a large measurement with
+many fields, a `COUNT(*)` over its full range makes the source read every point
+of every field, which can exhaust the source's memory. A range shorter than one
+hour is counted whole, since that is no larger than a sample.
 
 #### Streaming windows in chunks
 

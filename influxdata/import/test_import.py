@@ -2294,3 +2294,118 @@ class TestStreamedImportEndToEnd:
         assert len(writes) == rows // chunk_size
         # a chunk, give or take the rows at its last instant
         assert max(writes) <= chunk_size + 1
+
+
+# --- the estimate never counts a whole measurement ---
+
+
+def count_answer(rows):
+    return {"results": [{"series": [{"columns": ["time", "count_value"],
+                                      "values": [["1970-01-01T00:00:00Z", rows]]}]}]}
+
+
+def recording_source(monkeypatch, rows_per_sample=3600, boundaries=None):
+    """A source that answers counts and records every query's time span."""
+    spans = []
+    span = boundaries or (START, START + timedelta(days=30))
+
+    def query(local, config, credentials, sql, task_id):
+        if "COUNT(" in sql:
+            import re
+            lower, upper = re.search(r"time >= '([^']*)'\s*AND time <=? '([^']*)'", sql).groups()
+            spans.append(
+                (parse_timestamp_to_nanoseconds(upper) - parse_timestamp_to_nanoseconds(lower))
+                / 10**9
+            )
+            return count_answer(rows_per_sample(spans[-1]) if callable(rows_per_sample)
+                                else rows_per_sample)
+        return EMPTY_ANSWER
+
+    monkeypatch.setattr(import_module, "query_source_influxdb", query)
+    monkeypatch.setattr(import_module, "find_actual_data_boundaries", lambda *a, **k: span)
+    return spans
+
+
+class TestEstimateFromSamples:
+    """A COUNT(*) over a whole wide measurement can exhaust the source's memory."""
+
+    def estimate(self):
+        return import_module.estimate_import_time(
+            FakeLocal(), stream_config(), {}, ["W"], None, None, "task"
+        )
+
+    def test_no_count_spans_more_than_the_largest_sample(self, monkeypatch):
+        spans = recording_source(monkeypatch)
+        self.estimate()
+        assert spans  # it did sample
+        assert max(spans) <= max(secs for _, secs in import_module.SAMPLE_INTERVALS)
+
+    def test_rows_come_from_the_sampled_rate(self, monkeypatch):
+        # one row per second in every sample, over 30 days
+        recording_source(monkeypatch, rows_per_sample=lambda seconds: int(seconds))
+        table = self.estimate()["per_table_estimates"][0]
+        assert table["rows_per_second"] == pytest.approx(1.0)
+        assert table["estimated_rows"] == 30 * 86400
+
+    def test_a_range_shorter_than_a_sample_is_counted_whole(self, monkeypatch):
+        spans = recording_source(
+            monkeypatch, rows_per_sample=42,
+            boundaries=(START, START + timedelta(minutes=20)),
+        )
+        table = self.estimate()["per_table_estimates"][0]
+        assert table["estimated_rows"] == 42
+        assert spans == [20 * 60]
+
+    def test_samples_without_rows_leave_the_rate_unknown(self, monkeypatch):
+        recording_source(monkeypatch, rows_per_sample=0)
+        table = self.estimate()["per_table_estimates"][0]
+        assert (table["estimated_rows"], table["rows_per_second"]) == (0, None)
+
+
+class TestSampledRateIsReused:
+    """The import sizes its windows from the estimate's rate, not new samples."""
+
+    def test_a_known_rate_needs_no_queries(self, monkeypatch):
+        spans = recording_source(monkeypatch)
+        window = import_module.sample_data_density(
+            FakeLocal(), stream_config(target_batch_size=2000), {}, "W",
+            START, START + timedelta(days=30), "task", rows_per_second=2.0,
+        )
+        assert window == 1000
+        assert spans == []
+
+    def test_without_a_rate_it_samples(self, monkeypatch):
+        spans = recording_source(monkeypatch)
+        import_module.sample_data_density(
+            FakeLocal(), stream_config(), {}, "W",
+            START, START + timedelta(days=30), "task",
+        )
+        assert spans
+
+    def test_the_run_hands_each_table_its_sampled_rate(self, monkeypatch):
+        handed = {}
+
+        def fake_import_table(local, config, credentials, import_id, measurement, *a, **k):
+            handed[measurement] = k.get("rows_per_second")
+            return {"measurement": measurement, "status": "completed",
+                    "rows_imported": 0, "errors": []}
+
+        monkeypatch.setattr(import_module, "perform_preflight_checks",
+                            lambda *a, **k: (True, [], {"measurements": ["W", "%"],
+                                                        "schema_issues": []}))
+        monkeypatch.setattr(import_module, "estimate_import_time", lambda *a, **k: {
+            "estimated_total_rows": 0, "estimated_duration_seconds": 0,
+            "estimated_duration_human": "0 seconds",
+            "per_table_estimates": [
+                {"measurement": "W", "estimated_rows": 0, "estimated_seconds": 0,
+                 "rows_per_second": 2.5},
+                {"measurement": "%", "estimated_rows": 0, "estimated_seconds": 0,
+                 "rows_per_second": None},
+            ],
+        })
+        monkeypatch.setattr(import_module, "import_table", fake_import_table)
+        monkeypatch.setattr(import_module, "write_import_state", lambda *a, **k: None)
+        monkeypatch.setattr(import_module, "_write_import_pause_state", lambda *a, **k: None)
+
+        import_module._run_import(FakeLocal(), stream_config(), {}, "imp", "task")
+        assert handed == {"W": 2.5, "%": None}

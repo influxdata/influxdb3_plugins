@@ -66,9 +66,9 @@ source_database = "telegraf"  # e.g., "telegraf", "mydb", "sensor_data"
 #target_batch_size = 2000  # e.g., 1000, 2000, 5000
 
 # Table filter
-# Dot-separated list of specific tables/measurements to import
+# List of specific tables/measurements to import
 # If not specified, all tables will be imported
-#table_filter = "cpu.mem.disk"  # e.g., "cpu.mem.disk", "temperature.humidity"
+#table_filter = ["cpu", "mem", "disk"]  # e.g., ["cpu", "mem"], ["srv.web01.cpu"]
 
 # Dry run mode
 # If true, estimates import without actually transferring data

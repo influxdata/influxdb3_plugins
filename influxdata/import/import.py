@@ -53,13 +53,13 @@
         {
             "name": "target_batch_size",
             "example": "2000",
-            "description": "Target rows per query batch (1 or greater, default: 2000).",
+            "description": "Rows per chunk read from the source and per write, and the target rows per query window (1 or greater, default: 2000).",
             "required": false
         },
         {
             "name": "table_filter",
             "example": "cpu.mem.disk",
-            "description": "Dot-separated list of specific tables to import (or all if not specified).",
+            "description": "Tables to import: a dot-separated string, or a JSON array (request body or TOML) for a name containing a dot. All tables if not specified.",
             "required": false
         },
         {
@@ -127,13 +127,13 @@
         {
             "name": "target_batch_size",
             "example": "2000",
-            "description": "Target rows per query batch (1 or greater, default: 2000).",
+            "description": "Rows per chunk read from the source and per write, and the target rows per query window (1 or greater, default: 2000).",
             "required": false
         },
         {
             "name": "table_filter",
             "example": "cpu.mem.disk",
-            "description": "Dot-separated list of specific tables to import (or all if not specified).",
+            "description": "Tables to import: a dot-separated string, or a JSON array (request body or TOML) for a name containing a dot. All tables if not specified.",
             "required": false
         },
         {
@@ -168,13 +168,14 @@
 
 import base64
 import json
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import requests
 from influxdata_plugin_utils.config import Config, load_config
@@ -203,6 +204,12 @@ MAX_RETRIES = 5
 INITIAL_BACKOFF_SECONDS = 1
 MAX_BACKOFF_SECONDS = 16
 REQUEST_TIMEOUT_SECONDS = 30
+STREAM_READ_BYTES = 64 * 1024  # how much of a streamed answer is read at a time
+# the largest single answer document held in memory; a source that ignores
+# chunking answers a whole window as one document, and a window past this size
+# is split instead of read
+MAX_ANSWER_DOCUMENT_BYTES = 64 * 1024 * 1024
+MIN_WINDOW_SECONDS = 1  # a window is not split below this
 STALE_IMPORT_THRESHOLD_SECONDS = 300  # 5 minutes — if last import_state update is older, import is considered stale
 STORED_ERRORS = 50  # how many failed windows a table records in import_state
 PROGRESS_ERRORS = 3  # how many of them an in_progress row samples, to stay small
@@ -234,10 +241,12 @@ def trimmed(value) -> str:
 
 def table_list(value) -> Optional[List[str]]:
     """
-    A dot-separated table filter, or a list as TOML delivers one.
+    A dot-separated table filter, or a list as the body or TOML delivers one.
 
     An empty filter is no filter, and reads as None so that leaving the setting
-    out and giving it an empty value end up the same.
+    out and giving it an empty value end up the same. A list is taken as the
+    filter directly, with each item trimmed and blanks dropped, so a name
+    containing a dot must come as a list, not a string.
     """
     return parse_delimited_list(value, sep=".") or None
 
@@ -411,6 +420,14 @@ class SourceQueryError(Exception):
     """The source accepted the request but reported a failed statement."""
 
 
+class AnswerTooLargeError(Exception):
+    """One document of the source's answer grew past MAX_ANSWER_DOCUMENT_BYTES."""
+
+
+class IncompleteAnswerError(Exception):
+    """The source's answer broke off before its last chunk."""
+
+
 def load_import_settings(
     influxdb3_local,
     task_id: str,
@@ -494,20 +511,10 @@ def check_query_result(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def query_source_influxdb(
-    influxdb3_local,
-    config: ImportConfig,
-    credentials: Dict[str, Optional[str]],
-    query: str,
-    task_id: str,
-) -> Dict[str, Any]:
-    """
-    Execute InfluxQL query against source InfluxDB API
-    Supports InfluxDB v1 and v2 with appropriate authentication methods
-    Returns parsed JSON response
-    """
-    session = get_http_session()
-
+def source_query_request(
+    config: ImportConfig, credentials: Dict[str, Optional[str]], query: str
+) -> Tuple[str, Dict[str, str], Dict[str, str]]:
+    """The URL, query parameters and headers of an InfluxQL query to the source."""
     base_url = f"{_parse_url_with_port_inference(config.source_url)}/query"
 
     # Build query parameters
@@ -525,6 +532,28 @@ def query_source_influxdb(
     elif config.influxdb_version == 3:
         auth_headers = _build_v3_headers(credentials)
         headers.update(auth_headers)
+
+    return base_url, params, headers
+
+
+def query_source_influxdb(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    query: str,
+    task_id: str,
+) -> Dict[str, Any]:
+    """
+    Execute InfluxQL query against source InfluxDB API
+    Supports InfluxDB v1 and v2 with appropriate authentication methods
+    Returns parsed JSON response
+
+    The whole answer is read into memory, so this is for answers known to be
+    small: schema, boundaries and counts. Rows are read with
+    stream_source_influxdb.
+    """
+    session = get_http_session()
+    base_url, params, headers = source_query_request(config, credentials, query)
 
     retry_count = 0
     backoff = INITIAL_BACKOFF_SECONDS
@@ -559,6 +588,186 @@ def query_source_influxdb(
             raise
 
     raise Exception(f"[{task_id}] Query failed after all retries")
+
+
+# The bytes that shape a JSON document: string quotes, the backslash that
+# escapes within a string, and the brackets that open and close it
+JSON_STRUCTURE = re.compile(rb'["\\\[\]{}]')
+WHITESPACE = b" \t\r\n"
+
+
+def iter_answer_documents(
+    blocks: Iterable[bytes],
+    max_document_bytes: int = MAX_ANSWER_DOCUMENT_BYTES,
+    newline_delimited: bool = False,
+) -> Iterator[Any]:
+    """
+    Split a streamed answer into the JSON documents it is made of, one at a time.
+
+    InfluxDB 1.x and 2.x end each chunk with a newline, and compact JSON holds
+    no newline inside a document (a string encodes it as \\n), so with
+    newline_delimited each line is a document. 3.x writes them back to back:
+    a document then ends where its outermost brace closes, which the scan
+    finds by tracking nesting outside strings, so braces inside a string value
+    never count. Either way each byte is scanned once and each document parsed
+    once, so the cost stays linear whatever the values hold. Only the document
+    being read is held, so memory follows the chunk size of the answer rather
+    than its length.
+
+    Raises:
+        AnswerTooLargeError: A document grew past max_document_bytes, which is
+            what a source that ignores chunking does with a large window.
+        ValueError: The last document is cut off.
+    """
+    if newline_delimited:
+        yield from _iter_answer_lines(blocks, max_document_bytes)
+        return
+    pending = bytearray()
+    scanned = 0  # how much of pending the scan has read
+    depth = 0
+    in_string = False
+    literal_until = 0  # an escaped byte inside a string is not structure
+    for block in blocks:
+        if not block:
+            continue
+        pending += block
+        while True:
+            if depth == 0 and not in_string:
+                # skip the whitespace between documents
+                start = 0
+                while start < len(pending) and pending[start] in WHITESPACE:
+                    start += 1
+                if start:
+                    del pending[:start]
+                    scanned = max(scanned - start, 0)
+                    literal_until = max(literal_until - start, 0)
+            end = None
+            for mark in JSON_STRUCTURE.finditer(pending, scanned):
+                at = mark.start()
+                if at < literal_until:
+                    continue
+                byte = pending[at]
+                if in_string:
+                    if byte == 0x5C:  # backslash
+                        literal_until = at + 2
+                    elif byte == 0x22:  # quote
+                        in_string = False
+                elif byte == 0x22:
+                    in_string = True
+                elif byte in (0x7B, 0x5B):  # { [
+                    depth += 1
+                else:  # } ]
+                    depth -= 1
+                    if depth == 0:
+                        end = at + 1
+                        break
+            if end is None:
+                scanned = len(pending)
+                break
+            document = json.loads(bytes(pending[:end]))
+            del pending[:end]
+            scanned = 0
+            literal_until = 0
+            yield document
+        if len(pending) > max_document_bytes:
+            raise AnswerTooLargeError(
+                f"a single answer document passed {max_document_bytes} bytes"
+            )
+    if pending.strip():
+        # the scan never saw this document close
+        raise ValueError("the answer ended inside a document")
+
+
+def _iter_answer_lines(blocks: Iterable[bytes], max_document_bytes: int) -> Iterator[Any]:
+    """The documents of an answer that ends each one with a newline."""
+    pending = bytearray()
+    scanned = 0
+    for block in blocks:
+        if not block:
+            continue
+        pending += block
+        while True:
+            newline = pending.find(b"\n", scanned)
+            if newline < 0:
+                scanned = len(pending)
+                break
+            line = bytes(pending[:newline])
+            del pending[: newline + 1]
+            scanned = 0
+            if line.strip():
+                yield json.loads(line)
+        if len(pending) > max_document_bytes:
+            raise AnswerTooLargeError(
+                f"a single answer document passed {max_document_bytes} bytes"
+            )
+    if pending.strip():
+        # the last document need not end with a newline
+        yield json.loads(bytes(pending))
+
+
+def stream_source_influxdb(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    query: str,
+    task_id: str,
+    chunk_size: int,
+) -> Iterator[Dict[str, Any]]:
+    """
+    Run a query whose answer can be any size, yielding it a chunk at a time.
+
+    The source is asked for a chunked answer of at most chunk_size rows per
+    chunk, and each statement result is yielded as soon as it arrives, so the
+    caller can write it before the next one is read. InfluxDB 1.x, 2.x and 3.x
+    all answer /query this way.
+
+    One attempt only: the chunks yielded before a failure are already written,
+    so the caller decides how to go on from what it holds.
+
+    Raises:
+        SourceQueryError: The source reported a failed statement.
+        IncompleteAnswerError: The answer broke off, or ended still marked
+            partial, after it had started.
+        AnswerTooLargeError: See iter_answer_documents.
+        requests.exceptions.RequestException: No answer arrived.
+    """
+    session = get_http_session()
+    base_url, params, headers = source_query_request(config, credentials, query)
+    params.update({"chunked": "true", "chunk_size": str(chunk_size)})
+
+    response = session.get(
+        base_url,
+        params=params,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT_SECONDS,
+        stream=True,
+    )
+    with response:
+        response.raise_for_status()
+        # an empty answer, which 3.x sends for a window without rows, is complete
+        complete = True
+        try:
+            for document in iter_answer_documents(
+                response.iter_content(chunk_size=STREAM_READ_BYTES),
+                newline_delimited=config.influxdb_version in (1, 2),
+            ):
+                # 3.x reports a failure to encode a chunk as a bare 'error'
+                if document.get("error"):
+                    raise SourceQueryError(
+                        f"Source query failed: {document['error']}"
+                    )
+                for statement in document.get("results") or []:
+                    if statement.get("error"):
+                        raise SourceQueryError(
+                            f"Source query failed: {statement['error']}"
+                        )
+                    complete = not statement.get("partial")
+                    yield statement
+        except (requests.exceptions.RequestException, ValueError) as e:
+            raise IncompleteAnswerError(f"answer broke off: {e}") from e
+        if not complete:
+            # without this, a truncated answer would read as a finished window
+            raise IncompleteAnswerError("answer ended while still marked partial")
 
 
 def get_source_measurements(
@@ -666,9 +875,16 @@ def estimate_import_time(
         'estimated_duration_human': str,
         'per_table_estimates': [...]
     }
+
+    Row counts are estimated from the sampled rate rather than counted: a
+    COUNT(*) over a whole measurement makes the source read every point of
+    every field, which on a large, wide measurement can exhaust its memory.
+    Each table's sampled rate is kept as rows_per_second, so the import that
+    follows sizes its windows without sampling again.
     """
     total_estimated_rows = 0
     per_table_estimates = []
+    collisions = measurement_collisions(measurements)
 
     # Rough benchmark: assume we can process ~1000 rows/second
     # This is conservative and accounts for network, parsing, writing
@@ -678,6 +894,17 @@ def estimate_import_time(
     TABLE_OVERHEAD_SECONDS = 2
 
     for measurement in measurements:
+        if collisions.get(measurement):
+            # a colliding table is skipped (failed) on the real run, so it
+            # contributes no rows and is not queried here
+            per_table_estimates.append(
+                {
+                    "measurement": measurement,
+                    "estimated_rows": 0,
+                    "estimated_seconds": 0,
+                }
+            )
+            continue
         try:
             # Get actual data boundaries
             actual_start, actual_end = find_actual_data_boundaries(
@@ -694,18 +921,28 @@ def estimate_import_time(
                 )
                 continue
 
-            # Sample data to estimate row count
-            # Use COUNT(*) for quick estimation
-            count_query = f"""
-            SELECT COUNT(*) FROM {quote_influxql_identifier(measurement)}
-            WHERE time >= '{actual_start.isoformat()}' AND time <= '{actual_end.isoformat()}'
-            """
-
-            result = query_source_influxdb(
-                influxdb3_local, config, credentials, count_query, task_id
+            duration = (actual_end - actual_start).total_seconds()
+            rows_per_second = sample_rows_per_second(
+                influxdb3_local, config, credentials, measurement,
+                actual_start, actual_end, task_id,
             )
-
-            row_count = count_rows_in_result(result)
+            if rows_per_second is not None:
+                row_count = int(rows_per_second * duration)
+            elif duration < SAMPLE_INTERVALS[0][1]:
+                # shorter than the smallest sample, so counting it whole is
+                # as bounded as sampling it
+                count_query = f"""
+                SELECT COUNT(*) FROM {quote_influxql_identifier(measurement)}
+                WHERE time >= '{actual_start.isoformat()}' AND time <= '{actual_end.isoformat()}'
+                """
+                row_count = count_rows_in_result(
+                    query_source_influxdb(
+                        influxdb3_local, config, credentials, count_query, task_id
+                    )
+                )
+            else:
+                # the samples found no rows, so the rate is unknown
+                row_count = 0
 
             # Estimate time for this table
             table_seconds = (row_count / ROWS_PER_SECOND) + TABLE_OVERHEAD_SECONDS
@@ -715,6 +952,7 @@ def estimate_import_time(
                     "measurement": measurement,
                     "estimated_rows": row_count,
                     "estimated_seconds": table_seconds,
+                    "rows_per_second": rows_per_second,
                 }
             )
 
@@ -963,7 +1201,16 @@ def find_actual_data_boundaries(
     return actual_start, actual_end
 
 
-def sample_data_density(
+# Sample intervals to test: 1 hour, 10 hours, 1 day, 5 days
+SAMPLE_INTERVALS = [
+    ("1h", 3600),
+    ("10h", 36000),
+    ("1d", 86400),
+    ("5d", 432000),
+]
+
+
+def sample_rows_per_second(
     influxdb3_local,
     config: ImportConfig,
     credentials: Dict[str, Optional[str]],
@@ -971,34 +1218,25 @@ def sample_data_density(
     start: datetime,
     end: datetime,
     task_id: str,
-) -> int:
+) -> Optional[float]:
     """
-    Sample data to determine optimal time window for target batch size
-    Returns: optimal window size in seconds
+    Measure how many rows a measurement holds per second, from a few counts.
+
+    Each count covers no more than five days, so the source never counts a
+    whole measurement; a full-range COUNT(*) on a wide measurement can
+    exhaust a source's memory.
+
+    Returns the average rate, or None when the range is shorter than the
+    smallest sample or no sample found any rows.
     """
-    # Calculate total time range
     total_duration = (end - start).total_seconds()
 
-    # Sample intervals to test: 1 hour, 10 hours, 1 day, 5 days
     # Only test intervals that fit within the time range
-    test_intervals = [
-        ("1h", 3600),
-        ("10h", 36000),
-        ("1d", 86400),
-        ("5d", 432000),
-    ]
-
-    # Filter intervals that are smaller than total duration
     viable_intervals = [
-        (name, secs) for name, secs in test_intervals if secs <= total_duration
+        (name, secs) for name, secs in SAMPLE_INTERVALS if secs <= total_duration
     ]
-
     if not viable_intervals:
-        # If even 1 second is too long, use the entire duration
-        influxdb3_local.warn(
-            f"[{task_id}] Time range too short for sampling, using entire duration: {total_duration:.1f}s"
-        )
-        return max(1, int(total_duration))
+        return None
 
     samples = []
     time_delta = end - start
@@ -1037,33 +1275,78 @@ def sample_data_density(
                 influxdb3_local.warn(f"[{task_id}] Error sampling {interval_name}: {e}")
 
     if not samples:
-        # Default to 1 hour if no samples
-        influxdb3_local.warn(
-            f"[{task_id}] No samples obtained for '{measurement}', defaulting to 1-hour windows"
-        )
-        return 3600
+        return None
+    return sum(samples) / len(samples)
 
-    # Calculate average rows per second
-    avg_rows_per_second = sum(samples) / len(samples)
 
-    if avg_rows_per_second == 0:
+def window_for_rate(
+    influxdb3_local,
+    config: ImportConfig,
+    measurement: str,
+    rows_per_second: float,
+    task_id: str,
+) -> int:
+    """The window, in seconds, expected to hold target_batch_size rows at this rate."""
+    if rows_per_second == 0:
         influxdb3_local.warn(
             f"[{task_id}] Average rows per second is 0, defaulting to 1-day window"
         )
         return 86400
 
     # Calculate window size to get target batch size
-    optimal_window = int(config.target_batch_size / avg_rows_per_second)
+    optimal_window = int(config.target_batch_size / rows_per_second)
 
     # Clamp between 1 second and 1 month (30.5 days)
     optimal_window = max(1, min(optimal_window, int(86400 * 30.5)))
 
     influxdb3_local.info(
-        f"[{task_id}] Measurement '{measurement}': {avg_rows_per_second:.2f} rows/sec "
-        f"({len(samples)} samples), optimal window: {optimal_window}s"
+        f"[{task_id}] Measurement '{measurement}': {rows_per_second:.2f} rows/sec, "
+        f"optimal window: {optimal_window}s"
     )
 
     return optimal_window
+
+
+def sample_data_density(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    measurement: str,
+    start: datetime,
+    end: datetime,
+    task_id: str,
+    rows_per_second: Optional[float] = None,
+) -> int:
+    """
+    Sample data to determine optimal time window for target batch size
+    Returns: optimal window size in seconds
+
+    Args:
+        rows_per_second: A rate already sampled for this range, by the
+            estimate before the import, so the source is not sampled twice
+    """
+    # Calculate total time range
+    total_duration = (end - start).total_seconds()
+
+    if total_duration < SAMPLE_INTERVALS[0][1]:
+        # The whole range fits in the smallest sample, so it is one window
+        influxdb3_local.warn(
+            f"[{task_id}] Time range too short for sampling, using entire duration: {total_duration:.1f}s"
+        )
+        return max(1, int(total_duration))
+
+    if rows_per_second is None:
+        rows_per_second = sample_rows_per_second(
+            influxdb3_local, config, credentials, measurement, start, end, task_id
+        )
+    if rows_per_second is None:
+        # Default to 1 hour if no samples
+        influxdb3_local.warn(
+            f"[{task_id}] No samples obtained for '{measurement}', defaulting to 1-hour windows"
+        )
+        return 3600
+
+    return window_for_rate(influxdb3_local, config, measurement, rows_per_second, task_id)
 
 
 def check_influx_type_to_python_type(influx_type: str, value) -> bool:
@@ -1108,6 +1391,34 @@ def sanitize_field_name(field_name: str) -> str:
     # Replace spaces with underscores
     sanitized = field_name.replace(" ", "_")
     return sanitized
+
+
+def sanitize_measurement_name(name: str) -> str:
+    """
+    Make a measurement name writable: the runtime rejects a space, so replace
+    spaces with underscores, the same way field names are sanitized.
+    """
+    return name.replace(" ", "_")
+
+
+def measurement_collisions(measurements: List[str]) -> Dict[str, Optional[str]]:
+    """
+    Map each measurement to the earlier one it would overwrite after sanitizing,
+    or None when its destination name is unique.
+
+    Two source names that sanitize to the same destination name would merge into
+    one table, so the first one wins and the rest are reported as collisions.
+    """
+    claimed: Dict[str, str] = {}
+    result: Dict[str, Optional[str]] = {}
+    for name in measurements:
+        write_name = sanitize_measurement_name(name)
+        if write_name in claimed:
+            result[name] = claimed[write_name]
+        else:
+            claimed[write_name] = name
+            result[name] = None
+    return result
 
 
 def parse_timestamp_to_nanoseconds(timestamp) -> int:
@@ -1324,7 +1635,7 @@ def analyze_column_schema(
 
 def build_line_protocol_row(
     influxdb3_local,
-    measurement: str,
+    write_name: str,
     row: List,
     time_idx: int,
     tags_dict: Dict[str, Any],
@@ -1336,10 +1647,12 @@ def build_line_protocol_row(
     """
     Build a single LineBuilder from a row of data
 
+    write_name is the measurement name to write under, already sanitized.
+
     Returns:
         LineBuilder if successful, None if row should be skipped
     """
-    builder = LineBuilder(measurement)
+    builder = LineBuilder(write_name)
     timestamp = row[time_idx]
 
     # Add tags from tags_dict (these are GROUP BY tags in the query result)
@@ -1403,7 +1716,8 @@ def convert_influxql_to_line_protocol(
     field_types: Dict[str, str],
     task_id: str,
     tag_renames: Dict[str, str] | None = None,
-) -> List[LineBuilder]:
+    write_name: Optional[str] = None,
+) -> Tuple[List[LineBuilder], int]:
     """
     Convert InfluxQL query result to LineBuilder objects
 
@@ -1417,10 +1731,13 @@ def convert_influxql_to_line_protocol(
         task_id: Task ID for logging
 
     Returns:
-        List of LineBuilder objects ready for writing
+        A tuple of (LineBuilder objects ready for writing, count of rows that
+        could not be converted to line protocol and were skipped)
     """
     if tag_renames is None:
         tag_renames = {}
+    if write_name is None:
+        write_name = sanitize_measurement_name(measurement)
 
     builders = []
 
@@ -1430,7 +1747,7 @@ def convert_influxql_to_line_protocol(
 
     # Early return if no data
     if not values or len(values) == 0:
-        return []
+        return [], 0
 
     # Analyze column schema
     tag_columns, field_columns = analyze_column_schema(
@@ -1446,7 +1763,7 @@ def convert_influxql_to_line_protocol(
         try:
             builder = build_line_protocol_row(
                 influxdb3_local,
-                measurement,
+                write_name,
                 row,
                 time_idx,
                 tags_dict,
@@ -1455,20 +1772,25 @@ def convert_influxql_to_line_protocol(
                 tag_renames,
                 task_id,
             )
-            if builder:
-                builders.append(builder)
         except Exception as e:
             skipped += 1
             influxdb3_local.warn(
                 f"[{task_id}] Skipping invalid row in '{measurement}': {e}"
             )
+            continue
+        if builder:
+            builders.append(builder)
+        else:
+            # row had no writable field (all fields null, or the only field was
+            # reclassified as a tag) — count it rather than lose it silently
+            skipped += 1
 
     if skipped > 0:
         influxdb3_local.warn(
             f"[{task_id}] Skipped {skipped} invalid rows in '{measurement}'"
         )
 
-    return builders
+    return builders, skipped
 
 
 def write_to_destination(
@@ -1496,6 +1818,24 @@ def write_to_destination(
         return False, error_msg
 
 
+def parse_stored_table_filter(stored) -> Optional[List[str]]:
+    """
+    Read a stored table_filter back into a list.
+
+    A current row stores a JSON array; only a JSON array is read as JSON. Any
+    other stored value is a dot-joined string from an earlier version and is
+    split from the original text on the dot.
+    """
+    if not stored:
+        return None
+    try:
+        parsed = json.loads(stored)
+    except (ValueError, TypeError):
+        parsed = None
+    value = parsed if isinstance(parsed, list) else stored
+    return parse_delimited_list(value, sep=".") or None
+
+
 def save_import_config(
     influxdb3_local, import_id: str, config: ImportConfig, task_id: str
 ) -> None:
@@ -1504,8 +1844,8 @@ def save_import_config(
     Token, username and password are not saved for security reasons and must be provided when resuming
     """
     try:
-        # Convert table_filter list to comma-separated string
-        table_filter_str = ".".join(config.table_filter) if config.table_filter else ""
+        # Store table_filter as JSON so names with dots or spaces round-trip intact
+        table_filter_str = json.dumps(config.table_filter) if config.table_filter else ""
 
         # Build LineBuilder for config storage
         builder = LineBuilder("import_config")
@@ -1562,13 +1902,8 @@ def load_import_config(
 
         row = result[0]
 
-        # Convert table_filter from dot-separated string back to list
-        table_filter_str = row.get("table_filter", "")
-        table_filter = (
-            [t.strip() for t in table_filter_str.split(".") if t.strip()]
-            if table_filter_str
-            else None
-        )
+        # table_filter is stored as JSON; tolerate rows written as a dot-joined string
+        table_filter = parse_stored_table_filter(row.get("table_filter", ""))
 
         # Reconstruct ImportConfig from saved data
         config = ImportConfig(
@@ -1679,6 +2014,7 @@ def prepare_table_import(
     start_time: Optional[Any],
     end_time: Optional[Any],
     task_id: str,
+    rows_per_second: Optional[float] = None,
 ) -> Tuple[
     Optional[datetime], Optional[datetime], int, Dict[str, str], List[str], List[str]
 ]:
@@ -1687,7 +2023,8 @@ def prepare_table_import(
     window size to walk it with, and the schema the rows are built against.
 
     Returns (actual_start, actual_end, window_seconds, fields, tags, conflicts);
-    actual_start is None when the range holds no data.
+    actual_start is None when the range holds no data. rows_per_second is a
+    rate the estimate already sampled for this range, if there is one.
     """
     actual_start, actual_end = find_actual_data_boundaries(
         influxdb3_local, config, credentials, measurement, start_time, end_time, task_id
@@ -1700,7 +2037,8 @@ def prepare_table_import(
     )
 
     window_seconds = sample_data_density(
-        influxdb3_local, config, credentials, measurement, actual_start, actual_end, task_id
+        influxdb3_local, config, credentials, measurement, actual_start, actual_end, task_id,
+        rows_per_second=rows_per_second,
     )
 
     fields = get_field_keys(influxdb3_local, config, credentials, measurement, task_id)
@@ -1738,6 +2076,173 @@ def frontier_of_series(series: Dict[str, Any], direction: int) -> Optional[int]:
     return furthest(parse_timestamp_to_nanoseconds(value) for value in times)
 
 
+def split_trailing_instant(
+    series_list: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Split a chunk into the rows no later chunk can add to, and the rest.
+
+    A chunked answer is cut by row count, not by time, so rows of other series
+    at the instant of a chunk's last row can still follow in the next chunk.
+    Those trailing rows are held back and written with the next chunk, which
+    keeps the checkpoint on an instant whose rows are all written: a resume
+    starts one nanosecond past it and would otherwise skip the rest. A chunk
+    whose rows all share that instant is held back whole, together with what
+    an earlier chunk held back at it.
+
+    Returns (series to write now, series to hold back).
+    """
+    write = list(series_list)
+    held: List[Dict[str, Any]] = []
+    last = None
+    while write:
+        series = write[-1]
+        columns = series.get("columns", [])
+        values = series.get("values") or []
+        if not values:
+            write.pop()
+            continue
+        if "time" not in columns:
+            break
+        time_index = columns.index("time")
+        # one answer spells one instant one way, so comparing the text is enough
+        if last is None:
+            last = values[-1][time_index]
+        cut = len(values)
+        while cut > 0 and values[cut - 1][time_index] == last:
+            cut -= 1
+        if cut == len(values):
+            break
+        write.pop()
+        held.insert(0, {**series, "values": values[cut:]})
+        if cut > 0:
+            write.append({**series, "values": values[:cut]})
+            break
+    return write, held
+
+
+def time_range_of(series_list: List[Dict[str, Any]]) -> str:
+    """The span of rows a chunk holds, as recorded for a write that failed."""
+    oldest = [frontier_of_series(series, -1) for series in series_list]
+    newest = [frontier_of_series(series, 1) for series in series_list]
+    oldest = [ns for ns in oldest if ns is not None]
+    newest = [ns for ns in newest if ns is not None]
+    if not oldest or not newest:
+        return ""
+    return f"{format_nanoseconds_iso(min(oldest))} to {format_nanoseconds_iso(max(newest))}"
+
+
+def write_window(
+    influxdb3_local,
+    config: ImportConfig,
+    credentials: Dict[str, Optional[str]],
+    measurement: str,
+    query: str,
+    tags: List[str],
+    fields: Dict[str, str],
+    tag_renames: Dict[str, str],
+    direction: int,
+    task_id: str,
+    write_name: Optional[str] = None,
+) -> Iterator[Dict[str, Any]]:
+    """
+    Stream one window from the source and write it a chunk at a time.
+
+    No more than one chunk of target_batch_size rows, plus the rows held back
+    at its last instant, is in memory at once, however many rows the window
+    holds.
+
+    Yields one entry per write:
+        rows: how many rows it wrote
+        frontier_ns: the checkpoint the table has reached once it is written,
+            or None when it wrote nothing that moves it
+        error: why the write failed, or None
+        time_range: the span of rows the write covered
+    A chunk with rows that could not be converted yields a second entry, a
+    failure naming how many, so the loss is counted rather than only logged.
+    Exceptions from stream_source_influxdb propagate; whatever was yielded
+    before one is written.
+
+    Args:
+        write_name: The measurement name to write under, already sanitized
+    """
+    held: List[Dict[str, Any]] = []
+    for statement in stream_source_influxdb(
+        influxdb3_local,
+        config,
+        credentials,
+        query,
+        task_id,
+        chunk_size=config.target_batch_size,
+    ):
+        series_list = held + list(statement.get("series") or [])
+        held = []
+        # the last chunk of an answer has nothing after it to hold back for
+        if statement.get("partial"):
+            series_list, held = split_trailing_instant(series_list)
+        series_list = [series for series in series_list if series.get("values")]
+        if not series_list:
+            continue
+
+        line_protocol = []
+        skipped = 0
+        for series in series_list:
+            lines, series_skipped = convert_influxql_to_line_protocol(
+                influxdb3_local, measurement, series, tags, fields, task_id,
+                tag_renames, write_name,
+            )
+            line_protocol.extend(lines)
+            skipped += series_skipped
+        if skipped:
+            # the chunk writes the rest, but these rows are lost, so the table
+            # is flagged rather than reported clean
+            yield {
+                "rows": 0,
+                "frontier_ns": None,
+                "error": f"Skipped {skipped} rows that could not be converted to line protocol",
+                "time_range": time_range_of(series_list),
+            }
+        success, error = write_to_destination(
+            influxdb3_local, config.dest_database, line_protocol, task_id
+        )
+        if not success:
+            yield {
+                "rows": 0,
+                "frontier_ns": None,
+                "error": error,
+                "time_range": time_range_of(series_list),
+            }
+            continue
+        frontiers = [frontier_of_series(series, direction) for series in series_list]
+        frontiers = [ns for ns in frontiers if ns is not None]
+        furthest = min if direction < 0 else max
+        yield {
+            "rows": len(line_protocol),
+            "frontier_ns": furthest(frontiers) if frontiers else None,
+            "error": None,
+            "time_range": None,
+        }
+
+
+def datetime_of_nanoseconds(timestamp_ns: int) -> datetime:
+    """The instant as a datetime, cut to the microseconds a datetime can hold."""
+    seconds, nanoseconds = divmod(int(timestamp_ns), 1_000_000_000)
+    return datetime.fromtimestamp(seconds, tz=timezone.utc) + timedelta(
+        microseconds=nanoseconds // 1000
+    )
+
+
+# How a window can fail that a smaller window may get through: the source took
+# too long to answer, broke off, refused the query (a v3 source reports running
+# out of memory this way) or sent more than one document may hold.
+WINDOW_ERRORS = (
+    requests.exceptions.ReadTimeout,
+    IncompleteAnswerError,
+    AnswerTooLargeError,
+    SourceQueryError,
+)
+
+
 def import_table(
     influxdb3_local,
     config: ImportConfig,
@@ -1752,6 +2257,8 @@ def import_table(
     imported_up_to_ns: Optional[int] = None,
     windows_already_failed: int = 0,
     errors_already_recorded: Optional[List[Dict[str, Any]]] = None,
+    rows_per_second: Optional[float] = None,
+    collision_with: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Import a single table from source to destination
@@ -1769,6 +2276,8 @@ def import_table(
         windows_already_failed: How many windows it failed, which is more than
             errors_already_recorded once the sample is full
         errors_already_recorded: The sample of those failures kept in import_state
+        rows_per_second: The rate the estimate sampled for this table over the
+            same range, so its windows are sized without sampling again
     """
     influxdb3_local.info(f"[{task_id}] Starting import for table: {measurement}")
 
@@ -1778,6 +2287,35 @@ def import_table(
     frontier_ns: Optional[int] = imported_up_to_ns
     failed_windows = windows_already_failed
     errors = list(errors_already_recorded or [])
+    write_name = sanitize_measurement_name(measurement)
+
+    if collision_with:
+        # Another table sanitizes to the same destination name; import the first
+        # and fail this one instead of silently merging their rows.
+        message = (
+            f"Table name collides with '{collision_with}': both import as "
+            f"'{write_name}'. Imported '{collision_with}', skipped this one."
+        )
+        influxdb3_local.error(f"[{task_id}] {message}")
+        errors.append({"time_range": "n/a", "error": message})
+        write_import_state(
+            influxdb3_local,
+            import_id,
+            measurement,
+            "failed",
+            rows_imported,
+            task_id,
+            no_sync=True,
+            errors=errors,
+            failed_windows=max(failed_windows, 1),
+        )
+        return {
+            "measurement": measurement,
+            "status": "failed",
+            "rows_imported": rows_imported,
+            "errors": errors,
+            "failed_windows": max(failed_windows, 1),
+        }
 
     try:
         actual_start, actual_end, optimal_window_seconds, fields, tags, conflicts = (
@@ -1789,6 +2327,7 @@ def import_table(
                 start_time,
                 end_time,
                 task_id,
+                rows_per_second=rows_per_second,
             )
         )
     except Exception as e:
@@ -1815,11 +2354,14 @@ def import_table(
         influxdb3_local.info(
             f"[{task_id}] No data found in specified range for '{measurement}'"
         )
+        # same rule as the end of a walked table: nothing landed while windows
+        # failed is failed, not an empty success
+        final_status = "failed" if rows_imported == 0 and failed_windows > 0 else "completed"
         write_import_state(
             influxdb3_local,
             import_id,
             measurement,
-            "completed",
+            final_status,
             rows_imported,
             task_id,
             no_sync=True,
@@ -1828,7 +2370,7 @@ def import_table(
         )
         return {
             "measurement": measurement,
-            "status": "completed",
+            "status": final_status,
             "rows_imported": rows_imported,
             "errors": errors,
             "failed_windows": failed_windows,
@@ -1848,6 +2390,19 @@ def import_table(
             "Will rename tags with '_tag' suffix."
         )
 
+    if write_name != measurement and metadata is not None:
+        metadata["schema_issues"].append(
+            {
+                "measurement": measurement,
+                "type": "measurement_name_sanitized",
+                "resolution": f"Imported as '{write_name}' (spaces replaced with underscores)",
+            }
+        )
+        influxdb3_local.warn(
+            f"[{task_id}] Measurement '{measurement}' written as '{write_name}' "
+            "(name cannot contain spaces)."
+        )
+
     # Create tag rename map
     tag_renames = {conflict: f"{conflict}_tag" for conflict in conflicts}
 
@@ -1856,7 +2411,15 @@ def import_table(
         actual_start if config.import_direction == "oldest_first" else actual_end
     )
     direction = 1 if config.import_direction == "oldest_first" else -1
-    first_window = True
+    # Boundaries come back as datetimes, which hold no nanoseconds, so a window
+    # that starts from a checkpoint states it exactly instead of reaching back
+    # up to a microsecond past it and importing it twice
+    resume_after_ns = imported_up_to_ns
+    # the sampled size is a guess from a few counts; a window the source cannot
+    # answer is halved, and grows back once windows succeed again
+    window_seconds = optimal_window_seconds
+    failures = 0
+    backoff = INITIAL_BACKOFF_SECONDS
 
     # Import loop
     while True:
@@ -1922,26 +2485,22 @@ def import_table(
         # Calculate window
         if direction > 0:
             window_start = current_time
-            window_end = current_time + timedelta(seconds=optimal_window_seconds)
+            window_end = current_time + timedelta(seconds=window_seconds)
             if window_end > actual_end:
                 window_end = actual_end
         else:
             window_end = current_time
-            window_start = current_time - timedelta(seconds=optimal_window_seconds)
+            window_start = current_time - timedelta(seconds=window_seconds)
             if window_start < actual_start:
                 window_start = actual_start
 
         lower_bound = window_start.isoformat()
         upper_bound = window_end.isoformat()
-        # Boundaries come back as datetimes, which hold no nanoseconds, so the
-        # first window of a resume states the checkpoint exactly instead of
-        # reaching back up to a microsecond past it and importing it twice
-        if first_window and imported_up_to_ns is not None:
+        if resume_after_ns is not None:
             if direction > 0:
-                lower_bound = format_nanoseconds_iso(imported_up_to_ns + 1)
+                lower_bound = format_nanoseconds_iso(resume_after_ns + 1)
             else:
-                upper_bound = format_nanoseconds_iso(imported_up_to_ns)
-        first_window = False
+                upper_bound = format_nanoseconds_iso(resume_after_ns)
 
         # Query data
         query = f"""
@@ -1949,33 +2508,44 @@ def import_table(
         WHERE time >= '{lower_bound}' AND time < '{upper_bound}'
         ORDER BY time {"ASC" if direction > 0 else "DESC"}
         """
+        # how far this attempt at the window got, should it fail part way
+        reached_ns = None
         try:
-            influxdb3_local.info(
-                f"[{task_id}] Querying data for '{measurement}' from {window_start} to {window_end}"
-            )
-            result = query_source_influxdb(influxdb3_local, config, credentials, query, task_id)
-
-            if result.get("results") and result["results"][0].get("series"):
-                series = result["results"][0]["series"][0]
-
-                # Convert to line protocol with proper tag/field type information
-                line_protocol = convert_influxql_to_line_protocol(
-                    influxdb3_local, measurement, series, tags, fields, task_id, tag_renames
+            try:
+                influxdb3_local.info(
+                    f"[{task_id}] Querying data for '{measurement}' from {window_start} to {window_end}"
                 )
+                wrote_any = False
+                for written in write_window(
+                    influxdb3_local,
+                    config,
+                    credentials,
+                    measurement,
+                    query,
+                    tags,
+                    fields,
+                    tag_renames,
+                    direction,
+                    task_id,
+                    write_name,
+                ):
+                    wrote_any = True
+                    if written["error"] is not None:
+                        failed_windows += 1
+                        errors.append(
+                            {
+                                "time_range": written["time_range"],
+                                "error": written["error"],
+                            }
+                        )
+                        continue
 
-                # Write to destination
-                success, error = write_to_destination(
-                    influxdb3_local, config.dest_database, line_protocol, task_id
-                )
-
-                if success:
-                    rows_imported += len(line_protocol)
-                    window_frontier = frontier_of_series(series, direction)
-                    if window_frontier is not None:
-                        frontier_ns = window_frontier
+                    rows_imported += written["rows"]
+                    if written["frontier_ns"] is not None:
+                        frontier_ns = reached_ns = written["frontier_ns"]
 
                     influxdb3_local.info(
-                        f"[{task_id}] {measurement}: Imported {len(line_protocol)} rows "
+                        f"[{task_id}] {measurement}: Imported {written['rows']} rows "
                         f"({rows_imported} total)"
                     )
 
@@ -1993,31 +2563,56 @@ def import_table(
                         failed_windows=failed_windows,
                         error_limit=PROGRESS_ERRORS,
                     )
-                else:
-                    failed_windows += 1
-                    errors.append(
-                        {
-                            "time_range": f"{window_start} to {window_end}",
-                            "error": error,
-                        }
+                if not wrote_any:
+                    influxdb3_local.info(
+                        f"[{task_id}] No data found in specified range for '{measurement}'"
                     )
-            else:
-                influxdb3_local.info(
-                    f"[{task_id}] No data found in specified range for '{measurement}'"
+            except WINDOW_ERRORS as e:
+                if reached_ns is not None:
+                    # go on from the last written row rather than read the
+                    # window again from its start
+                    influxdb3_local.warn(
+                        f"[{task_id}] Window of '{measurement}' broke off after "
+                        f"{format_nanoseconds_iso(reached_ns)} ({e}); continuing from there"
+                    )
+                    resume_after_ns = reached_ns
+                    current_time = datetime_of_nanoseconds(reached_ns)
+                    failures, backoff = 0, INITIAL_BACKOFF_SECONDS
+                    continue
+                span = (window_end - window_start).total_seconds()
+                if span > MIN_WINDOW_SECONDS:
+                    window_seconds = max(span / 2, MIN_WINDOW_SECONDS)
+                    influxdb3_local.warn(
+                        f"[{task_id}] Window of '{measurement}' from {window_start} to "
+                        f"{window_end} failed ({e}); retrying it as {window_seconds:g}s windows"
+                    )
+                    continue
+                if isinstance(e, SourceQueryError):
+                    # the source refused even the smallest window
+                    raise
+                failures += 1
+                if failures >= MAX_RETRIES:
+                    raise
+                influxdb3_local.warn(
+                    f"[{task_id}] Window of '{measurement}' failed (attempt "
+                    f"{failures}/{MAX_RETRIES}), retrying in {backoff}s: {e}"
                 )
-
-            # Move to next window
-            if direction > 0:
-                current_time = window_end
-                if current_time >= actual_end:
-                    break
-            else:
-                current_time = window_start
-                if current_time <= actual_start:
-                    break
-
-            # Rate limiting
-            time.sleep(config.query_interval_ms / 1000.0)
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+                continue
+            except requests.exceptions.RequestException as e:
+                # the source could not be reached, which a smaller window
+                # does not help with
+                failures += 1
+                if failures >= MAX_RETRIES:
+                    raise
+                influxdb3_local.warn(
+                    f"[{task_id}] Query failed (attempt {failures}/{MAX_RETRIES}), "
+                    f"retrying in {backoff}s: {e}"
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF_SECONDS)
+                continue
 
         except Exception as e:
             influxdb3_local.error(
@@ -2038,16 +2633,39 @@ def import_table(
             )
             raise
 
+        # The window is complete
+        resume_after_ns = None
+        failures, backoff = 0, INITIAL_BACKOFF_SECONDS
+        window_seconds = min(window_seconds * 2, optimal_window_seconds)
+
+        # Move to next window
+        if direction > 0:
+            current_time = window_end
+            if current_time >= actual_end:
+                break
+        else:
+            current_time = window_start
+            if current_time <= actual_start:
+                break
+
+        # Rate limiting
+        time.sleep(config.query_interval_ms / 1000.0)
+
+    # A table that wrote nothing while windows failed never landed, so it is
+    # failed rather than an empty success; a table that wrote some rows stays
+    # completed even with failures, which tables_with_errors already surfaces.
+    final_status = "failed" if rows_imported == 0 and failed_windows > 0 else "completed"
+
     influxdb3_local.info(
-        f"[{task_id}] Completed import for '{measurement}': {rows_imported} rows imported"
+        f"[{task_id}] Finished import for '{measurement}' as {final_status}: "
+        f"{rows_imported} rows imported, {failed_windows} windows failed"
     )
 
-    # Write final completion status
     write_import_state(
         influxdb3_local,
         import_id,
         measurement,
-        "completed",
+        final_status,
         rows_imported,
         task_id,
         no_sync=True,
@@ -2057,7 +2675,7 @@ def import_table(
 
     return {
         "measurement": measurement,
-        "status": "completed",
+        "status": final_status,
         "rows_imported": rows_imported,
         "errors": errors,
         "failed_windows": failed_windows,
@@ -2070,6 +2688,7 @@ def _stopped_import_report(
     status: str,
     table_result: Dict[str, Any],
     completed_tables: int,
+    failed_tables: int,
     total_tables: int,
     total_rows: int,
     task_id: str,
@@ -2086,7 +2705,7 @@ def _stopped_import_report(
         f"[{task_id}] Import {status} by user on table '{measurement}'"
     )
     influxdb3_local.info(
-        f"[{task_id}] Tables completed before {noun}: {completed_tables}/{total_tables}"
+        f"[{task_id}] Tables completed before {noun}: {completed_tables}/{total_tables}, {failed_tables} failed"
     )
     influxdb3_local.info(f"[{task_id}] Rows imported before {noun}: {total_rows}")
 
@@ -2095,12 +2714,13 @@ def _stopped_import_report(
         "status": status,
         f"{status}_on_table": measurement,
         "tables_completed": completed_tables,
+        "tables_failed": failed_tables,
         "total_tables": total_tables,
         "rows_imported": total_rows,
         f"{status}_at_time": table_result.get(f"{status}_at_time"),
         "message": (
             f"Import {status} by user. Completed {completed_tables}/{total_tables} "
-            f"tables, {total_rows} rows imported."
+            f"tables ({failed_tables} failed), {total_rows} rows imported."
         ),
     }
 
@@ -2159,7 +2779,10 @@ def resume_incomplete_import(
     started_at = datetime.now(timezone.utc)
     total_rows = 0
     completed_tables = 0
+    failed_tables = 0
     total_failed_windows = 0
+
+    collisions = measurement_collisions(all_measurements)
 
     for idx, measurement in enumerate(all_measurements, 1):
         # Check if table needs restart from beginning (DB crash scenario)
@@ -2177,6 +2800,7 @@ def resume_incomplete_import(
                 start_dt,
                 end_dt,
                 task_id,
+                collision_with=collisions.get(measurement),
             )
         # Check if table needs resumption from checkpoint
         elif measurement in tables_to_resume:
@@ -2210,6 +2834,7 @@ def resume_incomplete_import(
                 imported_up_to_ns=checkpoint_ns,
                 windows_already_failed=tables_to_resume[measurement]["failed_windows"],
                 errors_already_recorded=tables_to_resume[measurement]["errors"],
+                collision_with=collisions.get(measurement),
             )
         else:
             # Check if already completed
@@ -2222,14 +2847,20 @@ def resume_incomplete_import(
                 LIMIT 1
                 """
                 check_result = influxdb3_local.query(check_query)
-                if check_result and check_result[0].get("status") == "completed":
+                if check_result and check_result[0].get("status") in ("completed", "failed"):
+                    row = check_result[0]
+                    status_now = row.get("status")
                     influxdb3_local.info(
-                        f"[{task_id}] Table {measurement} already completed, skipping"
+                        f"[{task_id}] Table {measurement} already {status_now}, skipping"
                     )
-                    completed_tables += 1
+                    # a failed table cannot be resumed, so it is skipped like a
+                    # completed one but is never counted as completed
+                    if status_now == "completed":
+                        completed_tables += 1
+                    else:  # already failed
+                        failed_tables += 1
                     # counted here because the table is skipped, so what it
                     # imported and what it failed would be missing from the report
-                    row = check_result[0]
                     total_rows += row.get("rows_imported", 0)
                     stored_errors = json.loads(row["errors"]) if row.get("errors") else {}
                     total_failed_windows += stored_errors.get("failed_windows", 0)
@@ -2250,6 +2881,7 @@ def resume_incomplete_import(
                 start_dt,
                 end_dt,
                 task_id,
+                collision_with=collisions.get(measurement),
             )
 
         if table_result["status"] in ["completed"]:
@@ -2263,15 +2895,18 @@ def resume_incomplete_import(
                 table_result["status"],
                 table_result,
                 completed_tables,
+                failed_tables,
                 len(all_measurements),
                 total_rows,
                 task_id,
             )
+        elif table_result["status"] == "failed":
+            failed_tables += 1
 
         total_failed_windows += table_result.get("failed_windows", 0)
 
         influxdb3_local.info(
-            f"[{task_id}] Progress: {completed_tables}/{len(all_measurements)} tables completed"
+            f"[{task_id}] Progress: {completed_tables}/{len(all_measurements)} tables completed, {failed_tables} failed"
         )
 
     import_duration = time.time() - import_start
@@ -2289,7 +2924,7 @@ def resume_incomplete_import(
         "start_time": started_at.isoformat(),
         "duration_seconds": import_duration,
         "time_range": {"start": config.start_timestamp, "end": config.end_timestamp},
-        "tables": {"total": len(all_measurements), "completed": completed_tables},
+        "tables": {"total": len(all_measurements), "completed": completed_tables, "failed": failed_tables},
         "rows_imported": total_rows,
         "errors": total_failed_windows,
     }
@@ -2341,6 +2976,7 @@ def generate_import_plan(
 
     # Collect schema conflicts for all tables
     schema_conflicts = []
+    collisions = measurement_collisions(measurements)
     for measurement in measurements:
         try:
             fields = get_field_keys(influxdb3_local, config, credentials, measurement, task_id)
@@ -2356,6 +2992,26 @@ def generate_import_plan(
                         "resolution": f"Tags will be renamed with '_tag' suffix: {', '.join([f'{c} -> {c}_tag' for c in conflicts])}",
                     }
                 )
+
+            collision_with = collisions.get(measurement)
+            if collision_with:
+                schema_conflicts.append(
+                    {
+                        "measurement": measurement,
+                        "type": "measurement_name_collision",
+                        "resolution": f"Collides with '{collision_with}' after sanitizing; skipped (failed) to avoid merging rows",
+                    }
+                )
+            else:
+                sanitized_name = sanitize_measurement_name(measurement)
+                if sanitized_name != measurement:
+                    schema_conflicts.append(
+                        {
+                            "measurement": measurement,
+                            "type": "measurement_name_sanitized",
+                            "resolution": f"Imported as '{sanitized_name}' (spaces replaced with underscores)",
+                        }
+                    )
         except Exception as e:
             influxdb3_local.warn(
                 f"[{task_id}] Failed to check schema for '{measurement}': {e}"
@@ -2410,8 +3066,9 @@ def generate_import_plan(
     influxdb3_local.info(f"[{task_id}] Schema conflicts: {len(schema_conflicts)}")
     if schema_conflicts:
         for conflict in schema_conflicts:
+            detail = ", ".join(conflict["conflicts"]) if conflict.get("conflicts") else conflict.get("resolution", conflict["type"])
             influxdb3_local.info(
-                f"[{task_id}]   - {conflict['measurement']}: {', '.join(conflict['conflicts'])}"
+                f"[{task_id}]   - {conflict['measurement']}: {detail}"
             )
     influxdb3_local.info(
         f"[{task_id}] ============================================================"
@@ -2603,7 +3260,14 @@ def _run_import(
     started_at = datetime.now(timezone.utc)
     total_rows = 0
     completed_tables = 0
+    failed_tables = 0
     all_errors = []
+    # sampled by the estimate over the same range, so not sampled again
+    sampled_rates = {
+        table["measurement"]: table.get("rows_per_second")
+        for table in time_estimate["per_table_estimates"]
+    }
+    collisions = measurement_collisions(measurements)
 
     for idx, measurement in enumerate(measurements, 1):
         influxdb3_local.info(
@@ -2620,6 +3284,8 @@ def _run_import(
             end_dt,
             task_id,
             metadata=metadata,
+            rows_per_second=sampled_rates.get(measurement),
+            collision_with=collisions.get(measurement),
         )
 
         if table_result["status"] in ["completed"]:
@@ -2633,16 +3299,19 @@ def _run_import(
                 table_result["status"],
                 table_result,
                 completed_tables,
+                failed_tables,
                 total_tables,
                 total_rows,
                 task_id,
             )
+        elif table_result["status"] == "failed":
+            failed_tables += 1
 
         if "errors" in table_result:
             all_errors.extend(table_result["errors"])
 
         influxdb3_local.info(
-            f"[{task_id}] Progress: {completed_tables}/{total_tables} tables completed"
+            f"[{task_id}] Progress: {completed_tables}/{total_tables} tables completed, {failed_tables} failed"
         )
 
     import_duration = time.time() - import_start
@@ -2660,7 +3329,7 @@ def _run_import(
         "start_time": started_at.isoformat(),
         "duration_seconds": import_duration,
         "time_range": {"start": config.start_timestamp, "end": config.end_timestamp},
-        "tables": {"total": total_tables, "completed": completed_tables},
+        "tables": {"total": total_tables, "completed": completed_tables, "failed": failed_tables},
         "rows_imported": total_rows,
         "schema_issues": metadata.get("schema_issues", []),
         "errors": all_errors,
@@ -2877,7 +3546,7 @@ def resume_import(
             state
             for table_name, state in latest_states.items()
             if table_name != "all"
-            and state["status"] not in ["completed", "cancelled"]
+            and state["status"] not in ["completed", "cancelled", "failed"]
         ]
 
         if not incomplete_tables:
@@ -3024,6 +3693,13 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
                 if t != "all" and s["status"] == "pending"
             ]
         )
+        failed_tables = len(
+            [
+                t
+                for t, s in latest_table_states.items()
+                if t != "all" and s["status"] == "failed"
+            ]
+        )
 
         total_rows_imported = sum(
             s["rows_imported"] for t, s in latest_table_states.items() if t != "all"
@@ -3055,7 +3731,11 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
             and latest_table_states["all"]["status"] == "cancelled"
         ):
             overall_status = "cancelled"
-        elif is_completed or (completed_tables == total_tables and total_tables > 0):
+        elif is_completed or (
+            completed_tables + failed_tables == total_tables and total_tables > 0
+        ):
+            # a table that failed is done too, so an import whose tables are all
+            # completed or failed is completed, not left polling as 'unknown'
             overall_status = "completed"
         elif is_paused:
             overall_status = "paused"
@@ -3094,7 +3774,7 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
                 "import_direction": config_row.get("import_direction"),
                 "target_batch_size": config_row.get("target_batch_size"),
                 "query_interval_ms": config_row.get("query_interval_ms"),
-                "table_filter": config_row.get("table_filter"),
+                "table_filter": parse_stored_table_filter(config_row.get("table_filter")),
             }
 
         # Calculate duration if possible
@@ -3103,10 +3783,11 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
             # Convert nanoseconds to seconds
             duration_seconds = (latest_time - earliest_time) / 1_000_000_000
 
-        # Calculate progress percentage
+        # Calculate progress percentage; a failed table is done too, so it
+        # counts toward progress and a finished import reaches 100%
         progress_percentage = 0.0
         if total_tables > 0:
-            progress_percentage = (completed_tables / total_tables) * 100
+            progress_percentage = ((completed_tables + failed_tables) / total_tables) * 100
 
         # Build final statistics
         stats = {
@@ -3119,6 +3800,7 @@ def get_import_stats(influxdb3_local, import_id: str, task_id: str) -> Dict[str,
                 "paused_tables": paused_tables,
                 "cancelled_tables": cancelled_tables,
                 "pending_tables": pending_tables,
+                "failed_tables": failed_tables,
                 "tables_with_errors": tables_with_errors,
                 "total_rows_imported": total_rows_imported,
                 "progress_percentage": round(progress_percentage, 2),

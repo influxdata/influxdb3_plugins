@@ -172,7 +172,7 @@
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/import/README.md",
                 "required_plugins": [],
                 "required_libraries": ["influxdata-plugin-utils>=0.5.0", "requests"],
-                "last_update": "2026-09-29",
+                "last_update": "2026-10-22",
                 "trigger_types_supported": ["http"]
             },
             {

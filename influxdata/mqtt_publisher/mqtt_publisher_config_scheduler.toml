@@ -38,13 +38,15 @@ topic = "plant/{machine}/rollup"
 
 
 ########## Reading ##########
-# Hold back the upper bound of the read range, so rows a batching source writes
-# late relative to their own timestamp are still above the watermark when they
-# appear. Telegraf's default flush_interval is 10s. A table another plugin
-# derives is late by that plugin's whole interval plus its offset and run time —
-# a minute rollup needs ~90s. At the default of 0 a late-arriving row can be
-# skipped. A WAL trigger on that table avoids the problem entirely
-#settle_delay = "0s"
+# Hold back the upper bound of the read range, so rows still below the server's
+# write-to-visibility lag (up to --wal-flush-interval, default 1s) are not
+# skipped, and rows a batching source writes late relative to their own
+# timestamp are still above the watermark when they appear. Keep it at or above
+# --wal-flush-interval. Telegraf's default flush_interval is 10s. A table another
+# plugin derives is late by that plugin's whole interval plus its offset and run
+# time — a minute rollup needs ~90s; a WAL trigger on that table avoids the
+# problem entirely. Defaults to 2s.
+#settle_delay = "2s"
 
 # How long one tick may keep working through pages before leaving the rest to
 # the next one. One page per tick cannot catch up with a source that writes

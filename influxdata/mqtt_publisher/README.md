@@ -404,9 +404,18 @@ published. A page that is entirely one timestamp is re-read whole, up to
 `max_group_rows`.
 
 **`settle_delay` exists because the watermark moves along the data's
-timestamps, not along the order rows were written.** A source that batches
-writes a row late relative to the time it carries, and once the watermark has
-passed that time the row is never published:
+timestamps, not along the order rows were written.** Two lags push a row's
+visibility past its timestamp:
+
+- **The server's own write-to-visibility lag.** A freshly written row is not
+  queryable until the next WAL flush (up to `--wal-flush-interval`, default 1s).
+  A tick whose window reaches `now` reads nothing yet, advances the watermark
+  past that time, and the row is lost once it flushes. This hits **every**
+  writer, which is why `settle_delay` defaults to **2s** — above the default
+  flush interval. Keep it at or above the server's `--wal-flush-interval`.
+- **A source that batches.** It writes a row late relative to the time it
+  carries, and once the watermark has passed that time the row is never
+  published:
 
 ```
 12:00:05  tick publishes rows with time ≤ 12:00:05, watermark = 12:00:05
@@ -416,9 +425,9 @@ passed that time the row is never published:
 
 Telegraf's default `flush_interval` is 10 s. A table **another plugin derives**
 is late by that plugin's whole interval: a minute rollup carries the timestamp
-of the start of the bin and can only be written once the bin has closed, so at
-the default `settle_delay = 0` **none of its rows is ever published**. Use a
-write trigger on that table, which has no watermark at all.
+of the start of the bin and can only be written once the bin has closed, so no
+few-second `settle_delay` ever covers it. Use a write trigger on that table,
+which has no watermark at all.
 
 **The database is the buffer.** While the client cannot take anything, the tick
 reads nothing and leaves the watermark where it is, so an outage costs memory
@@ -512,12 +521,12 @@ reaches it.
 
 **Source**
 
-| Parameter             | Default      | Example                | What it does                                                                                                                                                                                                                                                                 |
-|-----------------------|--------------|------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `source_measurements` | **required** | `press_line weld_line` | Tables to publish, space-separated or as a list. On a write trigger, batches for any other table are ignored, so the trigger specification may safely be all_tables. On a schedule each is read in turn; on HTTP the first is the default table a request may override.      |
-| `settle_delay`        | `0`          | `30s`                  | Hold back the upper bound of the range, so rows a batching source writes late relative to their own timestamp are still above the watermark when they appear. A table another plugin derives needs that plugin's whole interval plus its offset and run time. Defaults to 0. |
-| `tick_budget`         | `5s`         | `20s`                  | How long one tick may keep working through pages before leaving the rest to the next one. One page per tick cannot catch up with a source writing more than max_messages per interval. Defaults to 5s.                                                                       |
-| `max_group_rows`      | `100000`     | `500000`               | Most rows read for a single timestamp when a whole page carries one, since a page cannot stop inside a timestamp group without losing the rest of it. Beyond it the surplus is dropped, counted and logged, and the cursor advances anyway. Defaults to 100000.              |
+| Parameter             | Default      | Example                | What it does                                                                                                                                                                                                                                                                                                                                                                                                   |
+|-----------------------|--------------|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `source_measurements` | **required** | `press_line weld_line` | Tables to publish, space-separated or as a list. On a write trigger, batches for any other table are ignored, so the trigger specification may safely be all_tables. On a schedule each is read in turn; on HTTP the first is the default table a request may override.                                                                                                                                        |
+| `settle_delay`        | `2s`         | `30s`                  | Hold back the upper bound of the range, so rows still below the server's write-to-visibility lag (up to `--wal-flush-interval`, default 1s) are not skipped and rows a batching source writes late are still above the watermark when they appear. Keep it at or above `--wal-flush-interval`; a table another plugin derives needs that plugin's whole interval plus its offset and run time. Defaults to 2s. |
+| `tick_budget`         | `5s`         | `20s`                  | How long one tick may keep working through pages before leaving the rest to the next one. One page per tick cannot catch up with a source writing more than max_messages per interval. Defaults to 5s.                                                                                                                                                                                                         |
+| `max_group_rows`      | `100000`     | `500000`               | Most rows read for a single timestamp when a whole page carries one, since a page cannot stop inside a timestamp group without losing the rest of it. Beyond it the surplus is dropped, counted and logged, and the cursor advances anyway. Defaults to 100000.                                                                                                                                                |
 
 **Row selection**
 
@@ -591,10 +600,13 @@ cannot outrun the broker and overflow the buffer.
   and the inclusivity of the bound it goes into, so nobody has to do nanosecond
   arithmetic on an RFC 3339 string.
 
-**`max_backfill_messages` caps the whole call.** Reaching it is an ordinary
-stop, not an error: the answer says `complete: false` and carries a
-`resume_from`. That cap is what makes a request with no range safe to issue by
-accident.
+**`max_backfill_messages` caps the whole call**, bounding each page by the
+budget left so it holds per call, not only between pages, at timestamp-group
+granularity. Reaching it with rows still to publish is an ordinary stop, not an
+error: the answer says `complete: false` and carries a `resume_from`. Reaching
+it with the range already exhausted answers `complete: true`, so an exact hit on
+the last page costs no spurious resume. That cap is what makes a request with no
+range safe to issue by accident.
 
 **A long backfill outlasts its HTTP response.** The plugin finishes regardless
 and logs progress — there is no way to stop it short of removing the trigger,
@@ -637,9 +649,10 @@ curl -X POST "http://localhost:8181/api/v3/engine/mqtt_backfill" \
 }
 ```
 
-An interrupted or capped run answers `"status": "aborted"` with
-`"complete": false`; pass its `resume_from` as `backfill_start` to continue
-from exactly where it stopped:
+A run that stops with rows still to publish — interrupted, or capped with the
+range not yet exhausted — answers `"status": "aborted"` with `"complete": false`;
+pass its `resume_from` as `backfill_start` to continue from exactly where it
+stopped:
 
 ```bash
 curl -X POST "http://localhost:8181/api/v3/engine/mqtt_backfill" \
@@ -751,7 +764,7 @@ supply `broker_url` would be using the plugin to reach a broker of their own.
 | `backfill_start`        | *(empty)*      | `2026-10-05T00:00:00Z` | Inclusive lower bound of the range. Omitted, the range starts at the beginning of the table.                                                                                                              |
 | `backfill_end`          | *(empty)*      | `2026-10-05T06:00:00Z` | Exclusive upper bound of the range, so adjacent calls chain without republishing the row on the seam. Omitted, the moment the request arrives.                                                            |
 | `backfill_order`        | `oldest_first` | `newest_first`         | 'oldest_first' (default) or 'newest_first'.                                                                                                                                                               |
-| `max_backfill_messages` | `1000000`      | `50000`                | Most messages one call publishes across all its pages. Reached, the call answers complete=false with a resume_from to continue from. Defaults to 1000000; 0 removes the cap. Not settable from a request. |
+| `max_backfill_messages` | `1000000`      | `50000`                | Most messages one call publishes, honored at timestamp-group granularity (a group is published whole even if it overshoots). Reached with rows still remaining, the call answers complete=false with a resume_from; reached with the range exhausted, it answers complete=true. Defaults to 1000000; 0 removes the cap. Not settable from a request. |
 | `publish_timeout`       | `5s`           | `30s`                  | How long the call waits at the end for its last page to be confirmed before answering. Defaults to 5s.                                                                                                    |
 
 **Common**
@@ -1081,8 +1094,8 @@ design. QoS 2 costs two extra round trips and adds nothing to QoS 1.
 
 On a **scheduled** trigger over a table another plugin writes, check
 `settle_delay`. A derived row carries the timestamp of the period it describes
-and lands a whole interval later, so at the default `0` every one of them is
-below the watermark by the time it appears and none is ever published. Use a
+and lands a whole interval later, so under the default `settle_delay` (2s) it is
+below the watermark by the time it appears and is never published. Use a
 write trigger on that table, or set `settle_delay` above the producing plugin's
 interval plus its offset and run time.
 
@@ -1107,8 +1120,9 @@ the query.
 ### `max_message_age` and `settle_delay` are refused together
 
 `max_message_age` must exceed `settle_delay`, or the clamp puts the lower bound
-of every window above its upper bound and nothing is ever published. It should
-also exceed `settle_delay` plus the schedule interval, or each tick skips the
+of every window above its upper bound and nothing is ever published; with the
+default `settle_delay` of 2s, a `max_message_age` of 2s or less is refused. It
+should also exceed `settle_delay` plus the schedule interval, or each tick skips the
 part of its window the next tick's clamp has already passed. The plugin cannot
 check the second, because the trigger specification never reaches it, but the
 clamp logs every range it skips.

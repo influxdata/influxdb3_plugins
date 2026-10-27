@@ -401,7 +401,7 @@
         {
             "name": "settle_delay",
             "example": "30s",
-            "description": "Hold back the upper bound of the range, so rows a batching source writes late relative to their own timestamp are still above the watermark when they appear. A table another plugin derives needs that plugin's whole interval plus its offset and run time. Defaults to 0.",
+            "description": "Hold back the upper bound of the range by this much, so rows still below the server's write-to-visibility lag (up to --wal-flush-interval, default 1s) are not skipped and rows a batching source writes late relative to their own timestamp are still above the watermark when they appear. Keep it at or above the server's --wal-flush-interval; a table another plugin derives needs that plugin's whole interval plus its offset and run time. Defaults to 2s.",
             "required": false
         },
         {
@@ -811,7 +811,7 @@
         {
             "name": "max_backfill_messages",
             "example": "50000",
-            "description": "Most messages one call publishes across all its pages. Reached, the call answers complete=false with a resume_from to continue from. Defaults to 1000000; 0 removes the cap. Not settable from a request.",
+            "description": "Most messages one call publishes, honored at timestamp-group granularity (a group is published whole even if it overshoots). Reached with rows still remaining, the call answers complete=false with a resume_from to continue from; reached with the range exhausted, it answers complete=true. Defaults to 1000000; 0 removes the cap. Not settable from a request.",
             "required": false
         },
         {
@@ -1232,7 +1232,7 @@ SETTING_VALIDATORS: list = [
     Validator("filters", default=[], cast=parse_filters),
     Validator("allow_values", default={}, cast=parse_value_lists),
     Validator("deny_values", default={}, cast=parse_value_lists),
-    Validator("settle_delay", default=0.0, cast=duration_seconds, gte=0.0),
+    Validator("settle_delay", default=2.0, cast=duration_seconds, gte=0.0),
     Validator("tick_budget", default=5.0, cast=duration_seconds, gte=0.1),
     Validator("max_messages", default=10000, cast=parse_int, gte=1),
     Validator("max_group_rows", default=100000, cast=parse_int, gte=1),
@@ -3267,14 +3267,25 @@ def run_backfill(influxdb3_local, state, cfg, table, task_id) -> dict:
 
     while True:
         if cap and published >= cap:
-            complete = False
-            influxdb3_local.info(
-                f"[{task_id}] Reached max_backfill_messages={cap}; answer carries "
-                f"resume_from."
+            # The cap is a per-call budget, not a sign the range is done; one
+            # cheap read tells an exhausted range from a stop with rows to come.
+            leftover = read_page(
+                influxdb3_local, cfg, table, columns, lower_ns, upper_ns, 1,
+                descending=descending,
             )
+            if leftover:
+                complete = False
+                influxdb3_local.info(
+                    f"[{task_id}] Reached max_backfill_messages={cap}; answer "
+                    f"carries resume_from."
+                )
             break
 
         limit = cfg["max_messages"]
+        if cap:
+            # Bound the page by the remaining budget so the cap holds per call,
+            # not only between pages.
+            limit = min(limit, cap - published)
         rows = read_page(
             influxdb3_local,
             cfg,

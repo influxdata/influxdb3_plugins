@@ -209,6 +209,17 @@
                 "trigger_types_supported": ["data_writes"]
             },
             {
+                "name": "MQTT Publisher",
+                "path": "influxdata/mqtt_publisher/mqtt_publisher.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Publishes InfluxDB 3 rows to an MQTT broker on write, on a schedule, or over HTTP for a backfill. JSON, line protocol or template payloads; per-row, per-field or batch; with filtering, TLS and a bounded in-memory buffer.",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/mqtt_publisher/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdata-plugin-utils>=0.5.0", "paho-mqtt>=2.1,<3"],
+                "last_update": "2026-10-13",
+                "trigger_types_supported": ["data_writes", "scheduler", "http"]
+            },
+            {
                 "name": "Kafka Subscriber",
                 "path": "influxdata/kafka_subscriber/kafka_subscriber.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Enables real-time ingestion of Kafka messages into InfluxDB 3. Subscribe to Kafka topics and automatically transform messages into time-series data with support for JSON, Line Protocol, custom text, Schema Registry binary formats (Avro, JSON Schema), and Protobuf via local .proto schemas.",

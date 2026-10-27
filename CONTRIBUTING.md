@@ -153,10 +153,10 @@ result = plugin.process(data)
 
 ### Linting
 
-Use Docker to run markdownlint. The following command runs the linter on all markdown files in the repository:
+Use markdownlint-cli2 to lint Markdown. The following command runs the linter on all Markdown files in the repository:
 
 ```bash
-docker compose --profile format run --rm markdownlint --fix **/*.md
+npx markdownlint-cli2 --fix "**/*.md"
 ```
 
 ### Semantic Line Feeds
@@ -299,160 +299,10 @@ For more information, see the [InfluxDB 3 documentation](https://docs.influxdata
 
 ## Testing Documentation
 
-### Plugin Testing Overview
+### Test a plugin
 
-The repository provides comprehensive testing tools for validating plugins with both inline arguments and TOML configuration files. All tests verify proper PLUGIN_DIR environment variable setup and API functionality.
-
-### Prerequisites
-
-1. **Docker and Docker Compose** must be installed and running
-2. **InfluxDB 3 Core Docker image** will be pulled automatically
-
-### Testing Methods
-
-You can run tests using either Docker Compose (recommended) or a local Python environment.
-
-#### Option 1: Docker Compose Testing (Recommended)
-
-No Python installation required. Uses Docker Compose services for testing:
-
-```bash
-# Test all plugins with InfluxDB 3 Core
-docker compose --profile test run --rm test-core-all
-
-# Test all plugins with InfluxDB 3 Enterprise  
-docker compose --profile test run --rm test-enterprise-all
-
-# Test a specific plugin with Core
-PLUGIN_PATH="influxdata/basic_transformation" \
-docker compose --profile test run --rm test-core-specific
-
-# Test with TOML configuration
-PLUGIN_PATH="influxdata/basic_transformation" \
-PLUGIN_FILE="basic_transformation.py" \
-TOML_CONFIG="basic_transformation_config_scheduler.toml" \
-PACKAGES="pint" \
-docker compose --profile test run --rm test-core-toml
-
-# Start services manually for interactive testing
-docker compose up -d influxdb3-core
-docker compose run --rm plugin-tester bash
-```
-
-#### Option 2: Local Python Environment
-
-For local testing without Docker:
-
-1. **Python environment setup** - Create and activate a virtual environment:
-
-   ```bash
-   # Create and activate a virtual environment
-   python3 -m venv venv
-   source venv/bin/activate
-   
-   # On Windows: venv\Scripts\activate
-   ```
-
-2. **Install dependencies** - Install required test packages:
-
-   ```bash
-   # Install test dependencies
-   pip install -r test/requirements.txt
-   ```
-
-   Or use the setup script:
-   
-   ```bash
-   ./test/setup-test-env.sh
-   source venv/bin/activate
-   ```
-
-3. **Start InfluxDB 3 locally** - Launch the appropriate InfluxDB 3 version:
-
-   ```bash
-   # Core version
-   docker compose up -d influxdb3-core
-   
-   # Or Enterprise version
-   docker compose up -d influxdb3-enterprise
-   ```
-
-4. **Run tests** - Execute the test scripts with appropriate flags:
-
-   ```bash
-   # Test all influxdata plugins with Core
-   python test/test_plugins.py influxdata --core --skip-container
-
-   # Test specific plugin
-   python test/test_plugins.py influxdata/basic_transformation --skip-container
-
-   # Test with Enterprise
-   python test/test_plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
-
-   # Test with TOML configuration
-   python test/test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
-     --toml-config basic_transformation_config_scheduler.toml \
-     --packages pint
-   ```
-
-**Note:** Use `--skip-container` flag to avoid Docker management when running locally.
-
-### Available Test Scripts
-
-1. **`test-plugins.py` - Organization/Plugin Testing** - Tests all plugins in an organization or specific plugins using the InfluxDB 3 HTTP API:
-
-   ```bash
-   # Test all influxdata plugins with InfluxDB 3 Core (default)
-   python test/test_plugins.py influxdata --core --skip-container
-
-   # Test a specific plugin
-   python test/test_plugins.py influxdata/basic_transformation --skip-container
-
-   # Test with InfluxDB 3 Enterprise
-   python test/test_plugins.py influxdata --enterprise --skip-container --host http://localhost:8182
-
-   # List available plugins
-   python test/test_plugins.py --list
-   ```
-
-2. **`test_plugin_toml.py` - Generic API-based Testing** - Reusable script for testing plugins with TOML configuration support using the InfluxDB 3 HTTP API:
-
-   **Features:**
-   - Automatically parses plugin metadata from JSON schema in docstrings
-   - Dynamically determines supported trigger types (`scheduled`, `onwrite`, `http`)
-   - Tests both inline arguments and TOML configuration files
-   - Validates PLUGIN_DIR environment variable setup
-   - Uses `/api/v3` endpoints for reliable testing
-
-   ```bash
-   # Test basic transformation plugin with TOML config
-   python test/test_plugin_toml.py influxdata/basic_transformation basic_transformation.py \
-     --toml-config basic_transformation_config_scheduler.toml \
-     --packages pint
-
-   # Test downsampler plugin
-   python test/test_plugin_toml.py influxdata/downsampler downsampler.py \
-     --toml-config downsampling_config_scheduler.toml
-
-   # Test with custom settings
-   python test/test_plugin_toml.py influxdata/my_plugin my_plugin.py \
-     --database custom_testdb \
-     --host http://localhost:8282 \
-     --packages numpy pandas \
-     --test-data "metrics,host=server1 cpu=50.0"
-   ```
-
-3. **Docker Compose Services** - Direct access to containerized test services:
-
-   **Core services:**
-   - `test-core-all` - Test all plugins with InfluxDB 3 Core
-   - `test-core-specific` - Test specific plugin with Core
-   - `test-core-toml` - Test with TOML configuration and Core
-
-   **Enterprise services:**
-   - `test-enterprise-all` - Test all plugins with InfluxDB 3 Enterprise  
-   - `test-enterprise-specific` - Test specific plugin with Enterprise
-   - `test-enterprise-toml` - Test with TOML configuration and Enterprise
+Use the `influxdb3 test` CLI command to run a plugin without creating a trigger.
+For an example, see [Run Tests](README.md#run-tests).
 
 ### Common Test Issues and Solutions
 

@@ -12,24 +12,8 @@ These plugins include a JSON metadata schema in their docstring that defines sup
 
 ## Test the plugins
 
-From the repository root, use Docker Compose to run tests against the InfluxDB 3 Core image:
-
-```bash
-# Test all influxdata plugins
-docker compose --profile test run --rm test-core-all
-
-# Test specific plugin
-PLUGIN_PATH="influxdata/basic_transformation" \
-docker compose --profile test run --rm test-core-specific
-
-# Test with TOML configuration
-PLUGIN_PATH="influxdata/basic_transformation" \
-PLUGIN_FILE="basic_transformation.py" \
-TOML_CONFIG="basic_transformation_config_scheduler.toml" \
-docker compose --profile test run --rm test-core-toml
-```
-
-See the [compose file](/compose.yml) for details on the test setup.
+Use the `influxdb3 test` CLI command to run a plugin without creating a trigger.
+For an example, see [Run Tests](/README.md#run-tests).
 
 ## Support
 

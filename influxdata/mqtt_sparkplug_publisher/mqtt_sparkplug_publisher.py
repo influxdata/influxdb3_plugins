@@ -127,7 +127,7 @@
         {
             "name": "takeover_attempts",
             "example": "3",
-            "description": "On MQTT 3.1.1 only: how many consecutive connections the broker closes within seconds of CONNACK are read as another client taking the session over, after which this one stops. Integer >= 2, default 3. Best-effort (see README).",
+            "description": "How many consecutive connections the broker closes within seconds of CONNACK are read as another client taking the session over, after which this one stops. Used on MQTT 3.1.1, and on MQTT 5 only when a broker DISCONNECT's reason code cannot be read. Integer >= 2, default 3. Best-effort (see README).",
             "required": false
         },
         {
@@ -1185,6 +1185,21 @@ def _reason_is_failure(reason_code) -> bool:
     return value is not None and value >= 0x80
 
 
+def _server_disconnect_reason(client):
+    """Reason byte of the server DISCONNECT being handled; None if unreadable.
+
+    paho 2.1 decodes it only past two bytes, so mosquitto's reason-only
+    ``e0 01 8e`` reaches on_disconnect as 0 while the packet is still buffered.
+    """
+    try:
+        packet = client._in_packet
+        if (packet["command"] & 0xF0) != mqtt.DISCONNECT:
+            return None
+        return packet["packet"][0] if packet["remaining_length"] else 0
+    except (AttributeError, KeyError, IndexError, TypeError):
+        return None
+
+
 # HARD RULE (§2): these callbacks run on paho's network thread. They must never
 # touch influxdb3_local, publish, or take a plugin lock — they write only to the
 # plain structures in the state (flags, deques). The one exception is
@@ -1225,11 +1240,14 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
     """Disconnect: clear connected and session_ready, record the reason, wake sender (2.3)."""
     state = userdata
+    reason = _rc_value(reason_code)  # .value; int() on a ReasonCode raises
+    if reason == 0 and disconnect_flags.is_disconnect_packet_from_server:
+        reason = _server_disconnect_reason(client)
+    state["last_disconnect_rc"] = reason  # before disconnect_pending, which the sender polls
     state["flags"]["connected"] = False
     state["flags"]["disconnected"] = True
     state["flags"]["session_ready"] = False
     state["disconnect_pending"] = True
-    state["last_disconnect_rc"] = _rc_value(reason_code)  # .value; int() on a ReasonCode raises
     state["wakeup"].set()
 
 
@@ -1726,8 +1744,8 @@ def _handle_disconnect(state: dict) -> None:
 
     An ordinary drop is left to paho's automatic reconnect; only a takeover or a
     birth the broker refuses stops the client, with a stop_reason the invocation
-    reads before rebuilding (2.2). On 3.1.1 the signal is a backstop heuristic and
-    is best-effort; MQTT 5 is exact.
+    reads before rebuilding (2.2). MQTT 5 is exact; 3.1.1, and an MQTT 5 server
+    DISCONNECT whose reason could not be read, fall back to a best-effort heuristic.
     """
     if not state.get("disconnect_pending"):
         return
@@ -1741,7 +1759,7 @@ def _handle_disconnect(state: dict) -> None:
     duration = time.monotonic() - state.get("last_connect_monotonic", 0.0)
     since_birth = time.monotonic() - state.get("birth_published_at", 0.0)
 
-    if cfg["mqtt_version"] == "5":
+    if cfg["mqtt_version"] == "5" and reason_code is not None:
         if reason_code in (0x95, 0x87):  # packet too large / not authorized
             state["stop_reason"] = "birth_rejected"
             _log(state, "error", f"birth refused by broker (reason {reason_code}); stopping")
@@ -1754,8 +1772,9 @@ def _handle_disconnect(state: dict) -> None:
             state["quick_close_streak"] = 0
         return
 
-    # 3.1.1: no reason code. A close right after our own birth is a refused birth,
-    # not a takeover (A-4); otherwise count quick closes toward the takeover guess.
+    # No reason code (3.1.1, or an unreadable MQTT 5 one). A close right after our
+    # own birth is a refused birth, not a takeover (A-4); otherwise count quick
+    # closes toward the takeover guess.
     if duration < 5.0:
         if state.get("birth_published_at") and since_birth < 5.0:
             state["stop_reason"] = "birth_rejected"

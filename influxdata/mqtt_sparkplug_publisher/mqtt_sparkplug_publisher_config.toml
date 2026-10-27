@@ -107,9 +107,9 @@ payload_fields = ["temp", "pressure"]
 #reconnect_min_backoff = "1s"
 #reconnect_max_backoff = "120s"
 
-# MQTT 3.1.1 only: consecutive connections the broker closes within seconds of
-# CONNACK that are read as a takeover, after which this client stops. Integer >= 2,
-# default 3. Best-effort on 3.1.1; MQTT 5 is exact.
+# Consecutive connections the broker closes within seconds of CONNACK that are
+# read as a takeover, after which this client stops. Integer >= 2, default 3.
+# Used on MQTT 3.1.1, and on MQTT 5 only when a DISCONNECT reason cannot be read.
 #takeover_attempts = 3
 
 # After this long with no invocation the client's threads publish NDEATH and exit,

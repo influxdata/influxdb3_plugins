@@ -165,7 +165,10 @@ continuous sequence numbers.
   rebuilds it — reconnecting and again waiting for the host to come back online.
 - **Takeover.** With MQTT 5 the `0x8E` reason code is exact; on 3.1.1 a run of
   quick post-connect closes (`takeover_attempts`) is read as another client
-  taking the identity, after which this client stops and cools down.
+  taking the identity, after which this client stops and cools down. paho-mqtt
+  2.1 leaves a reason-only DISCONNECT undecoded (mosquitto sends `e0 01 8e`), so
+  the plugin reads the reason byte itself; if it cannot, MQTT 5 falls back to the
+  3.1.1 heuristic.
 
 ---
 
@@ -257,17 +260,17 @@ tls_ca_cert = "certs/ca.pem"
 
 **Connection**
 
-| Parameter               | Default                 | Example      | What it does                                                                                                                                                |
-|-------------------------|-------------------------|--------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `client_id`             | `influxdb3-spb-<8 hex>` | `plant-spb`  | MQTT client identifier, stable by default so the broker evicts an orphan by takeover. Set only when ACLs require a known one; keep it stable.               |
-| `mqtt_version`          | `3.1.1`                 | `5`          | `3.1.1` (default) or `5`. MQTT 5 is strongly recommended: it carries the `0x8E` takeover reason code and the broker's Maximum Packet Size.                  |
-| `username`              | *(empty)*               | `publisher`  | User name sent in CONNECT. Never logged.                                                                                                                    |
-| `password`              | *(empty)*               | `<password>` | Password. Prefer the TOML file: trigger arguments are readable from the system tables. Never logged.                                                        |
-| `keep_alive`            | `60`                    | `30`         | Seconds declared in CONNECT, minimum 1. A dropped link is detected after about 1.5× this; QoS 0 data sent meanwhile is lost but counted published.          |
-| `reconnect_min_backoff` | `1s`                    | `2s`         | Shortest gap between connection attempts, doubling to the ceiling, reset on a successful CONNACK.                                                           |
-| `reconnect_max_backoff` | `120s`                  | `60s`        | Ceiling for the backoff doubling.                                                                                                                           |
-| `takeover_attempts`     | `3`                     | `5`          | MQTT 3.1.1 only: consecutive quick post-connect closes read as a takeover, after which the client stops. Integer ≥ 2. MQTT 5 is exact and ignores it.       |
-| `idle_disconnect`       | `1h`                    | `30min`      | After this long with no invocation the sender publishes `NDEATH` and exits. Minimum 1min. Use the `all_tables` spec so a sparse table does not idle it out. |
+| Parameter               | Default                 | Example      | What it does                                                                                                                                                                                                             |
+|-------------------------|-------------------------|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `client_id`             | `influxdb3-spb-<8 hex>` | `plant-spb`  | MQTT client identifier, stable by default so the broker evicts an orphan by takeover. Set only when ACLs require a known one; keep it stable.                                                                            |
+| `mqtt_version`          | `3.1.1`                 | `5`          | `3.1.1` (default) or `5`. MQTT 5 is strongly recommended: it carries the `0x8E` takeover reason code and the broker's Maximum Packet Size.                                                                               |
+| `username`              | *(empty)*               | `publisher`  | User name sent in CONNECT. Never logged.                                                                                                                                                                                 |
+| `password`              | *(empty)*               | `<password>` | Password. Prefer the TOML file: trigger arguments are readable from the system tables. Never logged.                                                                                                                     |
+| `keep_alive`            | `60`                    | `30`         | Seconds declared in CONNECT, minimum 1. A dropped link is detected after about 1.5× this; QoS 0 data sent meanwhile is lost but counted published.                                                                       |
+| `reconnect_min_backoff` | `1s`                    | `2s`         | Shortest gap between connection attempts, doubling to the ceiling, reset on a successful CONNACK.                                                                                                                        |
+| `reconnect_max_backoff` | `120s`                  | `60s`        | Ceiling for the backoff doubling.                                                                                                                                                                                        |
+| `takeover_attempts`     | `3`                     | `5`          | Consecutive quick post-connect closes read as a takeover, after which the client stops. Integer ≥ 2. Used on MQTT 3.1.1; MQTT 5 reads the `0x8E` reason code instead and falls back to this only when it cannot be read. |
+| `idle_disconnect`       | `1h`                    | `30min`      | After this long with no invocation the sender publishes `NDEATH` and exits. Minimum 1min. Use the `all_tables` spec so a sparse table does not idle it out.                                                              |
 
 **Sparkplug**
 

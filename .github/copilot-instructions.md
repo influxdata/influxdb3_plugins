@@ -77,14 +77,11 @@ Follow [CONTRIBUTING.md](../CONTRIBUTING.md) for:
 
 ### Testing Methods
 
-1.	Docker Compose testing (recommended): `docker compose --profile test run --rm test-core-all`
-2.	Python environment testing: `python test/test_plugins.py`
-3.	TOML configuration testing with `PLUGIN_DIR` environment variable
+1.	`influxdb3 test` CLI command (see [Testing Plugin Functionality](#testing-plugin-functionality))
+2.	TOML configuration testing with `PLUGIN_DIR` environment variable
 
 ### Test Requirements
 
--	Docker and Docker Compose for containerized testing
--	Python packages installed automatically via InfluxDB API
 -	PLUGIN_DIR environment variable for TOML configuration
 -	Validate plugins using the `influxdb3` CLI or HTTP API
 

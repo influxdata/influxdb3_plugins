@@ -109,23 +109,6 @@ influxdb3 test schedule_plugin \
   PLUGIN_FILENAME.py
 ```
 
-You can also use Docker Compose to run tests for plugins in a containerized environment:
-
-```bash
-# Test all influxdata plugins with InfluxDB 3 Core
-docker compose --profile test run --rm test-core-all
-
-# Test a specific plugin
-PLUGIN_PATH="influxdata/basic_transformation" \
-docker compose --profile test run --rm test-core-specific
-
-# Test with TOML configuration
-PLUGIN_PATH="influxdata/basic_transformation" \
-PLUGIN_FILE="basic_transformation.py" \
-TOML_CONFIG="basic_transformation_config_scheduler.toml" \
-docker compose --profile test run --rm test-core-toml
-```
-
 ## Configuration
 
 Plugins use TOML configuration files for parameter management:

@@ -1128,11 +1128,16 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
 
                     if result["is_anomaly"]:
                         total_anomalies += 1
-                        anomaly_builders.append(
-                            build_anomaly_line(
-                                table_name, field_name, row, tag_names, result
+                        try:
+                            anomaly_builders.append(
+                                build_anomaly_line(
+                                    table_name, field_name, row, tag_names, result
+                                )
                             )
-                        )
+                        except Exception as e:
+                            influxdb3_local.warn(
+                                f"[{task_id}] Skipping anomaly line for {series_key}: {e}"
+                            )
 
                         if config["log_anomalies"]:
                             rolling_dev = result.get("rolling_deviation", 0)

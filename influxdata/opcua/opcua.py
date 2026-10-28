@@ -1867,9 +1867,10 @@ def _build_point(
 
         value = result["value"]
 
-        # If this variable is marked as a browse tag, store as tag
+        # If this variable is marked as a browse tag, store as tag; an empty value means no tag
         if browse_tag_names and field_name in browse_tag_names:
-            line.tag(field_name, str(value))
+            if str(value) != "":
+                line.tag(field_name, str(value))
             stats.record_nodes_read()
             continue
 
@@ -1888,6 +1889,8 @@ def _build_point(
             stats.record_nodes_read()
         except (ValueError, TypeError) as e:
             _record_error(node_id, field_name, "TypeConversionError", f"Type conversion error: {e}")
+        except Exception as e:
+            _record_error(node_id, field_name, "InvalidFieldError", f"Invalid field: {e}")
 
     # Return the line builder only if we have at least one field
     if field_count > 0:
@@ -2057,7 +2060,7 @@ async def _async_scheduled_call(
                 return
 
             for r in tag_results:
-                if r["status"] == "good" and r["value"] is not None:
+                if r["status"] == "good" and r["value"] is not None and str(r["value"]) != "":
                     dynamic_tags[r["field_name"]] = str(r["value"])
 
         merged_tags: dict = {**tags_config, **dynamic_tags}

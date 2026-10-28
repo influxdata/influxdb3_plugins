@@ -343,7 +343,8 @@ def build_line_from_row(table_schema: dict, measurement: str, row: dict):
     """Build a line from a validated row, keeping only schema-defined columns.
 
     Returns None when the row carries no schema-defined field. Raises ValueError
-    when a value cannot be written as its type.
+    when a value cannot be written as its type; LineBuilder raises its own errors
+    for names and tag values it cannot write.
     """
     tags = {tag_name: row.get(tag_name) for tag_name in table_schema.get("tags", {})}
 
@@ -475,7 +476,7 @@ def process_writes(influxdb3_local, table_batches: list, args: dict | None = Non
             if is_valid:
                 try:
                     line = build_line_from_row(table_schema, measurement, row)
-                except ValueError as e:
+                except Exception as e:
                     is_valid, reason = False, str(e)
                 else:
                     if line is None:

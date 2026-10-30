@@ -1,65 +1,115 @@
-# Chronos Forecasting Plugin Scheduler Configuration Template
-# Copy this file to your PLUGIN_DIR (e.g., /plugins) and reference it with
-#   --trigger-arguments config_file_path=<relative_path>
-# Example: If the file is at /plugins/configs/chronos_forecasting_scheduler.toml, use
-#   config_file_path=configs/chronos_forecasting_scheduler.toml
+# Chronos Forecasting: scheduled trigger configuration template
+#
+# Name this file in the trigger's config_file_path argument (or in the
+# INFLUXDB3_CHRONOS_FORECASTING_CONFIG_FILE_PATH environment variable). A
+# relative path is resolved against the plugin directory: the first set of
+# PLUGIN_DIR, INFLUXDB3_PLUGIN_DIR and the parent of the engine's virtual
+# environment. Example: for /plugins/configs/chronos_forecasting_scheduler.toml
+# use config_file_path=configs/chronos_forecasting_scheduler.toml
+#
+# Keys here override the trigger arguments; an argument this file does not set
+# still applies. An unknown key, config_file_path, write_results or
+# backtest_points fails every run with bad_request: a scheduled trigger always
+# writes and returns no response.
+#
+# Durations: a whole number and s, min, h, d or w ("30s", "5min", "6h", "7d").
 
-########## Required Parameters ##########
-# InfluxDB table to query for historical data
-# Specify the table name (string) from your source InfluxDB database
-measurement = "your_measurement"  # e.g., "sensor_data", "cpu_metrics"
+########## What to forecast: source_measurement + field, OR query ##########
+# Measurement and numeric field to forecast
+source_measurement = "your_measurement"  # e.g., "cpu"
+field = "your_field"  # e.g., "usage"
 
-# Field within the table to forecast
-# Specify a numeric field name (string)
-field = "your_field"  # e.g., "temperature", "cpu_usage"
+# Instead of source_measurement and field: SQL whose result is forecast. The
+# timestamp column must be named time; text columns are series keys and each
+# numeric column is forecast on its own. The whole result is read on every run,
+# so bound its time range in the query: there is no default window here. A query
+# with commas belongs in this file, as the CLI splits --trigger-arguments at
+# every comma. Not combined with tag_filter, sql_filter, group_by or
+# covariate_fields.
+#query = "SELECT date_bin(INTERVAL '5 minutes', time) AS time, host, avg(usage) AS usage FROM cpu WHERE time > now() - INTERVAL '6 hours' GROUP BY 1, host"
 
-# Historical lookback window for context data
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days)
-window = "your_window"  # e.g., "6h", "1d", "30min"
+# Database to read from. Default: the trigger's database
+#source_database = "your_source_database"
 
-# Number of forecast steps to generate
-# Specify an integer
-horizon = 64  # e.g., 28, 64, 128
+########## Horizon: exactly one of the two ##########
+# Number of future points at the data spacing, an integer >= 1
+horizon_steps = 64
+# Or a duration converted to points by the data spacing
+#horizon_duration = "1h"
 
-########## Optional Parameters ##########
-# Destination table for writing forecast results
-# Default: _forecasts.{measurement}
-#target_measurement = "_forecasts.sensor_data"  # e.g., "temperature_forecast"
-# HuggingFace model ID
-# Supports: amazon/chronos-bolt-tiny, amazon/chronos-bolt-small, amazon/chronos-bolt-base,
-#           amazon/chronos-2, amazon/chronos-t5-tiny, amazon/chronos-t5-small, etc.
+########## Series ##########
+# Tags to split by; each distinct combination is its own series, otherwise all
+# rows form one. Without sampling_interval, a series mixing tag sets that write
+# at the same time is refused. A tag named like a stored row column (field,
+# model, forecast, step, ...) is refused. Not with query
+#group_by = ["host"]
+
+# SQL condition on tags and fields, without WHERE, AND-ed with tag_filter and
+# inserted into the query as is. Not with query
+#sql_filter = "usage > 0"
+
+# Forecast only the first N forecasts (series x fields), ordered by the group_by
+# tags (or the query's key columns) as text, then by field name; the rest are
+# skipped. At most max_series. Default: every series
+#series_limit = 5
+
+########## History ##########
+# History as a time window ending now; never more points than the model's
+# context. Default: point_limit buckets of sampling_interval (at most 365d), or
+# 1d of raw points; none with query
+#window = "6h"
+
+# History as the most recent cells of each series' grid (buckets with
+# sampling_interval), at least 10, at most the model's context.
+# Default: 512 when window is not set either
+#point_limit = 512
+
+# Resample history to the mean per bucket; empty buckets stay as gaps and the
+# bucket still filling is left out. Default: a grid at the median spacing of
+# the points
+#sampling_interval = "30s"
+
+########## Model and intervals ##########
+# HuggingFace model ID: amazon/chronos-bolt-tiny|mini|small|base,
+# amazon/chronos-2, an original Chronos model, or a local path.
 # Default: amazon/chronos-bolt-tiny
-#model_id = "amazon/chronos-bolt-tiny"  # e.g., "amazon/chronos-2"
+#model = "amazon/chronos-bolt-tiny"
 
-# Maximum number of data points fed to the model
-# Specify an integer; default is 512
-#context_limit = 512  # e.g., 128, 256, 1024
+# Interval levels, each between 0 and 1, written as lower_<percent> and
+# upper_<percent>; a level the model cannot produce is not written.
+# Default: [0.5, 0.8]
+#levels = [0.5, 0.8]
 
-# Aggregation interval for date_bin query
-# Format: <number><unit>, where unit is s (seconds), min (minutes), h (hours), d (days)
-# Default: 30s
-#agg_interval = "30s"  # e.g., "1min", "5min", "1h"
+# Numeric fields other than field passed to a Chronos-2 model as past
+# covariates. Requires a Chronos-2 model; not with query
+#covariate_fields = ["humidity", "pressure"]
 
-# Covariate field names (Chronos-2 models only)
-# Setting this enables multivariate forecasting; specify a list of field names
-#covariate_fields = ["humidity", "pressure"]  # e.g., ["field1", "field2"]
+########## Where the forecast goes ##########
+# Default: _forecasts.<source_measurement> in the trigger's database;
+# target_measurement is required when query reads several measurements
+#target_measurement = "_forecasts.cpu"
+#target_database = "your_target_database"
 
-# How covariate_fields are used (Chronos-2 only)
-# "covariate": auxiliary past covariates (default); "target": jointly forecast all series
-#covariate_mode = "covariate"  # e.g., "target"
+# Tag written to every row, so two triggers that forecast one series with
+# different settings (e.g. horizons) keep their own rows. Default: none
+#forecast_id = "ops-1h"
 
-# InfluxDB database for writing results
-# Specify the target database name (string); default is current database
-#target_database = "your_target_database"  # e.g., "forecast_db"
+########## Limits ##########
+# Most forecasts one run may produce (series x fields); more is refused unless
+# series_limit keeps fewer. Default: 100
+#max_series = 100
 
-# Tag filters for querying specific tag values
-# Format: {tag_name = "tag_value", ...}
+# Most forecast points per series; a longer horizon is refused. Default: 1024
+#max_forecast_points = 1024
+
+########## Tag filters ##########
+# One value or a list of values per tag. Not with query.
 # Keep this table LAST: in TOML, keys after a table header belong to that table.
-#[tag_values]
-#host = "server1"
-#region = "us-west"
+#[tag_filter]
+#host = ["server1", "server2"]
+#region = "eu"
 
-###### Example: Create Trigger Using This Config ######
+###### Example: create a trigger using this file ######
 # influxdb3 create trigger \
 #   --database your_database_name \
 #   --path chronos_forecasting.py \

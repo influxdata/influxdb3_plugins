@@ -1,0 +1,103 @@
+{
+  "forecast_contract_version": 1,
+  "name": "Chronos",
+  "description": "Amazon's pretrained Chronos models, run inside InfluxDB: no training, and data stays on the server. The first forecast downloads the model.",
+  "modes": [
+    "on_demand",
+    "scheduled"
+  ],
+  "accepts_query": true,
+  "filter": [
+    "tag_filter",
+    "sql_filter"
+  ],
+  "group_by": true,
+  "history": [
+    "window",
+    "point_limit"
+  ],
+  "sampling": true,
+  "horizon": [
+    "steps",
+    "duration"
+  ],
+  "backtest": true,
+  "data_leaves_server": false,
+  "credentials": [],
+  "models": [
+    {
+      "id": "amazon/chronos-bolt-tiny",
+      "label": "Chronos-Bolt (tiny)",
+      "description": "Fastest; 35 MB download",
+      "default": true,
+      "levels": [
+        0.5,
+        0.8
+      ],
+      "min_points": 10,
+      "max_history_points": 2048,
+      "max_horizon_steps": 64
+    },
+    {
+      "id": "amazon/chronos-bolt-mini",
+      "label": "Chronos-Bolt (mini)",
+      "description": "85 MB download",
+      "default": false,
+      "levels": [
+        0.5,
+        0.8
+      ],
+      "min_points": 10,
+      "max_history_points": 2048,
+      "max_horizon_steps": 64
+    },
+    {
+      "id": "amazon/chronos-bolt-small",
+      "label": "Chronos-Bolt (small)",
+      "description": "191 MB download",
+      "default": false,
+      "levels": [
+        0.5,
+        0.8
+      ],
+      "min_points": 10,
+      "max_history_points": 2048,
+      "max_horizon_steps": 64
+    },
+    {
+      "id": "amazon/chronos-bolt-base",
+      "label": "Chronos-Bolt (base)",
+      "description": "The largest Bolt, slower; 821 MB download",
+      "default": false,
+      "levels": [
+        0.5,
+        0.8
+      ],
+      "min_points": 10,
+      "max_history_points": 2048,
+      "max_horizon_steps": 64
+    },
+    {
+      "id": "amazon/chronos-2",
+      "label": "Chronos-2",
+      "description": "Most accurate in Amazon's benchmarks; takes covariates; 478 MB download",
+      "default": false,
+      "levels": [
+        0.5,
+        0.8,
+        0.9,
+        0.95
+      ],
+      "min_points": 10,
+      "max_history_points": 8192,
+      "max_horizon_steps": 1024
+    }
+  ],
+  "advanced_params": [
+    {
+      "name": "covariate_fields",
+      "type": "list",
+      "default": []
+    }
+  ]
+}

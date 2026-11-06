@@ -86,12 +86,12 @@
             {
                 "name": "Prophet Forecasting",
                 "path": "influxdata/prophet_forecasting/prophet_forecasting.py",
-                "description": "Provides time series forecasting capabilities for InfluxDB 3 data using the Prophet library.",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Time-series forecasting with Prophet: on-demand HTTP and scheduled forecasts of a measurement field or of any SQL query, per series, with prediction intervals and optional validation. Implements the shared forecasting interface used by InfluxDB 3 Explorer.",
                 "author": "InfluxData",
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/prophet_forecasting/README.md",
                 "required_plugins": [],
-                "required_libraries": ["influxdata-plugin-utils>=0.4.0", "pandas", "requests", "prophet"],
-                "last_update": "2026-09-13",
+                "required_libraries": ["influxdata-plugin-utils>=0.5.0", "pandas>=2.0", "requests", "prophet"],
+                "last_update": "2026-11-05",
                 "trigger_types_supported": ["http", "scheduler"]
             },
             {
@@ -348,7 +348,7 @@
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/chronos_forecasting/README.md",
                 "required_plugins": [],
                 "required_libraries": ["chronos-forecasting", "torch", "influxdata-plugin-utils>=0.5.0"],
-                "last_update": "2026-10-30",
+                "last_update": "2026-11-05",
                 "trigger_types_supported": ["scheduler", "http"]
             },
             {

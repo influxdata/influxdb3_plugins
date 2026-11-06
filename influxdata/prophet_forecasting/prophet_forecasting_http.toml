@@ -1,0 +1,180 @@
+# Prophet Forecasting: HTTP trigger configuration template
+#
+# This file holds defaults for every request to the trigger. Name it in the
+# trigger's config_file_path argument (or in the
+# INFLUXDB3_PROPHET_FORECASTING_CONFIG_FILE_PATH environment variable); a request
+# can never name it. A relative path is resolved against the plugin directory:
+# the first set of PLUGIN_DIR, INFLUXDB3_PLUGIN_DIR and the parent of the
+# engine's virtual environment.
+#
+# Layers, lowest first: environment variables, trigger arguments, this file,
+# then the request's JSON body, headers and query string. A request overrides
+# any key set here, with an empty list or object too; a key it does not send, or
+# sends as empty text or null, keeps the value from this file.
+# A choice between keys is made as a whole by the highest source that sets either
+# side, so a request's:
+#   - query replaces source_measurement, field, tag_filter, sql_filter and group_by
+#     set here (and the other way round);
+#   - horizon_duration replaces horizon_steps (and the other way round);
+#   - start_time and end_time replace window and point_limit (and the other way round);
+#   - forecast_freq replaces sampling_interval (and the other way round).
+# An unknown key or config_file_path fails every request with bad_request.
+#
+# Every key below is optional here: a request can send what is missing.
+# Durations: a whole number and us, ms, s, min, h, d, w, m (a month, 30.42 d),
+# q (91.25 d) or y (365 d): "500ms", "30s", "5min", "6h", "7d", "3m".
+
+########## Endpoint defaults ##########
+# Interval levels, each between 0 and 1. Default: [0.5, 0.8]
+levels = [0.5, 0.8]
+
+# Most forecasts one request may produce (series x fields); more is refused
+# unless series_limit keeps fewer. Default: 100
+max_series = 100
+
+# Most forecast points per series, counting the validation window; a longer
+# horizon, or backtest_points above it, is refused. Default: 10000
+max_forecast_points = 10000
+
+########## What to forecast: source_measurement + field, OR query ##########
+# Usually sent by each request.
+#source_measurement = "your_measurement"  # e.g., "temperature"
+#field = "your_field"  # e.g., "value"
+
+# Instead of source_measurement and field: SQL whose result is forecast. The
+# timestamp column must be named time; text columns are series keys and each
+# numeric column is forecast on its own. The query should bound its time range.
+# Not combined with tag_filter, sql_filter or group_by.
+#query = "SELECT date_bin(INTERVAL '1 hour', time) AS time, room, avg(value) AS value FROM temperature WHERE time > now() - INTERVAL '30 days' GROUP BY 1, room"
+
+# Database to read from. Default: the trigger's database
+#source_database = "your_source_database"
+
+########## Horizon: exactly one of the two ##########
+# Number of future points, an integer >= 1
+#horizon_steps = 24
+# Or a duration from the last history point, rounded up to whole steps
+#horizon_duration = "2d"
+
+########## History ##########
+# A measurement needs window, point_limit, or start_time and end_time.
+# History as a time window ending now, including validation_window.
+#window = "30d"
+
+# History as the most recent points of each series (buckets with
+# sampling_interval), at least 3. With window, the last points of the window;
+# alone, it reads its buckets of sampling_interval (at most 365d) or 30d of raw
+# points. Unset: every point of the window, however many; training time grows
+# with them.
+#point_limit = 2000
+
+# An absolute history, ISO 8601 with a timezone, set together. Rows later than now
+# are read too, unless sampling_interval ends the history at its last full bucket.
+# Not with window, point_limit or query.
+#start_time = "2025-05-20T00:00:00Z"
+#end_time = "2025-06-19T00:00:00Z"
+
+# Resample history to the mean per bucket, which is also the forecast step; the
+# bucket still filling is left out. Not with forecast_freq. Default: raw points
+#sampling_interval = "1h"
+
+# Step of the forecast points as a pandas frequency, fixed ("30min", "1h") or
+# calendar ("D", "W-SUN", "MS", "QS", "B"), over the raw points. Not with
+# sampling_interval. Default: the frequency pandas infers from the data, or else
+# their median spacing
+#forecast_freq = "D"
+
+########## Series ##########
+# Tags to split by; each distinct combination is its own series with its own
+# model, otherwise all rows form one. Without sampling_interval, a series mixing
+# tag sets that write at the same time is refused. Not with query
+#group_by = ["room"]
+
+# SQL condition on tags and fields, without WHERE, AND-ed with tag_filter and
+# inserted into the query as is. Not with query
+#sql_filter = "value > 0"
+
+# Forecast only the first N forecasts (series x fields), ordered by the group_by
+# tags (or the query's key columns) as text, then by field name; the rest are
+# skipped, and series_total in the response counts them all. At most max_series.
+# Default: every series
+#series_limit = 5
+
+########## Model ##########
+# train fits a new in-memory model per request. predict loads the model saved for
+# unique_suffix and the series, or trains and saves it when there is no file.
+# Default: train
+#model_mode = "train"
+
+# Model version, part of the saved model's file name: up to 64 characters from
+# letters, digits, ".", "_" and "-". Required with model_mode = "predict"
+#unique_suffix = "20250619_v1"
+
+# "additive" or "multiplicative". Default: "additive"
+#seasonality_mode = "additive"
+
+# Flexibility of trend changepoints, a number above 0. Default: 0.05
+#changepoint_prior_scale = 0.05
+
+# ISO dates of trend changepoints, in UTC unless they name a timezone; each must
+# fall within every series' training history
+#changepoints = ["2025-01-01", "2025-06-01"]
+
+# Custom holidays: dates and names, as many of each. A date is in UTC unless it
+# names a timezone; a name Prophet reserves, such as trend, is refused
+#holiday_date_list = ["2024-12-25", "2025-12-25"]
+#holiday_names = ["Christmas", "Christmas"]
+
+# Country code for built-in holidays, refused if Prophet does not know it.
+# Prophet supports one country
+#holiday_country_names = ["US"]
+
+########## Validation ##########
+# Duration held back from training before now or end_time. A series that fails
+# the check answers code other, without a forecast. With sampling_interval it is
+# rounded out to whole buckets, at least one. Not with backtest_points.
+# Default: no validation
+#validation_window = "3d"
+
+# "position" pairs measured and forecast points in time order; "nearest" pairs
+# each measured point with the closest forecast point within half a step.
+# Default: "position"
+#validation_alignment = "position"
+
+# Highest Mean Squared Relative Error a validated series may have, a number
+# >= 0. Default: no limit
+#msre_threshold = 0.05
+
+########## Backtest ##########
+# Hold out the latest N history points, train a second model on the points before
+# them, and return each series' backtest. An integer from 1 to max_forecast_points;
+# about doubles the training time. Not with validation_window. Default: none
+#backtest_points = 12
+
+########## Writing the forecast ##########
+# Also write each forecast, as the scheduled trigger does. Default: false
+#write_results = true
+
+# Default: _forecasts.<source_measurement> in the trigger's database;
+# target_measurement is required when query reads several measurements
+#target_measurement = "_forecasts.temperature"
+#target_database = "your_target_database"
+
+# Tag written to every row, so forecasts of one series with different settings
+# keep their own rows. Default: none
+#forecast_id = "ops-1h"
+
+########## Tag filters ##########
+# One value or a list of values per tag. Not with query.
+# Keep this table LAST: in TOML, keys after a table header belong to that table.
+#[tag_filter]
+#room = ["Kitchen", "Lounge"]
+#site = "eu"
+
+###### Example: create a trigger using this file ######
+# influxdb3 create trigger \
+#   --database your_database_name \
+#   --path prophet_forecasting.py \
+#   --trigger-spec "request:forecast" \
+#   --trigger-arguments config_file_path=prophet_forecasting_http.toml \
+#   your_trigger_name

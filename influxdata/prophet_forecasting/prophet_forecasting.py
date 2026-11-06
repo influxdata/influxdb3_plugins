@@ -3,165 +3,231 @@
     "plugin_type": ["scheduled", "http"],
     "scheduled_args_config": [
         {
-            "name": "measurement",
+            "name": "source_measurement",
             "example": "temperature",
-            "description": "The InfluxDB measurement to query for historical data.",
-            "required": true
+            "description": "Measurement to read. Required with field unless query is set.",
+            "required": false
         },
         {
             "name": "field",
             "example": "value",
-            "description": "The field name within the measurement to forecast.",
-            "required": true
+            "description": "Numeric field to forecast. Required with source_measurement unless query is set.",
+            "required": false
+        },
+        {
+            "name": "query",
+            "example": "SELECT date_bin(INTERVAL '1 hour', time) AS time, room, avg(value) AS value FROM temperature WHERE time > now() - INTERVAL '30 days' GROUP BY 1, room",
+            "description": "SQL whose result is forecast instead of source_measurement and field. The timestamp column must be named time; text columns are series keys and each numeric column is forecast on its own. The whole result is read on every run, so bound its time range in the query. The CLI splits --trigger-arguments at commas, so set a query with commas in the TOML config.",
+            "required": false
+        },
+        {
+            "name": "source_database",
+            "example": "demo",
+            "description": "Database to read from. Default: the trigger's database.",
+            "required": false
+        },
+        {
+            "name": "tag_filter",
+            "example": "room=Kitchen site=eu",
+            "description": "Space-separated tag=value pairs the rows must match, one value per tag; several values per tag only through the TOML config. Not with query.",
+            "required": false
+        },
+        {
+            "name": "sql_filter",
+            "example": "value > 0",
+            "description": "SQL condition without WHERE, AND-ed with tag_filter and inserted into the query as is. Not with query. The CLI splits --trigger-arguments at commas, so set a condition with commas in the TOML config.",
+            "required": false
+        },
+        {
+            "name": "group_by",
+            "example": "room",
+            "description": "Space-separated tags to split by; each distinct combination is its own series with its own model, otherwise all rows form one. Without sampling_interval, a series mixing tag sets that write at the same time is refused. A tag named like a stored row column (field, model, forecast, step, ...) is refused. Not with query.",
+            "required": false
+        },
+        {
+            "name": "series_limit",
+            "example": "5",
+            "description": "Forecast only the first N forecasts (series x fields), ordered by the series' group_by tags or query key columns as text, a missing value last, then by field name; the rest are skipped. An integer >= 1, at most max_series. Unset: every series.",
+            "required": false
         },
         {
             "name": "window",
             "example": "30d",
-            "description": "Historical window duration for training data. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m (30.42d), q (91.25d), y (365d).",
-            "required": true
+            "description": "History as a time window ending now, including validation_window: a whole number and us, ms, s, min, h, d, w, m (a month, 30.42 d), q (91.25 d) or y (365 d). With point_limit, the last point_limit points of the window. Window or point_limit is required unless query is set; with point_limit alone the window is point_limit buckets of sampling_interval (at most 365d) or 30d of raw points.",
+            "required": false
         },
         {
-            "name": "forecast_horizont",
+            "name": "point_limit",
+            "example": "2000",
+            "description": "History as the most recent points of each series (buckets with sampling_interval), an integer >= 3. Window or point_limit is required unless query is set. Unset: every point of the window, however many; training time grows with them.",
+            "required": false
+        },
+        {
+            "name": "sampling_interval",
+            "example": "1h",
+            "description": "Resample history to the mean per bucket of this duration, which is also the forecast step; the bucket still filling is left out. Not with forecast_freq. Default: the raw points.",
+            "required": false
+        },
+        {
+            "name": "forecast_freq",
+            "example": "MS",
+            "description": "Step of the forecast points as a pandas frequency, fixed (30min, 1h) or calendar (D, W-SUN, MS, QS, B), over the raw points. Not with sampling_interval. Default: the frequency pandas infers from the data, or else their median spacing.",
+            "required": false
+        },
+        {
+            "name": "horizon_steps",
+            "example": "24",
+            "description": "Integer >= 1: forecast length in points. Exactly one of horizon_steps and horizon_duration.",
+            "required": false
+        },
+        {
+            "name": "horizon_duration",
             "example": "2d",
-            "description": "Future duration to forecast. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m, q, y.",
-            "required": true
+            "description": "Forecast length as a duration (us, ms, s, min, h, d, w, m, q, y) from the last history point, rounded up to whole steps. Exactly one of horizon_steps and horizon_duration.",
+            "required": false
         },
         {
-            "name": "tag_values",
-            "example": "region:us-west.device:sensor1",
-            "description": "Tag filters for the source query, as dot-separated 'tag:value' pairs. A TOML table such as { region = 'us-west' } is also accepted.",
-            "required": true
+            "name": "levels",
+            "example": "0.5 0.8",
+            "description": "Space-separated interval levels, each between 0 and 1, written as lower_<percent> and upper_<percent>. Default: 0.5 0.8.",
+            "required": false
+        },
+        {
+            "name": "model",
+            "example": "prophet",
+            "description": "The only model is prophet, the default; any other value is refused.",
+            "required": false
         },
         {
             "name": "target_measurement",
-            "example": "temperature_forecast",
-            "description": "Destination measurement for storing forecast results.",
-            "required": true
+            "example": "_forecasts.temperature",
+            "description": "Measurement the forecast is written to. Default: _forecasts.<source_measurement>; required when query reads several measurements.",
+            "required": false
+        },
+        {
+            "name": "target_database",
+            "example": "forecasts",
+            "description": "Database the forecast is written to. Default: the trigger's database.",
+            "required": false
+        },
+        {
+            "name": "forecast_id",
+            "example": "ops-1h",
+            "description": "Written to every row as the tag forecast_id, so forecasts of one series with different settings do not overwrite each other. Unset: no tag.",
+            "required": false
         },
         {
             "name": "model_mode",
             "example": "train",
-            "description": "Mode of operation: 'train' to train a new in-memory model on every run, 'predict' to load the saved model or train and save it when no file exists.",
-            "required": true
+            "description": "train fits a new in-memory model on every run. predict loads the model saved for unique_suffix and the series, or trains and saves it when there is no file. Default: train.",
+            "required": false
         },
         {
             "name": "unique_suffix",
             "example": "20250619_v1",
-            "description": "Model version identifier, also used as the file name suffix. Up to 64 characters from letters, digits, '.', '_' and '-'.",
-            "required": true
+            "description": "Model version, part of the saved model's file name: up to 64 characters from letters, digits, '.', '_' and '-'. Required with model_mode predict.",
+            "required": false
         },
         {
             "name": "seasonality_mode",
             "example": "additive",
-            "description": "Prophet seasonality mode ('additive' or 'multiplicative'). Defaults to 'additive'.",
+            "description": "Prophet seasonality mode: additive or multiplicative. Default: additive.",
             "required": false
         },
         {
             "name": "changepoint_prior_scale",
             "example": "0.05",
-            "description": "Flexibility of trend changepoints, must be greater than 0. Defaults to 0.05.",
+            "description": "Flexibility of trend changepoints, a number above 0. Default: 0.05.",
             "required": false
         },
         {
             "name": "changepoints",
             "example": "2025-01-01 2025-06-01",
-            "description": "Space-separated list of changepoint dates (ISO format). A TOML or JSON list is also accepted.",
+            "description": "Space-separated ISO dates of trend changepoints, in UTC unless they name a timezone; each must fall within every series' training history. A TOML list is also accepted.",
             "required": false
         },
         {
             "name": "holiday_date_list",
             "example": "2025-01-01 2025-12-25",
-            "description": "Space-separated list of custom holiday dates (ISO format). A TOML or JSON list is also accepted.",
+            "description": "Space-separated ISO dates of custom holidays, in UTC unless they name a timezone, set together with holiday_names and as many. A TOML list is also accepted.",
             "required": false
         },
         {
             "name": "holiday_names",
-            "example": "New Year.Christmas",
-            "description": "Dot-separated list of names matching holiday_date_list. A TOML or JSON list is also accepted.",
+            "example": "NewYear Christmas",
+            "description": "Space-separated names matching holiday_date_list; a name with spaces only through a TOML list. A name Prophet reserves, such as trend, is refused.",
             "required": false
         },
         {
             "name": "holiday_country_names",
             "example": "US",
-            "description": "Country code for built-in holidays, as a dot-separated string or a TOML list. Prophet supports one country, so only the first entry is used.",
-            "required": false
-        },
-        {
-            "name": "inferred_freq",
-            "example": "1D",
-            "description": "Manually specified pandas frequency alias, fixed ('30min', '1h', '1s') or calendar ('D', 'W-SUN', 'MS', 'QS'). If not provided, frequency is inferred from data.",
+            "description": "Country code for built-in holidays, refused if Prophet does not know it. Prophet supports one country, so of several only the first is used, with a warning.",
             "required": false
         },
         {
             "name": "validation_window",
             "example": "3d",
-            "description": "Duration held back from training and used to validate the forecast. Defaults to '0s' (no validation).",
+            "description": "Duration held back from training before now. The forecast is compared with the measured points there, and a series that fails is not written. With sampling_interval it is rounded out to whole buckets, at least one. Unset: no validation.",
             "required": false
         },
         {
             "name": "validation_alignment",
             "example": "nearest",
-            "description": "How actual and forecasted values are paired during validation: 'position' (default) pairs them in time order, 'nearest' pairs each actual value with the closest forecast point within half a frequency step.",
+            "description": "How measured and forecast points are paired: position pairs them in time order, nearest pairs each measured point with the closest forecast point within half a step. Default: position.",
             "required": false
         },
         {
             "name": "msre_threshold",
             "example": "0.05",
-            "description": "Maximum acceptable Mean Squared Relative Error (MSRE) for validation. Defaults to infinity (no threshold).",
+            "description": "Highest Mean Squared Relative Error a validated series may have, a number >= 0. Default: no limit.",
+            "required": false
+        },
+        {
+            "name": "max_series",
+            "example": "100",
+            "description": "Integer >= 1: most forecasts one run may produce (series x fields); more is refused unless series_limit keeps fewer. Default: 100.",
             "required": false
         },
         {
             "name": "max_forecast_points",
             "example": "10000",
-            "description": "Maximum number of forecast points per run, counting the validation window. Defaults to 10000.",
-            "required": false
-        },
-        {
-            "name": "target_database",
-            "example": "forecast_db",
-            "description": "Database for forecast results. Defaults to a database named 'default', which is created on first write.",
+            "description": "Integer >= 1: most forecast points per series, counting the validation window; a longer horizon is refused. Default: 10000.",
             "required": false
         },
         {
             "name": "is_sending_alert",
             "example": "true",
-            "description": "Whether to send alerts on validation failure ('true' or 'false'). Defaults to 'false'.",
+            "description": "Whether to send one alert per run listing the series that failed validation: true or false. Default: false.",
             "required": false
         },
         {
             "name": "notification_text",
-            "example": "Validation failed for prophet model:$version on table:$measurement, field:$field for period from $start_time to $end_time, forecast not written to table:$output_measurement",
-            "description": "Templated text for the alert message. Supported variables: $version, $measurement, $field, $start_time, $end_time, $output_measurement.",
+            "example": "Validation failed on table:$measurement, field:$field, series:$series",
+            "description": "Template of the alert. Variables: $version, $measurement, $field, $series, $start_time, $end_time, $output_measurement.",
             "required": false
         },
         {
             "name": "senders",
-            "example": "slack",
-            "description": "Dot-separated list of sender types (e.g., 'slack.sms'). Required when is_sending_alert is true.",
+            "example": "slack sms",
+            "description": "Space-separated sender types: slack, discord, http, sms, whatsapp. Required when is_sending_alert is true.",
             "required": false
         },
         {
             "name": "notification_path",
             "example": "notify",
-            "description": "URL path of the notification sender plugin. Defaults to 'notify'.",
-            "required": false
-        },
-        {
-            "name": "influxdb3_auth_token",
-            "example": "your_token",
-            "description": "Authentication token for sending notifications. If not provided, uses the INFLUXDB3_AUTH_TOKEN environment variable.",
+            "description": "URL path of the notification sender plugin. Default: notify.",
             "required": false
         },
         {
             "name": "port_override",
             "example": "8182",
-            "description": "Custom port for notification dispatch (1-65535). Defaults to 8181.",
+            "description": "Port for notification dispatch, 1-65535. Default: 8181.",
             "required": false
         },
         {
             "name": "slack_webhook_url",
             "example": "https://hooks.slack.com/...",
-            "description": "Webhook URL for Slack notifications. Required if using slack sender.",
+            "description": "Webhook URL for Slack notifications. Required with the slack sender.",
             "required": false
         },
         {
@@ -173,7 +239,7 @@
         {
             "name": "discord_webhook_url",
             "example": "https://discord.com/api/webhooks/...",
-            "description": "Webhook URL for Discord notifications. Required if using discord sender.",
+            "description": "Webhook URL for Discord notifications. Required with the discord sender.",
             "required": false
         },
         {
@@ -185,7 +251,7 @@
         {
             "name": "http_webhook_url",
             "example": "https://example.com/webhook",
-            "description": "Webhook URL for HTTP POST notifications. Required if using http sender.",
+            "description": "Webhook URL for HTTP POST notifications. Required with the http sender.",
             "required": false
         },
         {
@@ -197,326 +263,497 @@
         {
             "name": "twilio_sid",
             "example": "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-            "description": "Twilio Account SID. Required if using sms or whatsapp sender.",
-            "required": false
-        },
-        {
-            "name": "twilio_token",
-            "example": "your_auth_token",
-            "description": "Twilio Auth Token. Required if using sms or whatsapp sender.",
+            "description": "Twilio Account SID. Required with the sms or whatsapp sender.",
             "required": false
         },
         {
             "name": "twilio_to_number",
             "example": "+1234567890",
-            "description": "Recipient phone number. Required if using sms or whatsapp sender.",
+            "description": "Recipient phone number. Required with the sms or whatsapp sender.",
             "required": false
         },
         {
             "name": "twilio_from_number",
             "example": "+19876543210",
-            "description": "Twilio sender phone number (verified). Required if using sms or whatsapp sender.",
+            "description": "Twilio sender phone number. Required with the sms or whatsapp sender.",
             "required": false
         },
         {
             "name": "config_file_path",
             "example": "prophet_forecasting_scheduler.toml",
-            "description": "Path to a TOML file, relative to PLUGIN_DIR or absolute. Its values override the inline trigger arguments.",
+            "description": "TOML file, relative to the plugin directory or absolute; its keys override these arguments.",
             "required": false
         }
     ],
     "http_args_config": [
         {
-            "name": "measurement",
+            "name": "source_measurement",
             "example": "temperature",
-            "description": "The InfluxDB measurement to query for historical data. The merged configuration must set it: here, in the config file, or in each request body.",
+            "description": "Default measurement to read. A request sets it, or query, if this does not.",
             "required": false
         },
         {
             "name": "field",
             "example": "value",
-            "description": "The field name within the measurement to forecast. The merged configuration must set it: here, in the config file, or in each request body.",
+            "description": "Default numeric field to forecast. A request sets it, or query, if this does not.",
             "required": false
         },
         {
-            "name": "forecast_horizont",
-            "example": "7d",
-            "description": "Future duration to forecast. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m, q, y. The merged configuration must set it: here, in the config file, or in each request body.",
+            "name": "query",
+            "example": "SELECT time, room, value FROM temperature WHERE time > now() - INTERVAL '30 days'",
+            "description": "Default SQL whose result is forecast. A request's source_measurement and field replace it. The CLI splits --trigger-arguments at commas, so set a query with commas in the TOML config.",
             "required": false
         },
         {
-            "name": "tag_values",
-            "example": "{'region': 'us-west', 'device': 'sensor1'}",
-            "description": "Tag filters for the source query, as a JSON object. The dot-separated 'tag:value' string form is also accepted. The merged configuration must set it: here, in the config file, or in each request body.",
+            "name": "source_database",
+            "example": "demo",
+            "description": "Default database to read from. Default: the trigger's database.",
+            "required": false
+        },
+        {
+            "name": "tag_filter",
+            "example": "room=Kitchen site=eu",
+            "description": "Default space-separated tag=value pairs the rows must match. Not with query.",
+            "required": false
+        },
+        {
+            "name": "sql_filter",
+            "example": "value > 0",
+            "description": "Default SQL condition without WHERE, AND-ed with tag_filter and inserted into the query as is. Not with query.",
+            "required": false
+        },
+        {
+            "name": "group_by",
+            "example": "room",
+            "description": "Default space-separated tags to split by; each distinct combination is its own series with its own model. Not with query.",
+            "required": false
+        },
+        {
+            "name": "series_limit",
+            "example": "5",
+            "description": "Default number of forecasts to keep, an integer >= 1, at most max_series. Unset: every series.",
+            "required": false
+        },
+        {
+            "name": "window",
+            "example": "30d",
+            "description": "Default history window (us, ms, s, min, h, d, w, m, q, y). A request's start_time and end_time replace window and point_limit.",
+            "required": false
+        },
+        {
+            "name": "point_limit",
+            "example": "2000",
+            "description": "Default count of the most recent points per series, an integer >= 3.",
+            "required": false
+        },
+        {
+            "name": "sampling_interval",
+            "example": "1h",
+            "description": "Default bucket for resampling history, also the forecast step. A request's forecast_freq replaces it.",
+            "required": false
+        },
+        {
+            "name": "forecast_freq",
+            "example": "MS",
+            "description": "Default step of the forecast points as a pandas frequency. A request's sampling_interval replaces it.",
+            "required": false
+        },
+        {
+            "name": "horizon_steps",
+            "example": "24",
+            "description": "Default forecast length in points, an integer >= 1. A request's horizon_duration replaces it.",
+            "required": false
+        },
+        {
+            "name": "horizon_duration",
+            "example": "2d",
+            "description": "Default forecast length as a duration. A request's horizon_steps replaces it.",
+            "required": false
+        },
+        {
+            "name": "levels",
+            "example": "0.5 0.8",
+            "description": "Default space-separated interval levels, each between 0 and 1. Default: 0.5 0.8.",
+            "required": false
+        },
+        {
+            "name": "model",
+            "example": "prophet",
+            "description": "The only model is prophet, the default; any other value is refused.",
+            "required": false
+        },
+        {
+            "name": "write_results",
+            "example": "true",
+            "description": "Boolean: also write each forecast to target_measurement. Default: false.",
             "required": false
         },
         {
             "name": "target_measurement",
-            "example": "temperature_forecast",
-            "description": "Destination measurement for storing forecast results. The merged configuration must set it: here, in the config file, or in each request body.",
+            "example": "_forecasts.temperature",
+            "description": "Measurement a written forecast goes to. Default: _forecasts.<source_measurement>.",
             "required": false
         },
         {
-            "name": "unique_suffix",
-            "example": "20250619_v1",
-            "description": "Model version identifier, also used as the file name suffix. Up to 64 characters from letters, digits, '.', '_' and '-'. The merged configuration must set it: here, in the config file, or in each request body.",
+            "name": "target_database",
+            "example": "forecasts",
+            "description": "Database a written forecast goes to. Default: the trigger's database.",
+            "required": false
+        },
+        {
+            "name": "forecast_id",
+            "example": "ops-1h",
+            "description": "Written to every row of a written forecast as the tag forecast_id. Unset: no tag.",
             "required": false
         },
         {
             "name": "start_time",
             "example": "2025-05-20T00:00:00Z",
-            "description": "Start of the historical window, ISO 8601 with timezone. The merged configuration must set it: here, in the config file, or in each request body.",
+            "description": "Start of an absolute history, ISO 8601 with a timezone. Set with end_time, instead of window and point_limit. Not with query.",
             "required": false
         },
         {
             "name": "end_time",
             "example": "2025-06-19T00:00:00Z",
-            "description": "End of the historical window, ISO 8601 with timezone. Forecast points are written from this moment onward. The merged configuration must set it: here, in the config file, or in each request body.",
+            "description": "End of an absolute history, ISO 8601 with a timezone; the forecast continues from the last point before it. Rows later than now are read too, unless sampling_interval ends the history at its last full bucket.",
             "required": false
         },
         {
-            "name": "save_mode",
-            "example": "true",
-            "description": "When true, load the saved model for unique_suffix or train and save it when no file exists. Defaults to false, which trains an in-memory model per request.",
+            "name": "model_mode",
+            "example": "predict",
+            "description": "train fits a new in-memory model per request. predict loads the model saved for unique_suffix and the series, or trains and saves it. Default: train.",
+            "required": false
+        },
+        {
+            "name": "unique_suffix",
+            "example": "20250619_v1",
+            "description": "Model version, part of the saved model's file name: up to 64 characters from letters, digits, '.', '_' and '-'. Required with model_mode predict.",
             "required": false
         },
         {
             "name": "seasonality_mode",
             "example": "additive",
-            "description": "Prophet seasonality mode ('additive' or 'multiplicative'). Defaults to 'additive'.",
+            "description": "Prophet seasonality mode: additive or multiplicative. Default: additive.",
             "required": false
         },
         {
             "name": "changepoint_prior_scale",
             "example": "0.05",
-            "description": "Flexibility of trend changepoints, must be greater than 0. Defaults to 0.05.",
+            "description": "Flexibility of trend changepoints, a number above 0. Default: 0.05.",
             "required": false
         },
         {
             "name": "changepoints",
-            "example": "['2025-01-01', '2025-06-01']",
-            "description": "Changepoint dates (ISO format) as a JSON list or a space-separated string.",
+            "example": "2025-01-01 2025-06-01",
+            "description": "Space-separated ISO dates of trend changepoints, in UTC unless they name a timezone; each must fall within every series' training history.",
             "required": false
         },
         {
             "name": "holiday_date_list",
-            "example": "['2025-07-04']",
-            "description": "Custom holiday dates (ISO format) as a JSON list or a space-separated string.",
+            "example": "2025-07-04",
+            "description": "Space-separated ISO dates of custom holidays, in UTC unless they name a timezone, set together with holiday_names and as many.",
             "required": false
         },
         {
             "name": "holiday_names",
-            "example": "['Independence Day']",
-            "description": "Names matching holiday_date_list, as a JSON list or a dot-separated string.",
+            "example": "IndependenceDay",
+            "description": "Space-separated names matching holiday_date_list; a name with spaces only through a list in TOML or the JSON body. A name Prophet reserves, such as trend, is refused.",
             "required": false
         },
         {
             "name": "holiday_country_names",
-            "example": "['US']",
-            "description": "Country code for built-in holidays, as a JSON list or a dot-separated string. Prophet supports one country, so only the first entry is used.",
-            "required": false
-        },
-        {
-            "name": "inferred_freq",
-            "example": "1D",
-            "description": "Manually specified pandas frequency alias, fixed ('30min', '1h', '1s') or calendar ('D', 'W-SUN', 'MS', 'QS'). If not provided, frequency is inferred from data.",
+            "example": "US",
+            "description": "Country code for built-in holidays, refused if Prophet does not know it. Prophet supports one country, so of several only the first is used, with a warning.",
             "required": false
         },
         {
             "name": "validation_window",
             "example": "3d",
-            "description": "Duration held back from training and used to validate the forecast. Defaults to '0s' (no validation).",
+            "description": "Duration held back from training before now or end_time. A series that fails the check answers code other, without a forecast. With sampling_interval it is rounded out to whole buckets, at least one. Not with backtest_points. Unset: no validation.",
             "required": false
         },
         {
             "name": "validation_alignment",
             "example": "nearest",
-            "description": "How actual and forecasted values are paired during validation: 'position' (default) pairs them in time order, 'nearest' pairs each actual value with the closest forecast point within half a frequency step.",
+            "description": "How measured and forecast points are paired: position or nearest. Default: position.",
             "required": false
         },
         {
             "name": "msre_threshold",
             "example": "0.05",
-            "description": "Maximum acceptable Mean Squared Relative Error (MSRE) for validation. Defaults to infinity (no threshold).",
+            "description": "Highest Mean Squared Relative Error a validated series may have, a number >= 0. Default: no limit.",
+            "required": false
+        },
+        {
+            "name": "backtest_points",
+            "example": "12",
+            "description": "Default count of the latest history points a backtest holds out, an integer from 1 to max_forecast_points. Not with validation_window. Unset: no backtest.",
+            "required": false
+        },
+        {
+            "name": "max_series",
+            "example": "100",
+            "description": "Integer >= 1: most forecasts one request may produce (series x fields); more is refused unless series_limit keeps fewer. Default: 100.",
             "required": false
         },
         {
             "name": "max_forecast_points",
             "example": "10000",
-            "description": "Maximum number of forecast points per run, counting the validation window. Defaults to 10000.",
-            "required": false
-        },
-        {
-            "name": "target_database",
-            "example": "forecast_db",
-            "description": "Database for forecast results. Defaults to a database named 'default', which is created on first write.",
+            "description": "Integer >= 1: most forecast points per series, counting the validation window. Default: 10000.",
             "required": false
         },
         {
             "name": "config_file_path",
             "example": "prophet_forecasting_http.toml",
-            "description": "Path to a TOML file, relative to PLUGIN_DIR or absolute. Its values override the other trigger arguments, and the request body overrides the file. Never read from the request body.",
+            "description": "TOML file, relative to the plugin directory or absolute; its keys override these arguments, and a request overrides it. Never read from a request.",
             "required": false
         }
     ],
     "http_body_config": [
         {
-            "name": "measurement",
+            "name": "source_measurement",
             "example": "temperature",
-            "description": "The InfluxDB measurement to query for historical data.",
-            "required": true
+            "description": "Measurement to read. Required with field unless query is set here or on the trigger.",
+            "required": false
         },
         {
             "name": "field",
             "example": "value",
-            "description": "The field name within the measurement to forecast.",
-            "required": true
+            "description": "Numeric field to forecast. Required with source_measurement unless query is set here or on the trigger.",
+            "required": false
         },
         {
-            "name": "forecast_horizont",
-            "example": "7d",
-            "description": "Future duration to forecast. Format: <number><unit> where unit is us, ms, s, min, h, d, w, m, q, y.",
-            "required": true
+            "name": "query",
+            "example": "SELECT date_bin(INTERVAL '1 hour', time) AS time, room, avg(value) AS value FROM temperature WHERE time > now() - INTERVAL '30 days' GROUP BY 1, room",
+            "description": "SQL whose result is forecast instead of source_measurement and field. The timestamp column must be named time; text columns are series keys and each numeric column is forecast on its own. The whole result is read, so bound its time range in the query.",
+            "required": false
         },
         {
-            "name": "tag_values",
-            "example": "{'region': 'us-west', 'device': 'sensor1'}",
-            "description": "Tag filters for the source query, as a JSON object. The dot-separated 'tag:value' string form is also accepted.",
-            "required": true
+            "name": "source_database",
+            "example": "demo",
+            "description": "Database to read from. Default: the trigger's database. An unknown database is refused.",
+            "required": false
         },
         {
-            "name": "target_measurement",
-            "example": "temperature_forecast",
-            "description": "Destination measurement for storing forecast results.",
-            "required": true
+            "name": "tag_filter",
+            "example": "{'room': ['Kitchen', 'Lounge'], 'site': 'eu'}",
+            "description": "JSON object of the tag values rows must match: one value, or an array of several per tag. Not with query.",
+            "required": false
         },
         {
-            "name": "unique_suffix",
-            "example": "20250619_v1",
-            "description": "Model version identifier, also used as the file name suffix. Up to 64 characters from letters, digits, '.', '_' and '-'.",
-            "required": true
+            "name": "sql_filter",
+            "example": "value > 0",
+            "description": "SQL condition without WHERE, AND-ed with tag_filter and inserted into the query as is. Not with query.",
+            "required": false
+        },
+        {
+            "name": "group_by",
+            "example": "['room']",
+            "description": "JSON array of tags to split by; each distinct combination is its own series with its own model, otherwise all rows form one. Without sampling_interval, a series mixing tag sets that write at the same time is refused. Not with query.",
+            "required": false
+        },
+        {
+            "name": "series_limit",
+            "example": "5",
+            "description": "Integer >= 1, at most max_series: forecast only the first N forecasts (series x fields), ordered by the series' group_by tags or query key columns as text, a missing value last, then by field name; series_total in the response counts them all. Unset: every series.",
+            "required": false
+        },
+        {
+            "name": "window",
+            "example": "30d",
+            "description": "History as a time window ending now, including validation_window: a whole number and us, ms, s, min, h, d, w, m (a month, 30.42 d), q (91.25 d) or y (365 d). With point_limit, the last point_limit points of the window. A measurement needs window, point_limit, or start_time and end_time; with point_limit alone the window is point_limit buckets of sampling_interval (at most 365d) or 30d of raw points.",
+            "required": false
+        },
+        {
+            "name": "point_limit",
+            "example": "2000",
+            "description": "Integer >= 3: history as the most recent points of each series (buckets with sampling_interval). Unset: every point of the window, however many; training time grows with them.",
+            "required": false
         },
         {
             "name": "start_time",
             "example": "2025-05-20T00:00:00Z",
-            "description": "Start of the historical window, ISO 8601 with timezone.",
-            "required": true
+            "description": "Start of an absolute history, ISO 8601 with a timezone. Set with end_time, instead of window and point_limit. Not with query.",
+            "required": false
         },
         {
             "name": "end_time",
             "example": "2025-06-19T00:00:00Z",
-            "description": "End of the historical window, ISO 8601 with timezone. Forecast points are written from this moment onward.",
-            "required": true
+            "description": "End of an absolute history, ISO 8601 with a timezone; the forecast continues from the last point before it. Rows later than now are read too, unless sampling_interval ends the history at its last full bucket.",
+            "required": false
         },
         {
-            "name": "save_mode",
+            "name": "sampling_interval",
+            "example": "1h",
+            "description": "Resample history to the mean per bucket of this duration, which is also the forecast step; the bucket still filling is left out. Not with forecast_freq. Default: the raw points.",
+            "required": false
+        },
+        {
+            "name": "forecast_freq",
+            "example": "MS",
+            "description": "Step of the forecast points as a pandas frequency, fixed (30min, 1h) or calendar (D, W-SUN, MS, QS, B), over the raw points. Not with sampling_interval. Default: the frequency pandas infers from the data, or else their median spacing.",
+            "required": false
+        },
+        {
+            "name": "horizon_steps",
+            "example": "24",
+            "description": "Integer >= 1: forecast length in points. Exactly one of horizon_steps and horizon_duration, here or on the trigger; one sent here replaces the other set on the trigger.",
+            "required": false
+        },
+        {
+            "name": "horizon_duration",
+            "example": "2d",
+            "description": "Forecast length as a duration (us, ms, s, min, h, d, w, m, q, y) from the last history point, rounded up to whole steps. Exactly one of horizon_steps and horizon_duration.",
+            "required": false
+        },
+        {
+            "name": "levels",
+            "example": "[0.5, 0.8]",
+            "description": "JSON array of interval levels, each between 0 and 1; any level works, as bounds come from the model's samples. Default: [0.5, 0.8].",
+            "required": false
+        },
+        {
+            "name": "model",
+            "example": "prophet",
+            "description": "The only model is prophet, the default; any other value is refused.",
+            "required": false
+        },
+        {
+            "name": "write_results",
             "example": "true",
-            "description": "When true, load the saved model for unique_suffix or train and save it when no file exists. Defaults to false, which trains an in-memory model per request.",
+            "description": "Boolean: also write the forecast to target_measurement. A series that fails validation is not written. Default: false.",
+            "required": false
+        },
+        {
+            "name": "target_measurement",
+            "example": "_forecasts.temperature",
+            "description": "Measurement a written forecast goes to. Default: _forecasts.<source_measurement>; required when query reads several measurements.",
+            "required": false
+        },
+        {
+            "name": "target_database",
+            "example": "forecasts",
+            "description": "Database a written forecast goes to. Default: the trigger's database.",
+            "required": false
+        },
+        {
+            "name": "forecast_id",
+            "example": "ops-1h",
+            "description": "Written to every row of a written forecast as the tag forecast_id, so forecasts of one series with different settings do not overwrite each other. Unset: no tag.",
+            "required": false
+        },
+        {
+            "name": "model_mode",
+            "example": "predict",
+            "description": "train fits a new in-memory model per request. predict loads the model saved for unique_suffix and the series, or trains and saves it when there is no file. Default: train.",
+            "required": false
+        },
+        {
+            "name": "unique_suffix",
+            "example": "20250619_v1",
+            "description": "Model version, part of the saved model's file name: up to 64 characters from letters, digits, '.', '_' and '-'. Required with model_mode predict.",
             "required": false
         },
         {
             "name": "seasonality_mode",
             "example": "additive",
-            "description": "Prophet seasonality mode ('additive' or 'multiplicative'). Defaults to 'additive'.",
+            "description": "Prophet seasonality mode: additive or multiplicative. Default: additive.",
             "required": false
         },
         {
             "name": "changepoint_prior_scale",
             "example": "0.05",
-            "description": "Flexibility of trend changepoints, must be greater than 0. Defaults to 0.05.",
+            "description": "Flexibility of trend changepoints, a number above 0. Default: 0.05.",
             "required": false
         },
         {
             "name": "changepoints",
             "example": "['2025-01-01', '2025-06-01']",
-            "description": "Changepoint dates (ISO format) as a JSON list or a space-separated string.",
+            "description": "JSON array of ISO dates of trend changepoints, in UTC unless they name a timezone; each must fall within every series' training history.",
             "required": false
         },
         {
             "name": "holiday_date_list",
             "example": "['2025-07-04']",
-            "description": "Custom holiday dates (ISO format) as a JSON list or a space-separated string.",
+            "description": "JSON array of ISO dates of custom holidays, in UTC unless they name a timezone, set together with holiday_names and as many.",
             "required": false
         },
         {
             "name": "holiday_names",
             "example": "['Independence Day']",
-            "description": "Names matching holiday_date_list, as a JSON list or a dot-separated string.",
+            "description": "JSON array of names matching holiday_date_list. A name Prophet reserves, such as trend, is refused.",
             "required": false
         },
         {
             "name": "holiday_country_names",
             "example": "['US']",
-            "description": "Country code for built-in holidays, as a JSON list or a dot-separated string. Prophet supports one country, so only the first entry is used.",
-            "required": false
-        },
-        {
-            "name": "inferred_freq",
-            "example": "1D",
-            "description": "Manually specified pandas frequency alias, fixed ('30min', '1h', '1s') or calendar ('D', 'W-SUN', 'MS', 'QS'). If not provided, frequency is inferred from data.",
+            "description": "JSON array with the country code for built-in holidays, refused if Prophet does not know it. Prophet supports one country, so of several only the first is used, with a warning.",
             "required": false
         },
         {
             "name": "validation_window",
             "example": "3d",
-            "description": "Duration held back from training and used to validate the forecast. Defaults to '0s' (no validation).",
+            "description": "Duration held back from training before now or end_time. A series that fails the check answers code other, without a forecast. With sampling_interval it is rounded out to whole buckets, at least one. Not with backtest_points. Unset: no validation.",
             "required": false
         },
         {
             "name": "validation_alignment",
             "example": "nearest",
-            "description": "How actual and forecasted values are paired during validation: 'position' (default) pairs them in time order, 'nearest' pairs each actual value with the closest forecast point within half a frequency step.",
+            "description": "How measured and forecast points are paired: position pairs them in time order, nearest pairs each measured point with the closest forecast point within half a step. Default: position.",
             "required": false
         },
         {
             "name": "msre_threshold",
             "example": "0.05",
-            "description": "Maximum acceptable Mean Squared Relative Error (MSRE) for validation. Defaults to infinity (no threshold).",
+            "description": "Highest Mean Squared Relative Error a validated series may have, a number >= 0. Default: no limit.",
+            "required": false
+        },
+        {
+            "name": "backtest_points",
+            "example": "12",
+            "description": "Integer from 1 to max_forecast_points: hold out the latest N history points, train a second model on the points before them, and return each series' backtest (the share inside each interval and the mean absolute error). About doubles the training time. Not with validation_window. Unset: no backtest.",
+            "required": false
+        },
+        {
+            "name": "max_series",
+            "example": "100",
+            "description": "Integer >= 1: most forecasts the request may produce (series x fields); more is refused unless series_limit keeps fewer. Default: 100.",
             "required": false
         },
         {
             "name": "max_forecast_points",
             "example": "10000",
-            "description": "Maximum number of forecast points per run, counting the validation window. Defaults to 10000.",
-            "required": false
-        },
-        {
-            "name": "target_database",
-            "example": "forecast_db",
-            "description": "Database for forecast results. Defaults to a database named 'default', which is created on first write.",
+            "description": "Integer >= 1: most forecast points per series, counting the validation window; a longer horizon is refused. Default: 10000.",
             "required": false
         }
     ]
 }
 """
 
+import dataclasses
+import hashlib
 import json
 import math
 import os
 import random
 import re
-import time
+import tempfile
+import time as _time
 import uuid
+from bisect import bisect_left
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from string import Template
 from urllib.parse import urlparse
 
+import numpy as np
 import pandas as pd
 import requests
-from influxdata_plugin_utils.config import (
-    Config,
-    Validator,
-    load_config,
-    resolve_plugin_dir,
-)
-from influxdata_plugin_utils.parsing import (
-    parse_bool,
-    parse_delimited_list,
-    parse_int,
-    parse_timedelta,
-)
+from influxdata_plugin_utils.config import load_config, resolve_plugin_dir
+from influxdata_plugin_utils.introspection import NUMERIC_TYPES, TAG_DATA_TYPE, get_schema
+from influxdata_plugin_utils.parsing import parse_bool, parse_int
 from influxdata_plugin_utils.sources import (
     KeySpec,
     parse_env,
@@ -526,9 +763,34 @@ from influxdata_plugin_utils.sources import (
     parse_toml,
     parse_trigger_args,
 )
+from influxdata_plugin_utils.validation import Validator
 from influxdata_plugin_utils.write import build_line, write_data
 from prophet import Prophet
 from prophet.serialize import model_from_json, model_to_json
+
+MODEL_ID = "prophet"
+DEFAULT_LEVELS = (0.5, 0.8)
+# Without window, point_limit reads its buckets of sampling_interval (at most a year)
+# or 30 days of raw points, so a read never scans the whole table.
+DEFAULT_WINDOW_NS = 30 * 24 * 3600 * 10**9
+MAX_DEFAULT_WINDOW_NS = 365 * 24 * 3600 * 10**9
+DEFAULT_MAX_SERIES = 100
+DEFAULT_MAX_FORECAST_POINTS = 10000
+# Fewest points a series needs; the manifest's min_points.
+MIN_POINTS = 3
+
+# Columns of a stored forecast row, besides lower_<level>/upper_<level>.
+FORECAST_ROW_TAGS = ("field", "model", "source_measurement", "forecast_id")
+FORECAST_ROW_FIELDS = ("forecast", "step", "points_read", "run_time")
+
+HTTP_STATUS = {
+    "bad_request": 400,
+    "unauthorized": 401,
+    "model_unavailable": 503,
+    "timeout": 504,
+    "internal": 500,
+    "other": 400,
+}
 
 AVAILABLE_SENDERS = {
     "slack": ["slack_webhook_url", "slack_headers"],
@@ -546,9 +808,6 @@ AVAILABLE_SENDERS = {
 # Keywords to skip when validating sender args
 EXCLUDED_KEYWORDS = ["headers", "token", "sid"]
 
-# Calendar units have no fixed length, so they are approximated in days.
-CALENDAR_UNIT_DAYS = {"m": 30.42, "q": 91.25, "y": 365.0}
-
 MODEL_DIR_NAME = "prophet_models"
 # unique_suffix becomes part of a file name, so its character set is restricted
 SAFE_SUFFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -557,920 +816,1745 @@ SEASONALITY_MODES = ("additive", "multiplicative")
 MODEL_MODES = ("train", "predict")
 VALIDATION_ALIGNMENTS = ("position", "nearest")
 
-DEFAULT_MAX_FORECAST_POINTS = 10000
-
-# Database used when target_database is not configured
-DEFAULT_TARGET_DATABASE = "default"
-
 DEFAULT_NOTIFICATION_TEXT = (
-    "Validation failed for prophet model:$version on table:$measurement, field:$field "
+    "Validation failed for prophet on table:$measurement, field:$field "
     "for period from $start_time to $end_time, forecast not written to "
-    "table:$output_measurement"
+    "table:$output_measurement. Series: $series"
 )
-
-# run_forecast outcomes
-FORECAST_WRITTEN = "written"
-FORECAST_VALIDATION_FAILED = "validation_failed"
-FORECAST_FAILED = "failed"
 
 
 class ForecastError(Exception):
-    """Raised for a condition that stops the run with a message meant for the user."""
+    """A failure answered with one of the contract's error codes."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
-def parse_interval(raw) -> timedelta:
-    """
-    Parse an interval string ('30s', '10min', '2d', '1m', '1q', '1y') into a timedelta.
+# ---------------------------------------------------------------------------
+# Settings
+# ---------------------------------------------------------------------------
 
-    Supported units: us, ms, s, min, h, d, w, plus the approximate calendar units
-    m (30.42d), q (91.25d) and y (365d).
-    """
-    if isinstance(raw, timedelta):
-        return raw
+CONTRACT_KEYS = (
+    "source_measurement",
+    "field",
+    "query",
+    "source_database",
+    "tag_filter",
+    "sql_filter",
+    "group_by",
+    "series_limit",
+    "window",
+    "point_limit",
+    "sampling_interval",
+    "horizon_steps",
+    "horizon_duration",
+    "levels",
+    "model",
+    "write_results",
+    "target_measurement",
+    "target_database",
+    "forecast_id",
+    "backtest_points",
+)
+PLUGIN_KEYS = (
+    "forecast_freq",
+    "model_mode",
+    "unique_suffix",
+    "seasonality_mode",
+    "changepoint_prior_scale",
+    "changepoints",
+    "holiday_date_list",
+    "holiday_names",
+    "holiday_country_names",
+    "validation_window",
+    "validation_alignment",
+    "msre_threshold",
+    "max_series",
+    "max_forecast_points",
+)
+NOTIFICATION_KEYS = (
+    "is_sending_alert",
+    "notification_text",
+    "notification_path",
+    "port_override",
+    "senders",
+    "influxdb3_auth_token",
+    *dict.fromkeys(name for keys in AVAILABLE_SENDERS.values() for name in keys),
+)
+# Trigger arguments can be read from system.processing_engine_trigger_arguments, so
+# these come only from the TOML file or the environment.
+SECRET_KEYS = ("influxdb3_auth_token", "twilio_token")
+# An absolute history is for one request; a schedule's history moves with each run.
+REQUEST_NAMES = CONTRACT_KEYS + PLUGIN_KEYS + ("start_time", "end_time")
+# A scheduled run always writes and returns no response: no write_results, no backtest.
+SCHEDULED_NAMES = (
+    tuple(name for name in CONTRACT_KEYS if name not in ("write_results", "backtest_points"))
+    + PLUGIN_KEYS
+    + NOTIFICATION_KEYS
+)
 
-    match = re.fullmatch(r"\s*(\d+)\s*([a-zA-Z]+)\s*", str(raw))
-    if match and match.group(2).lower() in CALENDAR_UNIT_DAYS:
-        magnitude: int = int(match.group(1))
-        unit: str = match.group(2).lower()
-        days: int = int(magnitude * CALENDAR_UNIT_DAYS[unit])
-        if days < 1:
-            raise ValueError(f"Duration {raw!r} rounds down to less than one day")
-        return timedelta(days=days)
+ENV_PREFIX = "INFLUXDB3_PROPHET_FORECASTING_"
+HEADER_PREFIX = "X-Influxdb3-Prophet-Forecasting-"
 
-    try:
-        return parse_timedelta(raw)
-    except ValueError as e:
+_DURATION_PATTERN = re.compile(r"(\d+)(us|ms|s|min|h|d|w|m|q|y)")
+_UNIT_NS = {
+    "us": 10**3,
+    "ms": 10**6,
+    "s": 10**9,
+    "min": 60 * 10**9,
+    "h": 3600 * 10**9,
+    "d": 86400 * 10**9,
+    "w": 604800 * 10**9,
+    # Calendar units have no fixed length, so they are approximated.
+    "m": 2628288 * 10**9,  # 30.42 d
+    "q": 7884000 * 10**9,  # 91.25 d
+    "y": 31536000 * 10**9,  # 365 d
+}
+
+
+def _text(raw) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"expected a non-empty string, got {raw!r}")
+    return raw.strip()
+
+
+def _items(raw) -> list[str]:
+    """A list of strings, from a list or a space-separated string."""
+    if isinstance(raw, str):
+        items = raw.split()
+    elif isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        items = [item.strip() for item in raw]
+    else:
+        raise ValueError(f"expected a list of names or a space-separated string, got {raw!r}")
+    if not all(items):
+        raise ValueError(f"names must not be empty, got {raw!r}")
+    return items
+
+
+def _names(raw) -> list[str]:
+    return list(dict.fromkeys(_items(raw)))
+
+
+def _duration_ns(raw) -> int:
+    match = _DURATION_PATTERN.fullmatch(raw.strip()) if isinstance(raw, str) else None
+    if not match or int(match.group(1)) == 0:
         raise ValueError(
-            f"Invalid duration {raw!r} ({e}). Expected '<number><unit>', e.g. '10min', '2d', '1y'"
-        ) from e
+            f"expected a whole number above 0 and a unit (us, ms, s, min, h, d, w, m, q, y), got {raw!r}"
+        )
+    return int(match.group(1)) * _UNIT_NS[match.group(2)]
 
 
-def parse_positive_interval(raw) -> timedelta:
-    """Parse an interval and require it to be greater than zero."""
-    interval: timedelta = parse_interval(raw)
-    if interval <= timedelta(0):
-        raise ValueError(f"Duration must be positive, got {raw!r}")
-    return interval
+def _duration_text(ns: int) -> str:
+    """A duration in the largest unit that divides it: 86400 s -> '1d'."""
+    for unit in reversed(_UNIT_NS):
+        if ns % _UNIT_NS[unit] == 0:
+            return f"{ns // _UNIT_NS[unit]}{unit}"
+    return f"{ns}ns"
 
 
-def parse_unique_suffix(raw) -> str:
-    """Validate the model version suffix, which becomes part of a file name."""
-    suffix: str = str(raw).strip()
+def _levels(raw) -> list[float]:
+    items = raw.split() if isinstance(raw, str) else raw
+    if not isinstance(items, (list, tuple)):
+        raise ValueError(f"expected a list of levels, got {raw!r}")
+    levels = []
+    for item in items:
+        if isinstance(item, bool):
+            raise ValueError(f"expected a number between 0 and 1, got {item!r}")
+        try:
+            level = float(item)
+        except (TypeError, ValueError):
+            raise ValueError(f"expected a number between 0 and 1, got {item!r}") from None
+        if not 0 < level < 1:
+            raise ValueError(f"each level must be between 0 and 1, got {item!r}")
+        levels.append(level)
+    return sorted(set(levels))
+
+
+def _tag_value(raw) -> str:
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)) or raw == "":
+        raise ValueError(f"expected a tag value, got {raw!r}")
+    return str(raw)
+
+
+def _tag_filter(raw) -> dict[str, list[str]]:
+    """{tag: [values]} from 'host=a region=b' or from a JSON/TOML object."""
+    result: dict[str, list[str]] = {}
+    if isinstance(raw, str):
+        for pair in raw.split():
+            tag, sep, value = pair.partition("=")
+            if not sep or not tag or not value:
+                raise ValueError(f"expected space-separated tag=value pairs, got {pair!r}")
+            if tag in result:
+                raise ValueError(
+                    f"tag {tag!r} is set twice; several values per tag need the TOML "
+                    f"config or the JSON body"
+                )
+            result[tag] = [value]
+        return result
+    if isinstance(raw, dict):
+        for tag, value in raw.items():
+            values = value if isinstance(value, list) else [value]
+            if not tag or not values:
+                raise ValueError(f"expected a tag and at least one value, got {tag!r}")
+            result[str(tag)] = list(dict.fromkeys(_tag_value(v) for v in values))
+        return result
+    raise ValueError(f"expected tag=value pairs or an object, got {raw!r}")
+
+
+def _model(raw) -> str:
+    if raw != MODEL_ID:
+        raise ValueError(f"the only model is {MODEL_ID!r}, got {raw!r}")
+    return raw
+
+
+def _choice(allowed: tuple[str, ...]):
+    """A cast keeping a lower-cased value from a fixed set of options."""
+
+    def cast(raw) -> str:
+        value = str(raw).strip().lower()
+        if value not in allowed:
+            raise ValueError(f"expected one of {', '.join(allowed)}, got {raw!r}")
+        return value
+
+    return cast
+
+
+def _unique_suffix(raw) -> str:
+    """The model version, which becomes part of a file name."""
+    suffix = str(raw).strip()
     if not SAFE_SUFFIX_PATTERN.fullmatch(suffix) or ".." in suffix:
         raise ValueError(
-            f"Invalid unique_suffix {raw!r}: use up to 64 characters from letters, "
-            "digits, '.', '_' and '-'"
+            f"expected up to 64 characters from letters, digits, '.', '_' and '-', got {raw!r}"
         )
     return suffix
 
 
-def parse_choice(raw, name: str, allowed: tuple[str, ...]) -> str:
-    """Validate a lower-cased value against a fixed set of options."""
-    value: str = str(raw).strip().lower()
-    if value not in allowed:
-        raise ValueError(
-            f"Invalid {name} {raw!r}: expected one of {', '.join(allowed)}"
-        )
-    return value
+def _number(raw) -> float:
+    if isinstance(raw, bool):
+        raise ValueError(f"expected a number, got {raw!r}")
+    return float(raw)
 
 
-def parse_prior_scale(raw) -> float:
-    """Parse the changepoint prior scale, which Prophet requires to be finite and positive."""
-    value: float = float(raw)
+def _prior_scale(raw) -> float:
+    value = _number(raw)
     if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"changepoint_prior_scale must be greater than 0, got {raw!r}")
+        raise ValueError(f"expected a number above 0, got {raw!r}")
     return value
 
 
-def parse_msre_threshold(raw) -> float:
-    """Parse the MSRE threshold, which cannot be negative."""
-    value: float = float(raw)
-    if value < 0:
-        raise ValueError(f"msre_threshold cannot be negative, got {raw!r}")
+def _msre_threshold(raw) -> float:
+    value = _number(raw)
+    if math.isnan(value) or value < 0:
+        raise ValueError(f"expected a number >= 0, got {raw!r}")
     return value
 
 
-def parse_freq(raw) -> str:
-    """Validate a pandas frequency alias; an empty value means 'infer from data'."""
-    freq: str = str(raw).strip()
-    if not freq:
-        return ""
-    pd.tseries.frequencies.to_offset(freq)
+def _freq(raw) -> str:
+    """A pandas frequency alias that moves time forward."""
+    freq = _text(raw)
+    if pd.tseries.frequencies.to_offset(freq).n <= 0:
+        raise ValueError(f"frequency {raw!r} does not move time forward")
     return freq
 
 
-COMMON_VALIDATORS: list = [
-    Validator("measurement", required=True, cast=str),
-    Validator("field", required=True, cast=str),
-    Validator("forecast_horizont", required=True, cast=parse_positive_interval),
-    Validator("tag_values", required=True),
-    Validator("target_measurement", required=True, cast=str),
-    Validator("unique_suffix", required=True, cast=parse_unique_suffix),
+def _dates(raw) -> list[pd.Timestamp]:
+    """ISO dates, from a list or a space-separated string, as naive UTC like the history."""
+    dates = []
+    for item in _items(raw):
+        moment = datetime.fromisoformat(item)
+        if moment.tzinfo is not None:
+            moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+        dates.append(pd.Timestamp(moment))
+    return dates
+
+
+def _moment_ns(raw) -> int:
+    """A timezone-aware ISO 8601 time as nanoseconds."""
+    moment = datetime.fromisoformat(_text(raw))
+    if moment.tzinfo is None:
+        raise ValueError(f"expected a timezone, as in 2025-06-19T00:00:00Z, got {raw!r}")
+    return _to_ns(moment)
+
+
+SETTING_VALIDATORS = [
     Validator(
-        "seasonality_mode",
-        default="additive",
-        cast=lambda raw: parse_choice(raw, "seasonality_mode", SEASONALITY_MODES),
+        "source_measurement",
+        "field",
+        "query",
+        "source_database",
+        "sql_filter",
+        "target_measurement",
+        "target_database",
+        "forecast_id",
+        cast=_text,
     ),
-    Validator("changepoint_prior_scale", default=0.05, cast=parse_prior_scale),
-    Validator("changepoints", default=""),
-    Validator("holiday_date_list", default=""),
+    Validator("tag_filter", cast=_tag_filter),
+    Validator("group_by", default=[], cast=_names),
     Validator(
-        "holiday_names",
-        default="",
-        cast=lambda raw: parse_delimited_list(raw, sep="."),
+        "window", "sampling_interval", "horizon_duration", "validation_window", cast=_duration_ns
+    ),
+    # A series needs MIN_POINTS points, so a shorter history is refused up front.
+    Validator("point_limit", cast=lambda raw: parse_int(raw, minimum=MIN_POINTS)),
+    Validator(
+        "horizon_steps", "series_limit", "backtest_points", cast=lambda raw: parse_int(raw, minimum=1)
     ),
     Validator(
-        "holiday_country_names",
-        default="",
-        cast=lambda raw: parse_delimited_list(raw, sep="."),
+        "max_series", default=DEFAULT_MAX_SERIES, cast=lambda raw: parse_int(raw, minimum=1)
     ),
-    Validator("inferred_freq", default="", cast=parse_freq),
-    Validator("validation_window", default="0s", cast=parse_interval),
-    Validator(
-        "validation_alignment",
-        default="position",
-        cast=lambda raw: parse_choice(
-            raw, "validation_alignment", VALIDATION_ALIGNMENTS
-        ),
-    ),
-    Validator("msre_threshold", default=float("inf"), cast=parse_msre_threshold),
     Validator(
         "max_forecast_points",
         default=DEFAULT_MAX_FORECAST_POINTS,
         cast=lambda raw: parse_int(raw, minimum=1),
     ),
-    Validator("target_database", default="", cast=str),
-]
-
-SCHEDULED_VALIDATORS: list = COMMON_VALIDATORS + [
-    Validator("window", required=True, cast=parse_positive_interval),
+    Validator("levels", default=list(DEFAULT_LEVELS), cast=_levels),
+    Validator("model", default=MODEL_ID, cast=_model),
+    Validator("write_results", "is_sending_alert", default=False, cast=parse_bool),
+    Validator("forecast_freq", cast=_freq),
+    Validator("model_mode", default="train", cast=_choice(MODEL_MODES)),
+    Validator("unique_suffix", cast=_unique_suffix),
+    Validator("seasonality_mode", default="additive", cast=_choice(SEASONALITY_MODES)),
+    Validator("changepoint_prior_scale", default=0.05, cast=_prior_scale),
+    Validator("changepoints", "holiday_date_list", default=[], cast=_dates),
+    # Paired with holiday_date_list one to one, so a holiday may repeat.
+    Validator("holiday_names", default=[], cast=_items),
+    Validator("holiday_country_names", default=[], cast=_names),
     Validator(
-        "model_mode",
-        required=True,
-        cast=lambda raw: parse_choice(raw, "model_mode", MODEL_MODES),
+        "validation_alignment", default="position", cast=_choice(VALIDATION_ALIGNMENTS)
     ),
-    Validator("is_sending_alert", default=False, cast=parse_bool),
-    Validator("notification_text", default=DEFAULT_NOTIFICATION_TEXT, cast=str),
-    Validator("notification_path", default="notify", cast=str),
+    Validator("msre_threshold", default=math.inf, cast=_msre_threshold),
+    Validator("start_time", "end_time", cast=_moment_ns),
+    Validator("notification_text", default=DEFAULT_NOTIFICATION_TEXT, cast=_text),
+    Validator("notification_path", default="notify", cast=_text),
     Validator(
-        "port_override",
-        default=8181,
-        cast=lambda raw: parse_int(raw, minimum=1, maximum=65535),
+        "port_override", default=8181, cast=lambda raw: parse_int(raw, minimum=1, maximum=65535)
     ),
 ]
 
-HTTP_VALIDATORS: list = COMMON_VALIDATORS + [
-    Validator("start_time", required=True, cast=str),
-    Validator("end_time", required=True, cast=str),
-    Validator("save_mode", default=False, cast=parse_bool),
-]
+
+def _env_spec(names) -> KeySpec:
+    """Read settings from INFLUXDB3_PROPHET_FORECASTING_<KEY>."""
+    rename = {f"{ENV_PREFIX}{name.upper()}": name for name in names}
+    return KeySpec(allowlist=tuple(rename), rename=rename)
 
 
-# the variable is spelled in upper case; the config key it becomes is not
+# The variable is spelled in upper case; the config key it becomes is not.
 AUTH_TOKEN_ENV = KeySpec(
     allowlist=["INFLUXDB3_AUTH_TOKEN"],
     rename={"INFLUXDB3_AUTH_TOKEN": "influxdb3_auth_token"},
 )
 
-ENV_PREFIX = "INFLUXDB3_PROPHET_FORECASTING_"
 
-
-def env_spec(*names: str) -> KeySpec:
-    """Read the named settings from ``INFLUXDB3_PROPHET_FORECASTING_<SETTING>``.
-
-    The prefix is stripped again, so a variable merges with the same setting
-    coming from a trigger argument, the TOML file or the request body.
-    """
-    rename = {f"{ENV_PREFIX}{name.upper()}": name for name in names}
-    return KeySpec(allowlist=tuple(rename), rename=rename)
-
-
-NOTIFICATION_SETTINGS = ("senders",) + tuple(
-    dict.fromkeys(name for keys in AVAILABLE_SENDERS.values() for name in keys)
-)
-
-SCHEDULED_ENV = env_spec(
-    *(name for validator in SCHEDULED_VALIDATORS for name in validator.names),
-    *NOTIFICATION_SETTINGS,
-)
-HTTP_KEYS = tuple(
-    dict.fromkeys(name for validator in HTTP_VALIDATORS for name in validator.names)
-)
-
-HEADER_PREFIX = "X-Influxdb3-Prophet-Forecasting-"
-
-
-def header_name(name: str) -> str:
-    """The header a setting is spelled as, prefixed and hyphenated."""
+def _header_name(name: str) -> str:
     return HEADER_PREFIX + name.replace("_", "-")
 
 
-HTTP_ENV = env_spec(*HTTP_KEYS)
-HTTP_BODY_KEYS = KeySpec(allowlist=HTTP_KEYS, unknown="reject")
-HTTP_HEADER_KEYS = KeySpec(
-    allowlist=tuple(header_name(name) for name in HTTP_KEYS),
-    rename={header_name(name): name for name in HTTP_KEYS},
+HEADER_KEYS = KeySpec(
+    allowlist=tuple(_header_name(name) for name in REQUEST_NAMES),
+    rename={_header_name(name): name for name in REQUEST_NAMES},
 )
-HTTP_QUERY_KEYS = KeySpec(allowlist=HTTP_KEYS, unknown="reject")
+REQUEST_KEYS = KeySpec(allowlist=REQUEST_NAMES, unknown="reject")
 
 
-def prepare_scheduled_config(
-    influxdb3_local, config: Config, call_time: datetime, task_id: str
-) -> None:
-    """
-    Check the settings against each other and add what the run derives.
+def _refuse_unknown_headers(request_headers) -> None:
+    """A header with the plugin's prefix must name a setting, or a typo would be lost."""
+    known = {_header_name(name).lower() for name in REQUEST_NAMES}
+    prefix = HEADER_PREFIX.lower()
+    for name in request_headers or {}:
+        if str(name).lower().startswith(prefix) and str(name).lower() not in known:
+            raise ForecastError(
+                "bad_request",
+                f"unknown header {name!r}; a setting goes in {HEADER_PREFIX}<key>, "
+                f"with hyphens for underscores",
+            )
 
-    The refusals here are the ones whose message has to name a second setting.
-    Adds tag_values as a mapping, plus run_time, history_start, history_end and
-    forecast_start hung off call_time.
 
-    Raises:
-        ForecastError: If validation_window leaves no training data.
-    """
-    config["tag_values"] = parse_tag_values(
-        influxdb3_local, config["tag_values"], task_id
-    )
+# Choices between keys: the side the highest source sets wins, and the other
+# side from lower sources is dropped, so a request overrides a trigger default.
+EXCLUSIVE_KEYS = (
+    (
+        ("query",),
+        ("source_measurement", "field", "tag_filter", "sql_filter", "group_by"),
+    ),
+    (("horizon_steps",), ("horizon_duration",)),
+    (("start_time", "end_time"), ("window", "point_limit")),
+    (("forecast_freq",), ("sampling_interval",)),
+)
 
-    if config["is_sending_alert"] and config["validation_window"] <= timedelta(0):
-        influxdb3_local.warn(
-            f"[{task_id}] is_sending_alert has no effect without validation_window: "
-            f"alerts are only sent when validation fails"
-        )
 
-    # the engine passes a naive UTC timestamp
-    run_time: datetime = (
-        call_time if call_time.tzinfo else call_time.replace(tzinfo=timezone.utc)
-    )
-    config["run_time"] = run_time
-    config["history_start"] = run_time - config["window"]
-    config["history_end"] = run_time - config["validation_window"]
-    config["forecast_start"] = run_time
-    if config["history_start"] >= config["history_end"]:
+def _given(value) -> bool:
+    """Whether a raw value counts as set; empty text, lists and objects do not."""
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict)):
+        return bool(value)
+    return value is not None
+
+
+def _drop_overridden(layers: list) -> list:
+    """Keep, for each choice in EXCLUSIVE_KEYS, only the side set highest."""
+    layers = [dict(layer) for layer in layers]
+    for first, second in EXCLUSIVE_KEYS:
+        tops = [
+            max(
+                (i for i, layer in enumerate(layers) if any(_given(layer.get(k)) for k in side)),
+                default=-1,
+            )
+            for side in (first, second)
+        ]
+        if tops[0] == tops[1]:
+            continue  # neither side, or both in one source: _resolve decides
+        loser = second if tops[0] > tops[1] else first
+        for layer in layers:
+            for key in loser:
+                layer.pop(key, None)
+    return layers
+
+
+def _load_settings(args, names, request_layers=()) -> dict:
+    """Merge env, trigger args, TOML and, on demand, the request; later wins."""
+    args = args or {}
+    for key in SECRET_KEYS:
+        if key in names and key in args:
+            raise ValueError(
+                f"{key} cannot be a trigger argument, as those can be read from a system "
+                f"table; set it in the TOML file or in {ENV_PREFIX}{key.upper()}"
+            )
+    config_file_path = args.get("config_file_path") or parse_env(
+        _env_spec(("config_file_path",))
+    ).get("config_file_path")
+    layers = [
+        parse_env(_env_spec(names)),
+        parse_trigger_args(
+            args, KeySpec(allowlist=names + ("config_file_path",), unknown="reject")
+        ),
+        parse_toml(config_file_path, KeySpec(allowlist=names, unknown="reject")),
+        *request_layers,
+    ]
+    if "influxdb3_auth_token" in names:
+        layers.insert(0, parse_env(AUTH_TOKEN_ENV))
+    return load_config(*_drop_overridden(layers), validators=SETTING_VALIDATORS)
+
+
+@dataclasses.dataclass
+class ForecastRequest:
+    """A validated request: the keys after every cross-key check."""
+
+    source_measurement: str | None
+    field: str | None
+    query: str | None
+    source_database: str | None
+    tag_filter: dict
+    sql_filter: str | None
+    group_by: list
+    series_limit: int | None
+    window_ns: int | None
+    default_window: bool
+    point_limit: int | None
+    start_ns: int | None
+    end_ns: int | None
+    sampling_ns: int | None
+    forecast_freq: str | None
+    horizon_steps: int | None
+    horizon_ns: int | None
+    backtest_points: int | None
+    levels: list
+    model: str
+    write_results: bool
+    target_measurement: str | None
+    target_database: str | None
+    forecast_id: str | None
+    max_series: int
+    max_forecast_points: int
+    model_mode: str
+    unique_suffix: str | None
+    seasonality_mode: str
+    changepoint_prior_scale: float
+    changepoints: list
+    holiday_dates: list
+    holiday_names: list
+    holiday_country_names: list
+    validation_ns: int | None
+    validation_alignment: str
+    msre_threshold: float
+    now_ns: int
+    # None only for a query without window.
+    history_start_ns: int | None
+    history_end_ns: int
+    # Where training stops and validation starts; None without validation.
+    cut_ns: int | None
+    # The measurement the forecast comes from, once a query's plan is read.
+    source: str | None = None
+
+
+def _forecast_row_columns(levels: list) -> set:
+    """Tag and field names of a stored forecast row."""
+    names = {*FORECAST_ROW_TAGS, *FORECAST_ROW_FIELDS}
+    for level in levels:
+        key = _level_key(level)
+        names.update((f"lower_{key}", f"upper_{key}"))
+    return names
+
+
+def _refuse_clashing_keys(keys: list, levels: list, kind: str) -> None:
+    """Series keys are written as tags, so one named like a row column is refused."""
+    columns = _forecast_row_columns(levels)
+    for key in keys:
+        if key in columns:
+            raise ForecastError(
+                "bad_request",
+                f"{kind} {key!r} clashes with a column of the stored forecast rows; "
+                f"rename it with an alias in a query",
+            )
+
+
+def _check_horizon(req: ForecastRequest, points: int) -> None:
+    if points > req.max_forecast_points:
         raise ForecastError(
-            f"Empty training window: 'window' ({config['window']}) must exceed "
-            f"'validation_window' ({config['validation_window']})"
+            "bad_request",
+            f"the horizon is {points} points, more than max_forecast_points="
+            f"{req.max_forecast_points}; shorten it or raise max_forecast_points",
         )
 
 
-def prepare_http_config(influxdb3_local, config: Config, task_id: str) -> None:
-    """
-    Check the settings against each other and add what the run derives.
-
-    Adds tag_values as a mapping, plus history_start, history_end and
-    forecast_start from start_time, end_time and validation_window.
-
-    Raises:
-        ForecastError: If a bound is not a timezone-aware ISO 8601 value,
-            start_time is not before end_time, or validation_window covers the
-            whole requested range.
-    """
-    config["tag_values"] = parse_tag_values(
-        influxdb3_local, config["tag_values"], task_id
-    )
-
-    start_time, end_time = parse_time_window(config)
-    config["history_start"] = start_time
-    config["history_end"] = end_time - config["validation_window"]
-    config["forecast_start"] = end_time
-    if start_time >= config["history_end"]:
+def _resolve(cfg: dict, scheduled: bool, now_ns: int) -> ForecastRequest:
+    """Check the keys against each other and build the request."""
+    query_mode = "query" in cfg
+    if query_mode:
+        # These first: set with query in one source, they keep lower sources'
+        # source_measurement and field, which would be named instead.
+        for key in ("tag_filter", "sql_filter", "group_by", "start_time", "end_time"):
+            if cfg.get(key):
+                raise ForecastError("bad_request", f"{key} does not apply to query")
+        if "source_measurement" in cfg or "field" in cfg:
+            raise ForecastError(
+                "bad_request", "set either query or source_measurement and field, not both"
+            )
+    elif "source_measurement" not in cfg or "field" not in cfg:
         raise ForecastError(
-            f"Empty training window: 'validation_window' "
-            f"({config['validation_window']}) covers the whole requested range"
+            "bad_request", "source_measurement and field are required, or query"
         )
 
+    if ("horizon_steps" in cfg) == ("horizon_duration" in cfg):
+        raise ForecastError(
+            "bad_request", "set exactly one of horizon_steps and horizon_duration"
+        )
+    if "sampling_interval" in cfg and "forecast_freq" in cfg:
+        raise ForecastError(
+            "bad_request", "set one of sampling_interval and forecast_freq, not both"
+        )
+    if cfg["model_mode"] == "predict" and "unique_suffix" not in cfg:
+        raise ForecastError("bad_request", "model_mode predict requires unique_suffix")
+    if len(cfg["holiday_date_list"]) != len(cfg["holiday_names"]):
+        raise ForecastError(
+            "bad_request",
+            f"holiday_date_list and holiday_names must come together and be as many, got "
+            f"{len(cfg['holiday_date_list'])} and {len(cfg['holiday_names'])}",
+        )
+    write_results = True if scheduled else cfg["write_results"]
+    if write_results:
+        _refuse_clashing_keys(cfg["group_by"], cfg["levels"], "group_by tag")
 
-def quote_identifier(name: str) -> str:
-    """Quote a SQL identifier, escaping embedded double quotes."""
+    window_ns = cfg.get("window")
+    point_limit = cfg.get("point_limit")
+    start_ns, end_ns = cfg.get("start_time"), cfg.get("end_time")
+    absolute = start_ns is not None or end_ns is not None
+    if absolute:
+        if window_ns is not None or point_limit is not None:
+            raise ForecastError(
+                "bad_request", "set start_time and end_time, or window and point_limit, not both"
+            )
+        if start_ns is None or end_ns is None:
+            raise ForecastError("bad_request", "set start_time and end_time together")
+        if start_ns >= end_ns:
+            raise ForecastError("bad_request", "start_time must be earlier than end_time")
+    elif not query_mode and window_ns is None and point_limit is None:
+        options = "window or point_limit" if scheduled else (
+            "window, point_limit, or start_time and end_time"
+        )
+        raise ForecastError("bad_request", f"set the history to read: {options}")
+
+    sampling_ns = cfg.get("sampling_interval")
+    validation_ns = cfg.get("validation_window")
+    backtest_points = cfg.get("backtest_points")
+    if backtest_points and validation_ns:
+        # Both hold back the latest points, and the windows would overlap.
+        raise ForecastError(
+            "bad_request", "set one of backtest_points and validation_window, not both"
+        )
+    # History ends now or at end_time; with sampling_interval at the edge of the last
+    # full bucket, so a bucket still filling or cut short never reaches the model.
+    history_end_ns = end_ns if absolute else now_ns
+    if sampling_ns:
+        history_end_ns = min(history_end_ns, now_ns)
+        history_end_ns -= history_end_ns % sampling_ns
+    cut_ns = None
+    if validation_ns:
+        cut_ns = history_end_ns - validation_ns
+        if sampling_ns:
+            # On a bucket's edge, so no bucket holds points from both sides of the cut.
+            cut_ns -= cut_ns % sampling_ns
+    default_window = not query_mode and not absolute and window_ns is None
+    if default_window:
+        # The backtest's held-out buckets come on top, and one more: the window counts
+        # from now, and the history ends at the last full bucket.
+        buckets = point_limit + (backtest_points or 0) + 1
+        window_ns = (
+            min(buckets * sampling_ns, MAX_DEFAULT_WINDOW_NS)
+            if sampling_ns
+            else DEFAULT_WINDOW_NS
+        ) + (validation_ns or 0)
+    history_start_ns = start_ns if absolute else now_ns - window_ns if window_ns else None
+    # The server refuses a time range that holds nothing, so it must never get one.
+    if window_ns and sampling_ns and window_ns < sampling_ns:
+        raise ForecastError(
+            "bad_request",
+            f"the history window ({_duration_text(window_ns)}) is shorter than one "
+            f"sampling_interval ({_duration_text(sampling_ns)})",
+        )
+    if absolute and start_ns >= history_end_ns:
+        raise ForecastError(
+            "bad_request",
+            f"no full sampling_interval between start_time and the end of the history "
+            f"({_iso(history_end_ns)})",
+        )
+    if cut_ns is not None and history_start_ns is not None and cut_ns <= history_start_ns:
+        raise ForecastError("bad_request", "validation_window leaves no history to train on")
+
+    req = ForecastRequest(
+        source_measurement=cfg.get("source_measurement"),
+        field=cfg.get("field"),
+        query=cfg.get("query"),
+        source_database=cfg.get("source_database"),
+        tag_filter=cfg.get("tag_filter") or {},
+        sql_filter=cfg.get("sql_filter"),
+        group_by=cfg["group_by"],
+        series_limit=cfg.get("series_limit"),
+        window_ns=window_ns,
+        default_window=default_window,
+        point_limit=point_limit,
+        start_ns=start_ns,
+        end_ns=end_ns,
+        sampling_ns=sampling_ns,
+        forecast_freq=cfg.get("forecast_freq"),
+        horizon_steps=cfg.get("horizon_steps"),
+        horizon_ns=cfg.get("horizon_duration"),
+        backtest_points=backtest_points,
+        levels=cfg["levels"],
+        model=cfg["model"],
+        write_results=write_results,
+        target_measurement=cfg.get("target_measurement"),
+        target_database=cfg.get("target_database"),
+        forecast_id=cfg.get("forecast_id"),
+        max_series=cfg["max_series"],
+        max_forecast_points=cfg["max_forecast_points"],
+        model_mode=cfg["model_mode"],
+        unique_suffix=cfg.get("unique_suffix"),
+        seasonality_mode=cfg["seasonality_mode"],
+        changepoint_prior_scale=cfg["changepoint_prior_scale"],
+        changepoints=cfg["changepoints"],
+        holiday_dates=cfg["holiday_date_list"],
+        holiday_names=cfg["holiday_names"],
+        holiday_country_names=cfg["holiday_country_names"],
+        validation_ns=validation_ns,
+        validation_alignment=cfg["validation_alignment"],
+        msre_threshold=cfg["msre_threshold"],
+        now_ns=now_ns,
+        history_start_ns=history_start_ns,
+        history_end_ns=history_end_ns,
+        cut_ns=cut_ns,
+    )
+    # The horizon in points is known now unless the spacing comes from the data.
+    if req.horizon_steps:
+        _check_horizon(req, req.horizon_steps)
+    elif req.sampling_ns:
+        _check_horizon(req, -(-req.horizon_ns // req.sampling_ns))
+    if backtest_points and backtest_points > req.max_forecast_points:
+        raise ForecastError(
+            "bad_request",
+            f"backtest_points is {backtest_points}, more than max_forecast_points="
+            f"{req.max_forecast_points}; lower it or raise max_forecast_points",
+        )
+    # Within the cap, the limit always holds, so the cap never refuses a limited request.
+    if req.series_limit and req.series_limit > req.max_series:
+        raise ForecastError(
+            "bad_request",
+            f"series_limit is {req.series_limit}, more than max_series={req.max_series}; "
+            f"lower it or raise max_series",
+        )
+    if req.holiday_dates or req.holiday_country_names:
+        # A reserved name or an unknown country would otherwise fail every series.
+        try:
+            _new_model(req)
+        except Exception as exc:
+            raise ForecastError("bad_request", f"invalid holidays: {exc}") from exc
+    return req
+
+
+# ---------------------------------------------------------------------------
+# Reading history
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class Series:
+    """One forecast input: a field of one series, oldest point first."""
+
+    field: str
+    tags: dict
+    times: list = dataclasses.field(default_factory=list)  # int ns, the training history
+    values: list = dataclasses.field(default_factory=list)  # float
+    actual_times: list = dataclasses.field(default_factory=list)  # the validation window's
+    actual_values: list = dataclasses.field(default_factory=list)
+    key: dict = dataclasses.field(default_factory=dict)  # group_by tags or query key columns
+    error: tuple | None = None  # (code, message)
+
+
+def _quote_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
 
 
-def parse_tag_values(influxdb3_local, raw, task_id: str) -> dict[str, str]:
-    """
-    Parse tag filters from a 'tag:value.tag2:value2' string or a mapping.
-
-    Malformed pairs are skipped with a warning so one bad pair does not stop the run.
-
-    Returns:
-        dict[str, str]: Tag names mapped to the values to filter on.
-
-    Example:
-        >>> parse_tag_values(client, "host:server1.region:us-west", "t")
-        {'host': 'server1', 'region': 'us-west'}
-    """
-    if isinstance(raw, dict):
-        tag_values = {}
-        for tag, value in raw.items():
-            if isinstance(value, (list, tuple, set, dict)):
-                influxdb3_local.warn(
-                    f"[{task_id}] Skipping tag filter '{tag}': one value per tag is supported"
-                )
-                continue
-            tag_values[str(tag)] = str(value)
-        return tag_values
-
-    tag_values: dict = {}
-    for pair in parse_delimited_list(raw, sep="."):
-        tag, separator, value = pair.partition(":")
-        if not separator:
-            influxdb3_local.warn(
-                f"[{task_id}] Skipping malformed tag filter '{pair}': expected <tag>:<value>"
-            )
-            continue
-        tag_values[tag.strip()] = value.strip()
-    return tag_values
+def _run_query(influxdb3_local, sql: str, params: dict | None, database: str | None):
+    kwargs = {"database": database} if database else {}
+    if params:
+        return influxdb3_local.query(sql, params, **kwargs)
+    return influxdb3_local.query(sql, **kwargs)
 
 
-def parse_date_list(influxdb3_local, raw, name: str, task_id: str) -> list[str] | None:
-    """
-    Parse ISO dates from a space-separated string or a list, skipping invalid entries.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
-    Returns:
-        list[str] | None: Valid dates, or None when none remain.
-    """
-    dates: list = []
-    for item in parse_delimited_list(raw, sep=" "):
+
+def _to_ns(value) -> int | None:
+    """A query timestamp as integer nanoseconds."""
+    if value is None or isinstance(value, int):
+        return value
+    if not isinstance(value, datetime):
         try:
-            datetime.fromisoformat(item)
+            value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except ValueError:
-            influxdb3_local.warn(f"[{task_id}] Skipping invalid {name} value '{item}'")
-            continue
-        dates.append(item)
-
-    return dates or None
-
-
-def build_where(
-    tag_values: dict, start_time: datetime, end_time: datetime
-) -> tuple[str, dict]:
-    """
-    Build the WHERE clause and bound parameters for a time window and tag filters.
-
-    Values are passed as query parameters and identifiers are quote-escaped, so a
-    quote in a tag value or column name can neither break nor inject the query.
-
-    Returns:
-        tuple[str, dict]: The clause and the parameters it references.
-    """
-    params: dict = {
-        "start_time": start_time.isoformat(),
-        "end_time": end_time.isoformat(),
-    }
-    clause: str = "time >= $start_time AND time < $end_time"
-    for index, (tag, value) in enumerate(tag_values.items()):
-        name: str = f"tag{index}"
-        clause += f" AND {quote_identifier(tag)} = ${name}"
-        params[name] = value
-    return clause, params
+            return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    # Integer arithmetic: a float timestamp is off by up to a few hundred ns.
+    return (value - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
-def query_series(
-    influxdb3_local,
-    config: dict,
-    tag_values: dict,
-    start_time: datetime,
-    end_time: datetime,
-    task_id: str,
-) -> pd.DataFrame | None:
-    """
-    Query one time window and return it as a Prophet-shaped frame.
+def _iso(ns: int) -> str:
+    """Nanoseconds as an ISO 8601 UTC time, for a query parameter or a message."""
+    return (_EPOCH + timedelta(microseconds=ns // 1000)).isoformat()
 
-    Returns:
-        pd.DataFrame | None: Columns 'ds' (tz-naive UTC) and 'y' (numeric), or None
-        when the window holds no usable rows.
 
-    Raises:
-        ForecastError: If the results lack the time or field column.
-    """
-    measurement: str = config["measurement"]
-    field: str = config["field"]
-    where, params = build_where(tag_values, start_time, end_time)
-    query: str = (
-        f"SELECT time, {quote_identifier(field)} "
-        f"FROM {quote_identifier(measurement)} WHERE {where} ORDER BY time"
+def _interval_sql(ns: int) -> str:
+    """A duration as a SQL interval: in seconds when whole, as most are, else in nanoseconds."""
+    if ns % 10**9 == 0:
+        return f"INTERVAL '{ns // 10**9} seconds'"
+    return f"INTERVAL '{ns} nanoseconds'"
+
+
+def _numeric(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _too_many(cap: int) -> ForecastError:
+    return ForecastError(
+        "bad_request",
+        f"the request produces more forecasts than max_series={cap}; "
+        f"narrow it, set series_limit, or raise max_series",
     )
 
-    rows: list = influxdb3_local.query(query, params)
-    if not rows:
-        return None
 
-    df: pd.DataFrame = pd.DataFrame(rows)
-    if "time" not in df.columns or field not in df.columns:
+def _read_limit(req: ForecastRequest) -> int | None:
+    """Points a series keeps: point_limit and the backtest's held-out ones; None for all."""
+    return req.point_limit + (req.backtest_points or 0) if req.point_limit else None
+
+
+def _measurement_tags(influxdb3_local, req: ForecastRequest) -> list[str]:
+    """Check the named columns against the schema and return the tag names."""
+    try:
+        schema = get_schema(
+            influxdb3_local,
+            req.source_measurement,
+            database=req.source_database,
+            use_cache=False,
+        )
+    except Exception as exc:
         raise ForecastError(
-            f"Query results for '{measurement}' are missing 'time' or '{field}'"
+            "bad_request", f"cannot read measurement {req.source_measurement!r}: {exc}"
+        ) from exc
+    tags = [name for name, data_type in schema.items() if data_type == TAG_DATA_TYPE]
+    numeric = {name for name, data_type in schema.items() if data_type in NUMERIC_TYPES}
+    if req.field not in numeric:
+        raise ForecastError(
+            "bad_request",
+            f"{req.field!r} is not a numeric field of {req.source_measurement!r}",
         )
-
-    df = df.rename(columns={"time": "ds", field: "y"})
-    df["ds"] = pd.to_datetime(df["ds"], unit="ns")
-    df["y"] = pd.to_numeric(df["y"], errors="coerce")
-    dropped: int = int(df["y"].isna().sum())
-    if dropped:
-        influxdb3_local.warn(
-            f"[{task_id}] Dropping {dropped} rows where '{field}' is missing or not numeric"
-        )
-        df = df.dropna(subset=["y"])
-    if df.empty:
-        return None
-
-    influxdb3_local.info(
-        f"[{task_id}] Retrieved {len(df)} rows from {measurement} "
-        f"({start_time.isoformat()} to {end_time.isoformat()})"
-    )
-    return df.reset_index(drop=True)
-
-
-def get_model_storage_path(unique_suffix: str) -> Path:
-    """
-    Return the model file path for a version suffix, creating the directory if needed.
-
-    Args:
-        unique_suffix (str): Validated model version suffix.
-
-    Returns:
-        Path: Path to the model JSON file under <plugin dir>/prophet_models.
-    """
-    model_dir: Path = resolve_plugin_dir() / MODEL_DIR_NAME
-    model_dir.mkdir(parents=True, exist_ok=True)
-    return model_dir / f"prophet_model_{unique_suffix}.json"
-
-
-def save_model(model: Prophet, file_path: Path) -> None:
-    """Serialize a model through a temporary file so readers never see partial JSON."""
-    temp_path: Path = file_path.with_name(f"{file_path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temp_path.write_text(model_to_json(model))
-        os.replace(temp_path, file_path)
-    finally:
-        temp_path.unlink(missing_ok=True)
-
-
-def create_prophet_model(
-    influxdb3_local,
-    config: dict,
-    changepoints: list | None,
-    holiday_dates: list | None,
-    task_id: str,
-) -> Prophet:
-    """
-    Build a Prophet model from the configured seasonality, changepoints and holidays.
-
-    Returns:
-        Prophet: An unfitted model.
-    """
-    model: Prophet = Prophet(
-        seasonality_mode=config["seasonality_mode"],
-        changepoint_prior_scale=config["changepoint_prior_scale"],
-        changepoints=changepoints,
-    )
-
-    holiday_names: list = config["holiday_names"]
-    if bool(holiday_dates) != bool(holiday_names):
-        missing: str = "holiday_names" if holiday_dates else "holiday_date_list"
-        influxdb3_local.warn(
-            f"[{task_id}] {missing} is not set, skipping custom holidays"
-        )
-    elif holiday_dates and holiday_names:
-        if len(holiday_dates) != len(holiday_names):
-            influxdb3_local.warn(
-                f"[{task_id}] holiday_date_list ({len(holiday_dates)}) and holiday_names "
-                f"({len(holiday_names)}) differ in length, skipping holidays"
+    for name in [*req.group_by, *req.tag_filter]:
+        if name not in tags:
+            raise ForecastError(
+                "bad_request", f"{name!r} is not a tag of {req.source_measurement!r}"
             )
+    return tags
+
+
+def _where(req: ForecastRequest, params: dict) -> str:
+    """The WHERE clause shared by the series and the data queries."""
+    clauses = [f"{_quote_ident(req.field)} IS NOT NULL"]
+    params["history_start"] = _iso(req.history_start_ns)
+    params["history_end"] = _iso(req.history_end_ns)
+    clauses.append("time >= $history_start AND time < $history_end")
+    for i, (tag, values) in enumerate(req.tag_filter.items()):
+        placeholders = []
+        for j, value in enumerate(values):
+            params[f"tf{i}_{j}"] = value
+            placeholders.append(f"$tf{i}_{j}")
+        if len(placeholders) == 1:
+            clauses.append(f"{_quote_ident(tag)} = {placeholders[0]}")
         else:
-            model.holidays = pd.DataFrame(
-                {"ds": pd.to_datetime(holiday_dates), "holiday": holiday_names}
-            )
-
-    country_names: list = config["holiday_country_names"]
-    if country_names:
-        if len(country_names) > 1:
-            influxdb3_local.warn(
-                f"[{task_id}] Prophet supports built-in holidays for one country, "
-                f"using '{country_names[0]}'"
-            )
-        model.add_country_holidays(country_name=country_names[0])
-
-    return model
+            clauses.append(f"{_quote_ident(tag)} IN ({', '.join(placeholders)})")
+    if req.sql_filter:
+        # Inserted as is, by design: the README states what it can read.
+        clauses.append(f"({req.sql_filter})")
+    return " AND ".join(clauses)
 
 
-def load_or_train_model(
-    influxdb3_local,
-    config: dict,
-    history: pd.DataFrame,
-    changepoints: list | None,
-    holiday_dates: list | None,
-    use_saved_model: bool,
-    task_id: str,
-) -> Prophet:
-    """
-    Load the saved model for this version, or train one and save it when missing.
-
-    With use_saved_model set to False the model is trained in memory and not stored.
+def _series_keys(influxdb3_local, req, tags, where, params) -> tuple[list, int]:
+    """Find the series, their single-valued tags and row counts, and enforce the cap.
 
     Returns:
-        Prophet: A fitted model.
+        [(group values, tags, rows)] in the contract's order (group_by values, a missing
+        one last), at most series_limit of them, and how many series there are in all.
+        Without group_by there is always one series, empty when no row matches; with
+        it, no row means no series.
     """
-    if not use_saved_model:
-        model: Prophet = create_prophet_model(
-            influxdb3_local, config, changepoints, holiday_dates, task_id
-        )
-        model.fit(history)
-        influxdb3_local.info(f"[{task_id}] Model trained")
-        return model
-
-    file_path: Path = get_model_storage_path(config["unique_suffix"])
-    if file_path.exists():
-        model = model_from_json(file_path.read_text())
-        influxdb3_local.info(f"[{task_id}] Model loaded from {file_path}")
-        return model
-
-    influxdb3_local.warn(
-        f"[{task_id}] Model file not found at {file_path}, training a new model now"
-    )
-    model = create_prophet_model(
-        influxdb3_local, config, changepoints, holiday_dates, task_id
-    )
-    model.fit(history)
-    save_model(model, file_path)
-    influxdb3_local.info(f"[{task_id}] Newly trained model saved to {file_path}")
-    return model
-
-
-def fixed_step(freq: str) -> timedelta | None:
-    """Duration of one step, or None for calendar frequencies (day, week, month, ...)."""
+    others = [tag for tag in tags if tag not in req.group_by]
+    columns = [f"{_quote_ident(g)} AS __g{i}" for i, g in enumerate(req.group_by)]
+    for i, tag in enumerate(others):
+        text = f"CAST({_quote_ident(tag)} AS VARCHAR)"
+        columns.append(f"count({text}) AS __c{i}")
+        columns.append(f"count(DISTINCT {text}) AS __n{i}")
+        columns.append(f"min({text}) AS __v{i}")
+    columns.append("count(*) AS __rows")
+    limited = bool(req.group_by and req.series_limit)
+    if limited:
+        # Counts every group before LIMIT, so only series_limit rows come back.
+        columns.append("count(*) OVER () AS __total")
+    sql = f"SELECT {', '.join(columns)} FROM {_quote_ident(req.source_measurement)} WHERE {where}"
+    if req.group_by:
+        positions = ", ".join(str(i + 1) for i in range(len(req.group_by)))
+        order = ", ".join(f"{i + 1} ASC NULLS LAST" for i in range(len(req.group_by)))
+        limit = req.series_limit or req.max_series + 1
+        sql += f" GROUP BY {positions} ORDER BY {order} LIMIT {limit}"
     try:
-        return pd.to_timedelta(pd.tseries.frequencies.to_offset(freq)).to_pytimedelta()
-    except (ValueError, TypeError):
+        rows = _run_query(influxdb3_local, sql, params, req.source_database)
+    except Exception as exc:
+        # The first query to run the filters, so a bad sql_filter fails here.
+        raise ForecastError("bad_request", f"cannot read the series: {exc}") from exc
+    rows = [row for row in rows if row.get("__rows")]
+    if not req.group_by and not rows:
+        return [((), {}, 0)], 1
+    if len(rows) > req.max_series:
+        raise _too_many(req.max_series)
+    total = rows[0]["__total"] if limited and rows else len(rows)
+
+    keys = []
+    for row in rows:
+        group = tuple(row.get(f"__g{i}") for i in range(len(req.group_by)))
+        series_tags = {
+            g: str(value) for g, value in zip(req.group_by, group) if value not in (None, "")
+        }
+        for i, tag in enumerate(others):
+            # A series tag is on every row with one value; partial tags are left out.
+            if (
+                row.get(f"__c{i}") == row.get("__rows")
+                and row.get(f"__n{i}") == 1
+                and row.get(f"__v{i}") not in (None, "")
+            ):
+                series_tags[tag] = str(row[f"__v{i}"])
+        keys.append((group, series_tags, row["__rows"]))
+    return keys, total
+
+
+def _chosen_series(req: ForecastRequest, keys: list, params: dict) -> str:
+    """A condition matching only the rows of these series, the ones series_limit keeps."""
+    alternatives = []
+    for i, (group, _, _) in enumerate(keys):
+        parts = []
+        for j, (tag, value) in enumerate(zip(req.group_by, group)):
+            if value is None:
+                parts.append(f"{_quote_ident(tag)} IS NULL")
+            else:
+                params[f"sl{i}_{j}"] = value
+                parts.append(f"{_quote_ident(tag)} = $sl{i}_{j}")
+        alternatives.append(f"({' AND '.join(parts)})")
+    return f"({' OR '.join(alternatives)})"
+
+
+# Tag sets read to check one request for mixed series; more than this counts as mixed.
+_MAX_TAG_SETS = 10_000
+
+
+def _refuse_mixed_series(influxdb3_local, req, tags, where, params) -> None:
+    """Refuse a series whose rows come from tag sets writing at the same time.
+
+    Interleaved, they form a saw-tooth; a tag set that follows another in time
+    (a version after an upgrade) is fine. Only the history the model trains on counts:
+    the last point_limit timestamps of each series before the cut; with window alone,
+    all of it.
+    """
+    others = [tag for tag in tags if tag not in req.group_by]
+    if not others:
+        return
+    groups = [f"__g{i}" for i in range(len(req.group_by))]
+    keys = ", ".join(groups + [f"__o{i}" for i in range(len(others))])
+    columns = [f"{_quote_ident(g)} AS __g{i}" for i, g in enumerate(req.group_by)]
+    columns += [f"{_quote_ident(tag)} AS __o{i}" for i, tag in enumerate(others)]
+    rows_sql = (
+        f"SELECT {', '.join(columns)}, time AS __time "
+        f"FROM {_quote_ident(req.source_measurement)} WHERE {where}"
+    )
+    if req.point_limit:
+        partition = f"PARTITION BY {', '.join(groups)} " if groups else ""
+        rows_sql = (
+            f"SELECT * FROM (SELECT *, DENSE_RANK() OVER ({partition}ORDER BY __time DESC) "
+            f"AS __rank FROM ({rows_sql}) AS __rows) AS __ranked "
+            f"WHERE __rank <= {_read_limit(req)}"
+        )
+    sql = (
+        f"SELECT {keys}, min(__time) AS __first, max(__time) AS __last "
+        f"FROM ({rows_sql}) AS __recent GROUP BY {keys} LIMIT {_MAX_TAG_SETS + 1}"
+    )
+    try:
+        rows = _run_query(influxdb3_local, sql, params, req.source_database)
+    except Exception as exc:
+        raise ForecastError("bad_request", f"cannot read the series: {exc}") from exc
+    if len(rows) > _MAX_TAG_SETS:
+        raise ForecastError(
+            "bad_request",
+            f"the rows come from more than {_MAX_TAG_SETS} tag sets; narrow them with "
+            f"group_by or tag_filter, or set sampling_interval",
+        )
+
+    spans: dict[tuple, list] = {}  # group -> [(first, last, tag values)]
+    for row in rows:
+        group = tuple(row.get(f"__g{i}") for i in range(len(req.group_by)))
+        tag_values = tuple(row.get(f"__o{i}") for i in range(len(others)))
+        spans.setdefault(group, []).append(
+            (_to_ns(row["__first"]) or 0, _to_ns(row["__last"]) or 0, tag_values)
+        )
+    for group, tag_sets in spans.items():
+        latest = None  # the tag set that ends last so far
+        for span in sorted(tag_sets, key=lambda span: span[0]):
+            if latest and span[0] < latest[1]:
+                differ = [tag for tag, a, b in zip(others, span[2], latest[2]) if a != b]
+                series = f"the series {dict(zip(req.group_by, group))}" if req.group_by else "the series"
+                raise ForecastError(
+                    "bad_request",
+                    f"rows of {series} come from several tag sets writing at the same time "
+                    f"(they differ in {', '.join(differ)}); add those tags to group_by, pin "
+                    f"them with tag_filter, or set sampling_interval to forecast their mean",
+                )
+            if latest is None or span[1] > latest[1]:
+                latest = span
+
+
+def _data_sql(req: ForecastRequest, where: str, limit: int | None) -> tuple[str, bool]:
+    """The history query, at most limit points per series; the flag says rows come newest first.
+
+    Rows of a series sharing a timestamp, or a sampling bucket, are averaged.
+    """
+    groups = [f"{_quote_ident(g)} AS __g{i}" for i, g in enumerate(req.group_by)]
+    table = _quote_ident(req.source_measurement)
+    moment = "time"
+    if req.sampling_ns:
+        moment = f"date_bin({_interval_sql(req.sampling_ns)}, time)"
+    select = [f"{moment} AS __t", *groups, f"avg({_quote_ident(req.field)}) AS __f0"]
+    positions = ", ".join(str(i + 1) for i in range(1 + len(groups)))
+    sql = f"SELECT {', '.join(select)} FROM {table} WHERE {where} GROUP BY {positions}"
+
+    if limit is None:
+        return f"{sql} ORDER BY __t", False
+    if not req.group_by:
+        return f"{sql} ORDER BY __t DESC LIMIT {limit}", True
+    partition = ", ".join(f"__g{i}" for i in range(len(req.group_by)))
+    ranked = (
+        f"SELECT *, ROW_NUMBER() OVER (PARTITION BY {partition} ORDER BY __t DESC) "
+        f"AS __rn FROM ({sql}) AS __history"
+    )
+    return (
+        f"SELECT * FROM ({ranked}) AS __ranked WHERE __rn <= {limit} ORDER BY __t",
+        False,
+    )
+
+
+def _measurement_plan(influxdb3_local, req: ForecastRequest) -> tuple:
+    """Mode A checks: the schema, the filters, the series cap, mixed series.
+
+    Returns:
+        (WHERE clause, its parameters, series keys from _series_keys, series in all).
+    """
+    tags = _measurement_tags(influxdb3_local, req)
+    params: dict = {}
+    where = _where(req, params)
+    keys, total = _series_keys(influxdb3_local, req, tags, where, params)
+    if len(keys) < total:
+        # series_limit left series out: they are neither checked nor read.
+        where = f"{where} AND {_chosen_series(req, keys, params)}"
+    if not req.sampling_ns and any(rows for _, _, rows in keys):
+        # With sampling_interval, a mixed series is the mean per bucket the request asks for.
+        _refuse_mixed_series(influxdb3_local, req, tags, *_before_cut(req, where, params))
+    return where, params, keys, total
+
+
+def _before_cut(req: ForecastRequest, where: str, params: dict) -> tuple[str, dict]:
+    """The condition and parameters of the history the model trains on."""
+    if req.cut_ns is None:
+        return where, params
+    return f"{where} AND time < $cut", {**params, "cut": _iso(req.cut_ns)}
+
+
+def _read_points(influxdb3_local, req, where, params, limit) -> dict:
+    """{group values: [(time, value)]}, oldest first."""
+    sql, newest_first = _data_sql(req, where, limit)
+    try:
+        rows = _run_query(influxdb3_local, sql, params, req.source_database)
+    except Exception as exc:
+        raise ForecastError("internal", f"history query failed: {exc}") from exc
+    if newest_first:
+        rows = list(reversed(rows))
+    points: dict = {}
+    for row in rows:
+        value = row.get("__f0")
+        moment = _to_ns(row.get("__t"))
+        if value is None or moment is None:
+            continue
+        group = tuple(row.get(f"__g{i}") for i in range(len(req.group_by)))
+        points.setdefault(group, []).append((moment, float(value)))
+    return points
+
+
+def _read_measurement(influxdb3_local, req: ForecastRequest, plan: tuple) -> list[Series]:
+    """Mode A: one series per group_by combination, or one in all."""
+    where, params, keys, _ = plan
+    history_where, history_params = _before_cut(req, where, params)
+    actual: dict = {}
+    if req.cut_ns is not None:
+        actual = _read_points(
+            influxdb3_local, req, f"{where} AND time >= $cut", history_params, None
+        )
+    history = _read_points(influxdb3_local, req, history_where, history_params, _read_limit(req))
+
+    series_list = []
+    for group, series_tags, _ in keys:
+        series = Series(field=req.field, tags=series_tags, key=dict(zip(req.group_by, group)))
+        series.times = [moment for moment, _ in history.get(group, [])]
+        series.values = [value for _, value in history.get(group, [])]
+        series.actual_times = [moment for moment, _ in actual.get(group, [])]
+        series.actual_values = [value for _, value in actual.get(group, [])]
+        series_list.append(series)
+    return series_list
+
+
+# EXPLAIN names each scanned table unquoted, then its attributes:
+# "TableScan: cpu load projection=[...], full_filters=[...]".
+_TABLE_SCAN = re.compile(
+    r"TableScan: (.+?)(?= projection=\[|, (?:partial_filters|full_filters|unsupported_filters|fetch)=|$)",
+    re.MULTILINE,
+)
+
+
+def _query_measurements(influxdb3_local, req: ForecastRequest) -> list[str]:
+    """The measurements a query reads, from its logical plan."""
+    try:
+        rows = _run_query(influxdb3_local, f"EXPLAIN {req.query}", None, req.source_database)
+    except Exception as exc:
+        raise ForecastError("bad_request", f"the query does not plan: {exc}") from exc
+    names = set()
+    for row in rows:
+        if row.get("plan_type") != "logical_plan":
+            continue
+        for name in _TABLE_SCAN.findall(str(row.get("plan", ""))):
+            for prefix in ("public.iox.", "iox."):
+                if name.startswith(prefix):
+                    name = name[len(prefix):]
+                    break
+            names.add(name)
+    return sorted(names)
+
+
+def _windowed_query(query: str, window_ns: int) -> str:
+    """The query wrapped in a window filter the server applies.
+
+    UTC compares a time zone aware time (tz()) by instant; the line breaks keep a
+    trailing -- comment from swallowing the closing parenthesis.
+    """
+    body = query.strip().rstrip(";").rstrip()
+    return (
+        f"SELECT * FROM (\n{body}\n) AS __history WHERE time > "
+        f"(now() AT TIME ZONE 'UTC') - {_interval_sql(window_ns)}"
+    )
+
+
+def _query_rows(influxdb3_local, req: ForecastRequest, task_id: str) -> list:
+    """The query's rows; with window, filtered by the server when the query can be wrapped."""
+    if req.window_ns:
+        try:
+            return _run_query(
+                influxdb3_local,
+                _windowed_query(req.query, req.window_ns),
+                None,
+                req.source_database,
+            )
+        except Exception as exc:
+            if "Resources exhausted" in str(exc):
+                # Unwrapped, the query would read more and fail the same way.
+                raise ForecastError("internal", f"the query failed: {exc}") from exc
+            # For example an integer time column; _read_query applies the window then.
+            influxdb3_local.warn(
+                f"[{task_id}] Window applied in the plugin, the wrapped query failed: {exc}"
+            )
+    try:
+        return _run_query(influxdb3_local, req.query, None, req.source_database)
+    except Exception as exc:
+        raise ForecastError("internal", f"the query failed: {exc}") from exc
+
+
+def _read_query(influxdb3_local, req: ForecastRequest, task_id: str) -> tuple[list[Series], int]:
+    """Mode B: each key combination × each numeric column is a series.
+
+    Returns:
+        The series in the contract's order, at most series_limit of them, and how many
+        there are in all.
+    """
+    rows = _query_rows(influxdb3_local, req, task_id)
+    if rows and not any("time" in row for row in rows):
+        raise ForecastError(
+            "bad_request", "no time column in query result; alias the timestamp AS time"
+        )
+    if req.window_ns:
+        # Repeats the server's filter, or applies it when the query could not be wrapped;
+        # before the split, so a series with no rows in the window does not exist.
+        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) >= req.history_start_ns]
+    if req.sampling_ns:
+        # The query defines its history, so only the buckets of sampling_interval end it.
+        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) < req.history_end_ns]
+    if not rows:
+        return [], 0
+    columns = list(dict.fromkeys(column for row in rows for column in row))
+
+    keys, values = [], []
+    for column in columns:
+        if column == "time":
+            continue
+        present = [row.get(column) for row in rows if row.get(column) is not None]
+        if not present:
+            continue
+        (values if all(_numeric(v) for v in present) else keys).append(column)
+    if not values:
+        raise ForecastError("bad_request", "no numeric column to forecast in query result")
+    if req.write_results:
+        _refuse_clashing_keys(keys, req.levels, "query column")
+
+    groups: dict[tuple, list] = {}
+    for row in rows:
+        groups.setdefault(tuple(row.get(k) for k in keys), []).append(row)
+    # The contract's order: key values as text, a missing value last, then field name.
+    forecasts = sorted(
+        ((group, column) for group in groups for column in values),
+        key=lambda pair: (tuple((v is None, str(v)) for v in pair[0]), pair[1]),
+    )
+    total = len(forecasts)
+    if req.series_limit:
+        forecasts = forecasts[: req.series_limit]
+    elif total > req.max_series:
+        raise _too_many(req.max_series)
+
+    series_list = []
+    for group, column in forecasts:
+        series_tags = {k: str(v) for k, v in zip(keys, group) if v not in (None, "")}
+        series = Series(field=column, tags=series_tags, key=dict(zip(keys, group)))
+        _mean_per_moment(
+            series,
+            (
+                (moment, float(row[column]))
+                for row in groups[group]
+                if row.get(column) is not None
+                and (moment := _to_ns(row.get("time"))) is not None
+            ),
+            req.sampling_ns,
+        )
+        if req.cut_ns is not None:
+            split = bisect_left(series.times, req.cut_ns)
+            series.actual_times, series.actual_values = series.times[split:], series.values[split:]
+            series.times, series.values = series.times[:split], series.values[:split]
+        limit = _read_limit(req)
+        if limit:
+            series.times, series.values = series.times[-limit:], series.values[-limit:]
+        series_list.append(series)
+    return series_list, total
+
+
+def _mean_per_moment(series: Series, points, step_ns: int | None) -> None:
+    """The series, sorted: the mean per timestamp, or per bucket aligned to the epoch like date_bin."""
+    sums: dict[int, list] = {}
+    for moment, value in points:
+        total = sums.setdefault(moment - moment % step_ns if step_ns else moment, [0.0, 0])
+        total[0] += value
+        total[1] += 1
+    series.times = sorted(sums)
+    series.values = [sums[t][0] / sums[t][1] for t in series.times]
+
+
+# ---------------------------------------------------------------------------
+# The forecast grid
+# ---------------------------------------------------------------------------
+
+
+def _median_step_ns(times: list) -> int:
+    """The median gap between consecutive timestamps; a series has at least MIN_POINTS."""
+    gaps = sorted(b - a for a, b in zip(times, times[1:]))
+    middle = len(gaps) // 2
+    return gaps[middle] if len(gaps) % 2 else (gaps[middle - 1] + gaps[middle]) // 2
+
+
+# Round units for a raw-point grid: its step is rounded to one about 1% of it,
+# its phase to one about 10% (10 ms and 1 s for a 10 s step, 1 h for a week).
+_ROUND_UNITS_NS = tuple(
+    n * 10**6 for n in (1, 10, 100, 1_000, 10_000, 60_000, 600_000, 3_600_000)
+)
+
+
+def _round_unit(step: int, share: int) -> int:
+    """The largest round unit at most step / share, or 1 ns."""
+    return max((unit for unit in _ROUND_UNITS_NS if share * unit <= step), default=1)
+
+
+def _round_step(gap_ns: int) -> int:
+    """The median gap rounded to a unit about 1% of it, so jitter does not change it."""
+    unit = _round_unit(gap_ns, 100)
+    return (gap_ns + unit // 2) // unit * unit
+
+
+def _grid_anchor(times: list, step: int) -> int:
+    """A cell of the raw-point grid, on the rhythm most points keep.
+
+    The last point moved by the median offset of all points, so a stray timestamp
+    does not shift the grid; its phase is rounded to about a tenth of the step, so
+    jitter does not move the grid between runs.
+    """
+    last = times[-1]
+    half = step // 2
+    offsets = sorted((moment - last + half) % step - half for moment in times)
+    anchor = last + offsets[len(offsets) // 2]
+    unit = _round_unit(step, 10)
+    phase = anchor % step
+    return anchor - phase + (phase + unit // 2) // unit * unit
+
+
+def _timestamps(times: list) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(np.array(times, dtype="datetime64[ns]"))
+
+
+def _forecast_step(series: Series, req: ForecastRequest) -> tuple:
+    """The forecast's step as a pandas frequency, and its first point after the history."""
+    last = series.times[-1]
+    if req.sampling_ns:
+        return pd.Timedelta(req.sampling_ns, "ns"), pd.Timestamp(last + req.sampling_ns, unit="ns")
+    freq = req.forecast_freq or pd.infer_freq(_timestamps(series.times))
+    if freq:
+        offset = pd.tseries.frequencies.to_offset(freq)
+        return offset, pd.Timestamp(last, unit="ns") + offset
+    # Irregular or jittered points: the grid they keep, so a later run hits the same times.
+    step = _round_step(_median_step_ns(series.times))
+    anchor = _grid_anchor(series.times, step)
+    cell = anchor - (anchor - last + step // 2) // step * step
+    return pd.Timedelta(step, "ns"), pd.Timestamp(cell + step, unit="ns")
+
+
+def _fixed_ns(offset) -> int | None:
+    """One step in nanoseconds, or None for a calendar frequency (month, business day, ...)."""
+    try:
+        return pd.Timedelta(offset).as_unit("ns").value
+    except (TypeError, ValueError):
         return None
 
 
-def resolve_frequency(
-    influxdb3_local, config: dict, history: pd.DataFrame, task_id: str
-) -> tuple[str, timedelta | None]:
-    """
-    Return the forecast frequency alias and its duration.
-
-    Calendar frequencies such as ``D``, ``W-SUN`` or ``MS`` have no fixed duration;
-    ``None`` is returned for them and the grid is stepped by the offset itself.
-
-    Raises:
-        ForecastError: If the frequency is neither configured nor inferable, or if
-        one step does not move time forward.
-    """
-    freq: str = config["inferred_freq"]
-    if not freq:
-        if len(history) < 3:
-            raise ForecastError(
-                f"Only {len(history)} points retrieved, at least 3 are needed to infer the "
-                "frequency; provide it with the 'inferred_freq' argument"
-            )
-        freq = pd.infer_freq(history["ds"])
-        if freq is None:
-            raise ForecastError(
-                "Unable to infer frequency, please provide it manually with the "
-                "'inferred_freq' argument"
-            )
-
-    if pd.tseries.frequencies.to_offset(freq).n <= 0:
-        raise ForecastError(f"Frequency '{freq}' does not move time forward")
-
-    step: timedelta | None = fixed_step(freq)
-
-    influxdb3_local.info(f"[{task_id}] Using frequency: {freq}")
-    return freq, step
-
-
-def forecast_tolerance(freq: str, grid: pd.DatetimeIndex) -> timedelta:
-    """Half of one forecast step: the widest gap that still maps an actual value to one point."""
-    if len(grid) > 1:
-        spacing: pd.Timedelta = pd.Series(grid).diff().median()
+def _grid_lengths(series: Series, req: ForecastRequest, offset, first: pd.Timestamp) -> tuple:
+    """(grid points up to the last measured point, grid points in all)."""
+    after = series.actual_times[-1] if series.actual_times else series.times[-1]
+    first_ns = first.as_unit("ns").value
+    step = _fixed_ns(offset)
+    if step:
+        checked = max(0, (after - first_ns) // step + 1)
+    elif after >= first_ns:
+        checked = len(pd.date_range(first, pd.Timestamp(after, unit="ns"), freq=offset))
     else:
-        offset = pd.tseries.frequencies.to_offset(freq)
-        spacing = (grid[0] + offset) - grid[0]
-    return (spacing / 2).to_pytimedelta()
+        checked = 0
+
+    if req.horizon_steps:
+        return checked, checked + req.horizon_steps
+    end = after + req.horizon_ns
+    if step:
+        # A horizon ending between two points runs to the later one.
+        needed = max(0, -(-(end - first_ns) // step)) + 1
+    else:
+        reached = pd.date_range(first, pd.Timestamp(end, unit="ns"), freq=offset)
+        needed = len(reached) + (0 if len(reached) and reached[-1].as_unit("ns").value == end else 1)
+    return checked, needed
 
 
-def validate_forecast(
-    influxdb3_local,
-    actual: pd.DataFrame,
-    forecast: pd.DataFrame,
-    msre_threshold: float,
-    alignment: str,
-    tolerance: timedelta,
-    task_id: str,
-) -> bool:
+@dataclasses.dataclass
+class Grid:
+    """Where a series is predicted: through the validation window, then the horizon."""
+
+    times: pd.DatetimeIndex
+    first_new: int  # the first point after the data
+    spacing: pd.Timedelta
+
+
+def _forecast_grid(series: Series, req: ForecastRequest) -> Grid:
+    offset, first = _forecast_step(series, req)
+    try:
+        checked, length = _grid_lengths(series, req, offset, first)
+        _check_horizon(req, length)
+        times = pd.date_range(start=first, periods=length, freq=offset).as_unit("ns")
+    except (OverflowError, pd.errors.OutOfBoundsDatetime) as exc:
+        raise ForecastError(
+            "bad_request", f"the horizon runs past the timestamps InfluxDB can hold: {exc}"
+        ) from exc
+    spacing = pd.Series(times).diff().median() if len(times) > 1 else (times[0] + offset) - times[0]
+    return Grid(times=times, first_new=checked, spacing=spacing)
+
+
+# ---------------------------------------------------------------------------
+# The model
+# ---------------------------------------------------------------------------
+
+
+def _level_key(level: float) -> str:
+    """0.8 -> '80', 0.975 -> '97.5'."""
+    return format((Decimal(str(level)) * 100).normalize(), "f")
+
+
+def _model_path(req: ForecastRequest, series: Series) -> Path:
+    """The saved model of a series: one per version and per data it trains on.
+
+    History bounds stay out, as they move with every run, and so do the model's settings:
+    changing those is a new unique_suffix. Values may hold anything, so the name holds a digest.
     """
-    Compare forecasted values with actual ones over the validation window.
+    key = json.dumps(
+        {
+            "database": req.source_database,
+            "measurement": req.source_measurement,
+            "query": req.query,
+            "field": series.field,
+            "series": series.key,
+            "tag_filter": {tag: sorted(values) for tag, values in req.tag_filter.items()},
+            "sql_filter": req.sql_filter,
+            "sampling_ns": req.sampling_ns,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+    directory = resolve_plugin_dir() / MODEL_DIR_NAME
+    return directory / f"prophet_model_{req.unique_suffix}_{digest}.json"
 
-    With alignment "position" the two series are paired in time order; with
-    "nearest" each actual value is paired with the closest forecast point within
-    `tolerance`.
+
+def _save_model(model: Prophet, path: Path) -> None:
+    """Serialize a model through a temporary file so readers never see partial JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(model_to_json(model))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _new_model(req: ForecastRequest) -> Prophet:
+    """An unfitted model; building it runs Prophet's own checks of the settings."""
+    holidays = None
+    if req.holiday_dates:
+        holidays = pd.DataFrame(
+            {"ds": pd.to_datetime(req.holiday_dates), "holiday": req.holiday_names}
+        )
+    model = Prophet(
+        seasonality_mode=req.seasonality_mode,
+        changepoint_prior_scale=req.changepoint_prior_scale,
+        changepoints=req.changepoints or None,
+        holidays=holidays,
+    )
+    if req.holiday_country_names:
+        model.add_country_holidays(country_name=req.holiday_country_names[0])
+    return model
+
+
+def _train(req: ForecastRequest, series: Series) -> Prophet:
+    model = _new_model(req)
+    frame = pd.DataFrame({"ds": _timestamps(series.times), "y": series.values})
+    # By default cmdstanpy keeps a run's files until the process ends.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as output_dir:
+        model.fit(frame, output_dir=output_dir)
+    return model
+
+
+def _model_for(influxdb3_local, req: ForecastRequest, series: Series, task_id: str) -> Prophet:
+    """A fitted model: trained now, or the one saved for this version and series."""
+    if req.model_mode == "train":
+        return _train(req, series)
+    try:
+        path = _model_path(req, series)
+        if path.exists():
+            return model_from_json(path.read_text())
+    except Exception as exc:
+        raise ForecastError(
+            "model_unavailable", f"cannot read the saved model of {series.tags}: {exc}"
+        ) from exc
+    model = _train(req, series)
+    try:
+        _save_model(model, path)
+        influxdb3_local.info(f"[{task_id}] Saved a new model to {path}")
+    except OSError as exc:
+        influxdb3_local.warn(f"[{task_id}] The model could not be saved to {path}: {exc}")
+    return model
+
+
+def _predict(model: Prophet, times: pd.DatetimeIndex, levels: list) -> tuple:
+    """The central forecast and {level: (lower, upper)}, the bounds from the model's samples."""
+    future = pd.DataFrame({"ds": times})
+    # predict would draw its own samples for one interval; these are drawn once, below.
+    samples_kept = model.uncertainty_samples
+    model.uncertainty_samples = 0
+    try:
+        central = model.predict(future)["yhat"].to_numpy()
+    finally:
+        model.uncertainty_samples = samples_kept
+    if not levels:
+        return central, {}
+    samples = model.predictive_samples(future)["yhat"]
+    bounds = {}
+    for level in levels:
+        lower, upper = np.nanpercentile(
+            samples, [(1 - level) / 2 * 100, (1 + level) / 2 * 100], axis=1
+        )
+        # Samples scatter around the central value, so a narrow interval could miss it.
+        bounds[level] = (np.minimum(lower, central), np.maximum(upper, central))
+    return central, bounds
+
+
+def _finite(value) -> float | None:
+    return float(value) if value is not None and math.isfinite(value) else None
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+
+def _validation_problem(
+    influxdb3_local, series: Series, grid: Grid, central, req: ForecastRequest, task_id: str
+) -> str | None:
+    """Compare the forecast with the measured points after the cut.
+
+    With alignment position the two are paired in time order; with nearest each
+    measured point is paired with the closest forecast point within half a step.
 
     Returns:
-        bool: True when MSRE stays within the threshold, False when MSRE cannot be
-        computed or exceeds it.
+        Why validation failed, or None when MSRE stays within the threshold.
     """
-    actual_sorted: pd.DataFrame = (
-        actual.dropna(subset=["y"]).sort_values("ds").reset_index(drop=True)
-    )
-    predicted: pd.DataFrame = (
-        forecast[["ds", "yhat"]].sort_values("ds").reset_index(drop=True)
-    )
+    actual = pd.DataFrame({"ds": _timestamps(series.actual_times), "y": series.actual_values})
+    predicted = pd.DataFrame({"ds": grid.times, "yhat": central})
 
-    if alignment == "nearest":
-        # half a step keeps the mapping unambiguous: the windows of neighbouring
-        # forecast points do not overlap
-        matched: pd.DataFrame = pd.merge_asof(
-            actual_sorted,
-            predicted,
-            on="ds",
-            direction="nearest",
-            tolerance=pd.Timedelta(tolerance),
+    if req.validation_alignment == "nearest":
+        # Half a step keeps the mapping unambiguous: the windows of neighbouring
+        # forecast points do not overlap.
+        matched = pd.merge_asof(
+            actual, predicted, on="ds", direction="nearest", tolerance=grid.spacing / 2
         ).dropna(subset=["yhat"])
         if matched.empty:
-            influxdb3_local.warn(
-                f"[{task_id}] No actual value falls within {tolerance} of a forecast "
-                f"point, treating validation as failed"
-            )
-            return False
-        influxdb3_local.info(
-            f"[{task_id}] Validating {len(matched)} of {len(actual_sorted)} actual "
-            f"points matched within {tolerance}"
-        )
+            return f"validation failed: no measured point is within {grid.spacing / 2} of the forecast"
         y_true, y_pred = matched["y"], matched["yhat"]
     else:
-        length: int = min(len(actual_sorted), len(predicted))
-        y_true = actual_sorted["y"].iloc[:length]
-        y_pred = predicted["yhat"].iloc[:length]
+        length = min(len(actual), len(predicted))
+        y_true, y_pred = actual["y"].iloc[:length], predicted["yhat"].iloc[:length]
 
-    # zero actuals would divide by zero in the relative error
+    # Zero actuals would divide by zero in the relative error.
     nonzero = y_true != 0
     y_true, y_pred = y_true[nonzero], y_pred[nonzero]
     if y_true.empty:
-        influxdb3_local.warn(
-            f"[{task_id}] All actual values in the validation window are zero, MSRE has "
-            f"nothing to compare, treating validation as failed"
-        )
-        return False
-
-    msre: float = float(((y_true - y_pred) ** 2 / y_true**2).mean())
-    influxdb3_local.info(f"[{task_id}] MSRE: {msre}")
-
+        return "validation failed: every measured value is zero, so MSRE has nothing to compare"
+    msre = float(((y_true - y_pred) ** 2 / y_true**2).mean())
+    influxdb3_local.info(f"[{task_id}] {series.field} {series.tags}: MSRE {msre}")
     if math.isnan(msre):
-        influxdb3_local.warn(
-            f"[{task_id}] MSRE is not a number, treating validation as failed"
-        )
-        return False
-
-    if msre > msre_threshold:
-        influxdb3_local.warn(
-            f"[{task_id}] MSRE {msre} exceeds threshold {msre_threshold}, consider retraining."
-        )
-        return False
-
-    return True
+        return "validation failed: MSRE is not a number"
+    if msre > req.msre_threshold:
+        return f"validation failed: MSRE {msre} exceeds msre_threshold {req.msre_threshold}"
+    return None
 
 
-def to_naive_utc(moment: datetime) -> pd.Timestamp:
-    """Convert a datetime to a tz-naive UTC timestamp, matching the queried data."""
-    timestamp: pd.Timestamp = pd.Timestamp(moment)
-    if timestamp.tz is None:
-        return timestamp
-    return timestamp.tz_convert("UTC").tz_localize(None)
+# ---------------------------------------------------------------------------
+# Backtest
+# ---------------------------------------------------------------------------
 
 
-def build_forecast_lines(
-    influxdb3_local,
-    forecast: pd.DataFrame,
-    config: dict,
-    tag_values: dict,
-    run_time: datetime,
-    forecast_start: datetime,
-    task_id: str,
-) -> list:
-    """
-    Turn forecast rows at or after forecast_start into LineBuilder objects.
-
-    Points with a non-finite value are skipped, because one of them would fail the
-    whole batched write.
+def _split_backtest(series: Series, req: ForecastRequest) -> tuple[Series, list, list]:
+    """Hold out the last backtest_points points, and keep point_limit points for the forecast.
 
     Returns:
-        list: LineBuilder objects ready to write.
+        The backtest's training history, as long as the forecast's, and the held-out
+        points' times and values.
     """
-    cutoff: pd.Timestamp = to_naive_utc(forecast_start)
-    future: pd.DataFrame = forecast.loc[
-        forecast["ds"] >= cutoff, ["ds", "yhat", "yhat_lower", "yhat_upper"]
-    ].copy()
-    future["time_ns"] = future["ds"].astype("datetime64[ns]").astype("int64")
+    held_out, limit = req.backtest_points, req.point_limit
+    check = Series(
+        field=series.field,
+        tags=series.tags,
+        times=series.times[:-held_out],
+        values=series.values[:-held_out],
+    )
+    actual_times, actual_values = series.times[-held_out:], series.values[-held_out:]
+    if limit:
+        check.times, check.values = check.times[-limit:], check.values[-limit:]
+        series.times, series.values = series.times[-limit:], series.values[-limit:]
+    return check, actual_times, actual_values
 
-    tags: dict = {"model_version": config["unique_suffix"], **tag_values}
-    run_time_text: str = run_time.isoformat()
 
-    lines: list = []
-    skipped: int = 0
-    for row in future.itertuples(index=False):
-        values: tuple = (float(row.yhat), float(row.yhat_lower), float(row.yhat_upper))
-        if not all(math.isfinite(value) for value in values):
-            skipped += 1
-            continue
-        forecast_value, lower, upper = values
-        lines.append(
-            build_line(
-                LineBuilder,
-                config["target_measurement"],
-                tags=tags,
-                fields={
-                    "forecast": forecast_value,
-                    "yhat_lower": lower,
-                    "yhat_upper": upper,
-                    "run_time": run_time_text,
-                },
-                time_ns=int(row.time_ns),
-            )
+def _backtest_result(central, bounds: dict, actual: list, levels: list) -> dict:
+    """The forecast against the held-out values: the share inside each level, and the MAE."""
+    measured = np.array(actual, dtype=float)
+    coverage = {
+        _level_key(level): float(
+            np.mean((bounds[level][0] <= measured) & (measured <= bounds[level][1]))
         )
+        for level in levels
+    }
+    mae = float(np.mean(np.abs(central - measured)))
+    return {"points": len(actual), "coverage": coverage, "mae": _finite(mae)}
 
-    if skipped:
+
+def _backtest(influxdb3_local, req: ForecastRequest, split: tuple, task_id: str) -> dict | None:
+    """Train on the history before the cut and score it, or None when that cannot be done.
+
+    A saved model has seen the held-out points, so this one is always trained, and never
+    saved. It must not cost the forecast: a failure here, such as a changepoint after the
+    cut, leaves a null backtest.
+    """
+    history, actual_times, actual_values = split
+    if len(history.times) < MIN_POINTS:
+        return None
+    try:
+        model = _train(req, history)
+        central, bounds = _predict(model, _timestamps(actual_times), req.levels)
+    except Exception as exc:
         influxdb3_local.warn(
-            f"[{task_id}] Skipped {skipped} forecast points with non-finite values"
+            f"[{task_id}] {history.field} {history.tags}: the backtest failed: {exc}"
         )
+        return None
+    return _backtest_result(central, bounds, actual_values, req.levels)
+
+
+# ---------------------------------------------------------------------------
+# A forecast run
+# ---------------------------------------------------------------------------
+
+
+def _forecast_lines(req, series, moments, points, run_time, points_read, row_columns):
+    """The stored rows of one forecast, one per point."""
+    target = req.target_measurement or f"_forecasts.{req.source}"
+    tags = {
+        "field": series.field,
+        "model": req.model,
+        "source_measurement": req.source or None,
+        "forecast_id": req.forecast_id or None,
+        # A series tag named like a row column is left out; such series keys were refused.
+        **{tag: value for tag, value in series.tags.items() if tag not in row_columns and value},
+    }
+    lines = []
+    for step, (moment, point) in enumerate(zip(moments, points), start=1):
+        fields = {key: value for key, value in point.items() if key != "timestamp"}
+        fields.update(step=step, points_read=points_read, run_time=run_time)
+        lines.append(build_line(LineBuilder, target, tags=tags, fields=fields, time_ns=moment))
     return lines
 
 
-def write_forecast(influxdb3_local, lines: list, database: str, task_id: str) -> None:
-    """Queue forecast points as one batched payload."""
-    influxdb3_local.info(
-        f"[{task_id}] Writing {len(lines)} forecast points to database {database}"
-    )
-    write_data(influxdb3_local, lines, database=database, retries=0)
-
-
-def run_forecast(
-    influxdb3_local,
-    config: dict,
-    tag_values: dict,
-    *,
-    history_start: datetime,
-    history_end: datetime,
-    forecast_start: datetime,
-    use_saved_model: bool,
-    run_time: datetime,
-    task_id: str,
-) -> tuple[str, str]:
-    """
-    Train or load a model, forecast, optionally validate, and write the results.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        config (dict): Loaded configuration.
-        tag_values (dict): Tag filters for the source query.
-        history_start (datetime): Start of the training window.
-        history_end (datetime): End of the training window and start of validation.
-        forecast_start (datetime): End of validation and first timestamp written.
-        use_saved_model (bool): Load or persist the model for this version.
-        run_time (datetime): Value stored in the run_time field.
-        task_id (str): Unique task identifier.
-
-    Returns:
-        tuple[str, str]: Outcome (FORECAST_WRITTEN, FORECAST_VALIDATION_FAILED or
-        FORECAST_FAILED) and a message describing it.
-    """
-    target_measurement: str = config["target_measurement"]
-    validation_window: timedelta = config["validation_window"]
-
+def _write(influxdb3_local, req: ForecastRequest, lines: list, task_id: str) -> None:
+    if not lines:
+        return
     try:
-        history: pd.DataFrame | None = query_series(
-            influxdb3_local, config, tag_values, history_start, history_end, task_id
+        write_data(influxdb3_local, lines, no_sync=True, database=req.target_database, retries=0)
+    except Exception as exc:
+        raise ForecastError("internal", f"forecast computed but the write failed: {exc}") from exc
+    influxdb3_local.info(f"[{task_id}] Wrote {len(lines)} forecast rows")
+
+
+def _too_few_message(req: ForecastRequest, observed: int) -> str:
+    message = f"need >= {MIN_POINTS} points, got {observed}"
+    if req.start_ns is not None:
+        message += f" from {_iso(req.start_ns)} to {_iso(req.end_ns)}"
+    elif req.window_ns:
+        message += f" in the last {_duration_text(req.window_ns)}"
+        if req.default_window and req.sampling_ns:
+            message += "; set window, raise point_limit or shorten sampling_interval"
+        elif req.default_window:
+            message += "; set window or sampling_interval"
+    if req.cut_ns is not None:
+        message += ", before the validation window"
+    return message
+
+
+def _forecast_points(grid: Grid, central, bounds: dict, levels: list) -> tuple[list, list]:
+    """The grid's points after the data: their times in ns, and the response's points."""
+    keys = [(level, f"lower_{_level_key(level)}", f"upper_{_level_key(level)}") for level in levels]
+    grid_ns = grid.times.asi8
+    moments, points = [], []
+    for i in range(grid.first_new, len(grid_ns)):
+        moment = int(grid_ns[i])
+        point = {"timestamp": moment // 10**6, "forecast": _finite(central[i])}
+        for level, lower, upper in keys:
+            point[lower] = _finite(bounds[level][0][i])
+            point[upper] = _finite(bounds[level][1][i])
+        moments.append(moment)
+        points.append(point)
+    return moments, points
+
+
+def _run_forecast(influxdb3_local, req: ForecastRequest, task_id: str) -> tuple[dict, list]:
+    """Read and forecast: the response of §4, and what _store writes."""
+    response = {
+        "status": "ok",
+        "model": req.model,
+        "levels": req.levels,
+        "series_total": 0,
+        "results": [],
+    }
+    if len(req.holiday_country_names) > 1:
+        influxdb3_local.warn(
+            f"[{task_id}] Prophet supports built-in holidays for one country, "
+            f"using {req.holiday_country_names[0]!r}"
         )
-        if history is None:
-            return (
-                FORECAST_FAILED,
-                f"No data found from {history_start.isoformat()} to {history_end.isoformat()}",
+    if req.query:
+        # EXPLAIN also without a write: a query that does not plan is a bad request,
+        # while one that fails while running is an internal error.
+        sources = _query_measurements(influxdb3_local, req)
+        req.source = sources[0] if len(sources) == 1 else None
+        if req.write_results and req.source is None and not req.target_measurement:
+            raise ForecastError(
+                "bad_request",
+                f"the query reads {len(sources)} measurements {sources}; set "
+                f"target_measurement",
             )
-
-        changepoints: list | None = parse_date_list(
-            influxdb3_local, config["changepoints"], "changepoints", task_id
+        series_list, total = _read_query(influxdb3_local, req, task_id)
+    else:
+        req.source = req.source_measurement
+        plan = _measurement_plan(influxdb3_local, req)
+        total = plan[3]
+        series_list = _read_measurement(influxdb3_local, req, plan) if plan[2] else []
+    response["series_total"] = total
+    if not series_list:
+        influxdb3_local.info(f"[{task_id}] No history matches; nothing to forecast")
+        return response, []
+    if len(series_list) < total:
+        influxdb3_local.info(
+            f"[{task_id}] series_limit={req.series_limit} keeps {len(series_list)} of {total} "
+            f"forecasts"
         )
-        holiday_dates: list | None = parse_date_list(
-            influxdb3_local, config["holiday_date_list"], "holiday_date_list", task_id
-        )
-        model: Prophet = load_or_train_model(
-            influxdb3_local,
-            config,
-            history,
-            changepoints,
-            holiday_dates,
-            use_saved_model,
-            task_id,
-        )
 
-        freq, step = resolve_frequency(influxdb3_local, config, history, task_id)
-        forecast_horizont: timedelta = config["forecast_horizont"]
-        if step is not None and forecast_horizont < step:
-            return (
-                FORECAST_FAILED,
-                f"Forecast horizon {forecast_horizont} is shorter than one '{freq}' step",
-            )
-
-        # the timestamps follow the queried data, so a model loaded from disk forecasts
-        # the requested range instead of the dates it happens to be trained up to
-        anchor: pd.Timestamp = history["ds"].max() + pd.tseries.frequencies.to_offset(
-            freq
-        )
-        target_end: pd.Timestamp = to_naive_utc(forecast_start) + forecast_horizont
-        if anchor >= target_end:
-            return (
-                FORECAST_FAILED,
-                f"The first '{freq}' point after the data is {anchor}, "
-                f"not before the end of the horizon {target_end}",
-            )
-
-        max_points: int = config["max_forecast_points"]
-        span: pd.Timedelta = target_end - anchor
-        if step is not None:
-            periods: int = math.ceil(span / step)
-            if periods > max_points:
-                return (
-                    FORECAST_FAILED,
-                    f"Forecast needs {periods} points at the '{freq}' step, above "
-                    f"max_forecast_points ({max_points})",
-                )
-            grid: pd.DatetimeIndex = pd.date_range(
-                start=anchor, periods=periods, freq=freq
+    # The grids come first, so a horizon over the cap refuses before any model trains.
+    grids, splits = {}, {}
+    for series in series_list:
+        if req.backtest_points:
+            splits[id(series)] = _split_backtest(series, req)
+        if len(series.times) < MIN_POINTS:
+            series.error = ("too_few_points", _too_few_message(req, len(series.times)))
+        elif req.cut_ns is not None and not series.actual_times:
+            series.error = (
+                "other",
+                f"validation failed: no data from {_iso(req.cut_ns)} on, so the forecast cannot "
+                f"be checked",
             )
         else:
-            # a calendar step has no fixed length, so the grid is bounded by the
-            # requested range and counted once it exists
-            grid = pd.date_range(
-                start=anchor, end=target_end, freq=freq, inclusive="left"
-            )
-            if len(grid) > max_points:
-                return (
-                    FORECAST_FAILED,
-                    f"Forecast needs {len(grid)} points at the '{freq}' step, above "
-                    f"max_forecast_points ({max_points})",
-                )
+            grids[id(series)] = _forecast_grid(series, req)
 
-        if grid.empty:
-            return (
-                FORECAST_FAILED,
-                f"No '{freq}' point falls between {anchor} and {target_end}",
+    started = _time.time()
+    to_store = []
+    for series in series_list:
+        result = {"field": series.field, "tags": series.tags}
+        grid = grids.get(id(series))
+        if grid is not None:
+            try:
+                model = _model_for(influxdb3_local, req, series, task_id)
+                central, bounds = _predict(model, grid.times, req.levels)
+                if req.cut_ns is not None:
+                    problem = _validation_problem(
+                        influxdb3_local, series, grid, central, req, task_id
+                    )
+                    if problem:
+                        series.error = ("other", problem)
+            except ForecastError as exc:
+                series.error = (exc.code, exc.message)
+            except Exception as exc:
+                series.error = ("internal", f"forecast failed: {exc}")
+        if series.error:
+            result.update(
+                {"status": "error", "code": series.error[0], "message": series.error[1]}
             )
-        influxdb3_local.info(
-            f"[{task_id}] Forecast horizon: {forecast_horizont}, frequency: {freq}, "
-            f"periods: {len(grid)} from {grid[0]}"
+            response["results"].append(result)
+            continue
+
+        moments, points = _forecast_points(grid, central, bounds, req.levels)
+        # A saved model read the history it was trained on, not today's.
+        points_read = len(model.history)
+        if req.end_ns is None and moments[-1] < req.now_ns:
+            influxdb3_local.warn(
+                f"[{task_id}] {series.field} {series.tags}: the history ends at "
+                f"{_iso(series.times[-1])}, so the whole forecast lies in the past"
+            )
+        result.update(
+            {
+                "points_read": points_read,
+                "step_ms": int(grid.spacing / pd.Timedelta(1, "ms")),
+                "forecast": points,
+            }
         )
+        if req.backtest_points:
+            result["backtest"] = _backtest(influxdb3_local, req, splits[id(series)], task_id)
+        response["results"].append(result)
+        to_store.append((series, moments, points, points_read))
+    influxdb3_local.info(
+        f"[{task_id}] Forecast {len(grids)} series in {(_time.time() - started) * 1000:.0f}ms"
+    )
+    return response, to_store
 
-        forecast: pd.DataFrame = model.predict(pd.DataFrame({"ds": grid}))
 
-        if validation_window > timedelta(0):
-            actual: pd.DataFrame | None = query_series(
-                influxdb3_local,
-                config,
-                tag_values,
-                history_end,
-                forecast_start,
-                task_id,
+def _store(influxdb3_local, req: ForecastRequest, to_store: list, task_id: str) -> None:
+    """Write the forecasts of a run, all in one batch."""
+    run_time = datetime.fromtimestamp(req.now_ns // 10**9, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    row_columns = _forecast_row_columns(req.levels)
+    try:
+        lines = [
+            line
+            for series, moments, points, points_read in to_store
+            for line in _forecast_lines(
+                req, series, moments, points, run_time, points_read, row_columns
             )
-            if actual is None:
-                return (
-                    FORECAST_VALIDATION_FAILED,
-                    f"No data found for validation window "
-                    f"{history_end.isoformat()} to {forecast_start.isoformat()}, "
-                    f"forecast not written to {target_measurement}",
-                )
-            if not validate_forecast(
-                influxdb3_local,
-                actual,
-                forecast,
-                config["msre_threshold"],
-                config["validation_alignment"],
-                forecast_tolerance(freq, grid),
-                task_id,
-            ):
-                return (
-                    FORECAST_VALIDATION_FAILED,
-                    f"Validation failed, forecast not written to {target_measurement}",
-                )
+        ]
+    except Exception as exc:
+        # LineBuilder refuses some names, e.g. one with a space.
+        raise ForecastError(
+            "internal", f"forecast computed but its rows cannot be built: {exc}"
+        ) from exc
+    _write(influxdb3_local, req, lines, task_id)
 
-        lines: list = build_forecast_lines(
-            influxdb3_local,
-            forecast,
-            config,
-            tag_values,
-            run_time,
-            forecast_start,
-            task_id,
-        )
-        if not lines:
-            return (
-                FORECAST_FAILED,
-                f"Forecast holds no points at or after {forecast_start.isoformat()}",
-            )
 
-        database: str = config["target_database"] or DEFAULT_TARGET_DATABASE
-        write_forecast(influxdb3_local, lines, database, task_id)
-        return FORECAST_WRITTEN, f"Forecast written to {target_measurement}"
+def _error_body(exc: ForecastError) -> dict:
+    return {"status": "error", "code": exc.code, "message": exc.message}
 
-    except ForecastError as e:
-        return FORECAST_FAILED, str(e)
+
+# ---------------------------------------------------------------------------
+# Validation alerts
+# ---------------------------------------------------------------------------
 
 
 def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
@@ -1479,8 +2563,8 @@ def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
 
     Args:
         influxdb3_local: InfluxDB client instance.
-        config (dict): Loaded configuration containing "senders" (dot-separated string
-            or list) and the keys each sender requires (see AVAILABLE_SENDERS).
+        config (dict): Loaded configuration containing "senders" (a space-separated
+            string or a list) and the keys each sender requires (see AVAILABLE_SENDERS).
         task_id (str): Unique task identifier used for logging context.
 
     Returns:
@@ -1490,7 +2574,7 @@ def parse_senders(influxdb3_local, config: dict, task_id: str) -> dict:
         Exception: If no valid senders are found after parsing.
     """
     senders_config: defaultdict = defaultdict(dict)
-    senders: list = parse_delimited_list(config.get("senders", ""), sep=".")
+    senders: list = _names(config.get("senders", ""))
     if not senders:
         raise Exception("No senders provided")
 
@@ -1589,45 +2673,48 @@ def send_notification(
                 influxdb3_local.info(
                     f"[{task_id}] Retrying sending alert to notification plugin in {wait:.1f} seconds."
                 )
-                time.sleep(wait)
+                _time.sleep(wait)
             else:
                 influxdb3_local.error(
                     f"[{task_id}] Failed to send alert to notification plugin after {max_retries} attempts: {e}"
                 )
 
 
-def send_validation_alert(
-    influxdb3_local,
-    config: dict,
-    validation_start: datetime,
-    validation_end: datetime,
-    task_id: str,
+def _series_label(result: dict) -> str:
+    tags = " ".join(f"{tag}={value}" for tag, value in result["tags"].items())
+    return f"{result['field']} {tags}".strip()
+
+
+def _send_validation_alert(
+    influxdb3_local, cfg: dict, req: ForecastRequest, failed: list, task_id: str
 ) -> None:
-    """Send the validation-failure alert for the window that was actually validated."""
+    """One alert for a run, listing the series that failed validation."""
     try:
-        senders_config: dict = parse_senders(influxdb3_local, config, task_id)
-        token: str = config.get("influxdb3_auth_token", "")
+        senders_config: dict = parse_senders(influxdb3_local, cfg, task_id)
+        token: str = cfg.get("influxdb3_auth_token", "")
         if not token:
             raise Exception("INFLUXDB3_AUTH_TOKEN not found")
 
+        fields = sorted({result["field"] for result in failed})
         payload: dict = {
             "notification_text": interpolate_notification_text(
-                config["notification_text"],
+                cfg["notification_text"],
                 {
-                    "version": config["unique_suffix"],
-                    "measurement": config["measurement"],
-                    "field": config["field"],
-                    "start_time": validation_start.isoformat(),
-                    "end_time": validation_end.isoformat(),
-                    "output_measurement": config["target_measurement"],
+                    "version": req.unique_suffix or "",
+                    "measurement": req.source or "",
+                    "field": ", ".join(fields),
+                    "series": ", ".join(_series_label(result) for result in failed),
+                    "start_time": _iso(req.cut_ns),
+                    "end_time": _iso(req.now_ns),
+                    "output_measurement": req.target_measurement or f"_forecasts.{req.source}",
                 },
             ),
             "senders_config": senders_config,
         }
         send_notification(
             influxdb3_local,
-            config["port_override"],
-            config["notification_path"],
+            cfg["port_override"],
+            cfg["notification_path"],
             token,
             payload,
             task_id,
@@ -1636,170 +2723,113 @@ def send_validation_alert(
         influxdb3_local.error(f"[{task_id}] Failed to send notification: {e}")
 
 
-def process_scheduled_call(
-    influxdb3_local, call_time: datetime, args: dict | None = None
-):
-    """
-    Run a scheduled Prophet forecast: query the historical window, train or load a
-    model, forecast the configured horizon, validate the result when a validation
-    window is set, write the forecast, and alert on validation failure.
-
-    Args:
-        influxdb3_local: InfluxDB client instance.
-        call_time (datetime): Time the trigger fired; the windows hang off it.
-        args (dict | None): Trigger arguments; a TOML file named by
-            config_file_path overrides them. See the plugin metadata for the
-            supported keys.
-
-    All exceptions are caught and logged; nothing propagates to the engine.
-    """
-    task_id: str = str(uuid.uuid4())
-    args = args or {}
-    influxdb3_local.info(f"[{task_id}] Starting scheduled forecast at {call_time}")
-
-    try:
-        config_file_path = args.get("config_file_path") or parse_env(
-            env_spec("config_file_path")
-        ).get("config_file_path")
-        config: Config = load_config(
-            parse_env(AUTH_TOKEN_ENV),
-            parse_env(SCHEDULED_ENV),
-            parse_trigger_args(args),
-            parse_toml(config_file_path),
-            validators=SCHEDULED_VALIDATORS,
-        )
-        prepare_scheduled_config(influxdb3_local, config, call_time, task_id)
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Configuration error: {e}")
-        return
-
-    try:
-        status, message = run_forecast(
-            influxdb3_local,
-            config,
-            config["tag_values"],
-            history_start=config["history_start"],
-            history_end=config["history_end"],
-            forecast_start=config["forecast_start"],
-            use_saved_model=config["model_mode"] == "predict",
-            run_time=config["run_time"],
-            task_id=task_id,
-        )
-
-        if status == FORECAST_WRITTEN:
-            influxdb3_local.info(f"[{task_id}] {message}")
-            return
-
-        influxdb3_local.error(f"[{task_id}] {message}")
-        if status == FORECAST_VALIDATION_FAILED and config["is_sending_alert"]:
-            send_validation_alert(
-                influxdb3_local,
-                config,
-                config["history_end"],
-                config["run_time"],
-                task_id,
-            )
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
-
-
-def parse_time_window(config: dict) -> tuple[datetime, datetime]:
-    """
-    Parse the historical window bounds, which must be timezone-aware ISO 8601
-    strings (e.g. '2025-05-01T00:00:00+03:00').
-
-    Returns:
-        tuple[datetime, datetime]: Start and end of the window in UTC.
-
-    Raises:
-        ForecastError: If a value is not ISO 8601, lacks a timezone, or start >= end.
-    """
-
-    def parse_iso_datetime(name: str, value: str) -> datetime:
-        try:
-            moment: datetime = datetime.fromisoformat(str(value))
-        except ValueError:
-            raise ForecastError(f"Invalid ISO 8601 datetime for {name}: '{value}'.")
-        if moment.tzinfo is None:
-            raise ForecastError(f"{name} must include timezone info (e.g., '+00:00').")
-        return moment.astimezone(timezone.utc)
-
-    start_time: datetime = parse_iso_datetime("start_time", config["start_time"])
-    end_time: datetime = parse_iso_datetime("end_time", config["end_time"])
-
-    if start_time >= end_time:
-        raise ForecastError(
-            f"start_time {start_time} must be earlier than end_time {end_time}."
-        )
-
-    return start_time, end_time
+# ===========================================================================
+# Entry point: HTTP trigger
+# ===========================================================================
 
 
 def process_request(
     influxdb3_local, query_parameters, request_headers, request_body, args=None
 ):
-    """
-    Run a one-off Prophet forecast over the window given in the request body.
-
-    Reads the historical window, trains a model or loads the saved one for
-    unique_suffix when save_mode is set, forecasts the configured horizon,
-    validates the result when a validation window is set, and writes the forecast.
+    """On-demand forecast of a measurement field or of a query result.
 
     Args:
-        influxdb3_local: InfluxDB client instance.
-        query_parameters: Query-string parameters, spelled as the settings are;
-            the highest layer.
-        request_headers: Headers spelled X-Influxdb3-Prophet-Forecasting-<SETTING>,
-            overriding the body and overridden by the query string.
-        request_body: JSON body holding the forecast configuration. See the
-            http_body_config section of the plugin metadata for the supported keys.
-        args: Trigger arguments, and the TOML file they name, as the defaults
-            the request overrides.
+        influxdb3_local: Processing engine API handle for queries, writes, and logging.
+        query_parameters: URL query parameters; any request key may be set here.
+        request_headers: HTTP headers; a key is also read from
+            X-Influxdb3-Prophet-Forecasting-<key>.
+        request_body: JSON object with the request keys.
+        args: Trigger arguments, used as defaults for the request.
 
     Returns:
-        dict: {"message": <outcome>}.
+        The response body and its HTTP status: 200 with the forecast, or the
+        status of the error code.
     """
-    task_id: str = str(uuid.uuid4())
-    args = args or {}
-    influxdb3_local.info(f"[{task_id}] Received forecasting request")
-
+    task_id = str(uuid.uuid4())[:8]
     try:
-        config_file_path = args.get("config_file_path") or parse_env(
-            env_spec("config_file_path")
-        ).get("config_file_path")
-        config: Config = load_config(
-            parse_env(AUTH_TOKEN_ENV),
-            parse_env(HTTP_ENV),
-            parse_trigger_args(args),
-            parse_toml(config_file_path),
-            parse_json_body(request_body, HTTP_BODY_KEYS),
-            parse_request_headers(request_headers, HTTP_HEADER_KEYS),
-            parse_query_parameters(query_parameters, HTTP_QUERY_KEYS),
-            validators=HTTP_VALIDATORS,
+        _refuse_unknown_headers(request_headers)
+        try:
+            cfg = _load_settings(
+                args,
+                REQUEST_NAMES,
+                (
+                    parse_json_body(request_body, REQUEST_KEYS),
+                    parse_request_headers(request_headers, HEADER_KEYS),
+                    parse_query_parameters(query_parameters, REQUEST_KEYS),
+                ),
+            )
+        except ValueError as exc:
+            raise ForecastError("bad_request", str(exc)) from exc
+        req = _resolve(cfg, scheduled=False, now_ns=_time.time_ns())
+        influxdb3_local.info(
+            f"[{task_id}] Forecast request: "
+            f"{'query' if req.query else f'{req.source_measurement}.{req.field}'}"
         )
-        prepare_http_config(influxdb3_local, config, task_id)
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Configuration error: {e}")
-        return {"message": f"[{task_id}] {e}"}
+        response, to_store = _run_forecast(influxdb3_local, req, task_id)
+        if req.write_results:
+            _store(influxdb3_local, req, to_store, task_id)
+        return response, 200
+    except ForecastError as exc:
+        log = influxdb3_local.warn if exc.code == "bad_request" else influxdb3_local.error
+        log(f"[{task_id}] {exc.code}: {exc.message}")
+        return _error_body(exc), HTTP_STATUS[exc.code]
+    except Exception as exc:
+        influxdb3_local.error(f"[{task_id}] internal: {exc}")
+        return {"status": "error", "code": "internal", "message": str(exc)}, 500
 
+
+# ===========================================================================
+# Entry point: Scheduled trigger
+# ===========================================================================
+
+
+def process_scheduled_call(
+    influxdb3_local, call_time: datetime, args: dict | None = None
+):
+    """Scheduled forecast, written to target_measurement on every run.
+
+    A series that fails validation is not written, and one alert for the run lists
+    them all when is_sending_alert is set.
+
+    Args:
+        influxdb3_local: Processing engine API handle for queries, writes, and logging.
+        call_time: When the trigger fired.
+        args: Trigger arguments; config_file_path points at a TOML file whose
+            keys override them.
+
+    Returns:
+        None. Errors go to the plugin log with their code.
+    """
+    task_id = str(uuid.uuid4())[:8]
     try:
-        status, message = run_forecast(
-            influxdb3_local,
-            config,
-            config["tag_values"],
-            history_start=config["history_start"],
-            history_end=config["history_end"],
-            forecast_start=config["forecast_start"],
-            use_saved_model=config["save_mode"],
-            run_time=datetime.now(timezone.utc),
-            task_id=task_id,
-        )
-    except Exception as e:
-        influxdb3_local.error(f"[{task_id}] Unexpected error: {e}")
-        return {"message": f"[{task_id}] Unexpected error: {e}"}
-
-    if status == FORECAST_WRITTEN:
-        influxdb3_local.info(f"[{task_id}] {message}")
-    else:
-        influxdb3_local.error(f"[{task_id}] {message}")
-    return {"message": f"[{task_id}] {message}"}
+        try:
+            cfg = _load_settings(args, SCHEDULED_NAMES)
+        except ValueError as exc:
+            raise ForecastError("bad_request", str(exc)) from exc
+        req = _resolve(cfg, scheduled=True, now_ns=_to_ns(call_time))
+        if cfg["is_sending_alert"] and not req.validation_ns:
+            influxdb3_local.warn(
+                f"[{task_id}] is_sending_alert has no effect without validation_window: "
+                f"alerts are only sent when validation fails"
+            )
+        response, to_store = _run_forecast(influxdb3_local, req, task_id)
+        failed = []
+        for result in response["results"]:
+            if result.get("status") != "error":
+                continue
+            log = influxdb3_local.warn if result["code"] == "too_few_points" else influxdb3_local.error
+            log(
+                f"[{task_id}] {result['code']} for {result['field']} "
+                f"{result['tags']}: {result['message']}"
+            )
+            if result["code"] == "other":
+                failed.append(result)
+        if failed and cfg["is_sending_alert"]:
+            _send_validation_alert(influxdb3_local, cfg, req, failed, task_id)
+        # Last, so a failed write costs neither the errors above nor the alert.
+        _store(influxdb3_local, req, to_store, task_id)
+    except ForecastError as exc:
+        influxdb3_local.error(f"[{task_id}] {exc.code}: {exc.message}")
+    except Exception as exc:
+        influxdb3_local.error(f"[{task_id}] internal: {exc}")
+    return None

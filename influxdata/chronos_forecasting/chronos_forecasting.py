@@ -776,6 +776,9 @@ class ForecastRequest:
     series_limit: int | None
     window_ns: int | None
     default_window: bool
+    # None only for a query without window.
+    history_start_ns: int | None
+    history_end_ns: int
     point_limit: int | None
     sampling_ns: int | None
     horizon_steps: int | None
@@ -866,12 +869,19 @@ def _resolve(cfg: dict, scheduled: bool) -> ForecastRequest:
     backtest_points = cfg.get("backtest_points")
     default_window = window_ns is None and not query_mode
     if default_window:
-        # The backtest's held-out buckets come on top, and one more: the bucket still
-        # filling is dropped.
+        # The backtest's held-out buckets come on top, and one more: the window counts
+        # from now, and the history ends at the last full bucket.
         buckets = point_limit + (backtest_points or 0) + 1
         window_ns = (
             min(buckets * sampling_ns, MAX_DEFAULT_WINDOW_NS) if sampling_ns else DEFAULT_WINDOW_NS
         )
+    # History ends now; with sampling_interval at the edge of the last full bucket, so the
+    # bucket still filling never reaches the model.
+    now_ns = _time.time_ns()
+    history_end_ns = now_ns - now_ns % sampling_ns if sampling_ns else now_ns
+    # The server refuses a range that holds nothing, so a window inside the bucket still
+    # filling reads one microsecond and finds no rows.
+    history_start_ns = min(now_ns - window_ns, history_end_ns - 1000) if window_ns else None
 
     req = ForecastRequest(
         source_measurement=cfg.get("source_measurement"),
@@ -884,6 +894,8 @@ def _resolve(cfg: dict, scheduled: bool) -> ForecastRequest:
         series_limit=cfg.get("series_limit"),
         window_ns=window_ns,
         default_window=default_window,
+        history_start_ns=history_start_ns,
+        history_end_ns=history_end_ns,
         point_limit=point_limit,
         sampling_ns=sampling_ns,
         horizon_steps=cfg.get("horizon_steps"),
@@ -1040,6 +1052,11 @@ def _to_ns(value) -> int | None:
     return (value - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
+def _iso(ns: int) -> str:
+    """Nanoseconds as an ISO 8601 UTC time, for a query parameter."""
+    return (_EPOCH + timedelta(microseconds=ns // 1000)).isoformat()
+
+
 def _numeric(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -1084,8 +1101,9 @@ def _measurement_tags(influxdb3_local, req: ForecastRequest) -> list[str]:
 def _where(req: ForecastRequest, params: dict) -> str:
     """The WHERE clause shared by the series and the data queries."""
     clauses = [f"{_quote_ident(req.field)} IS NOT NULL"]
-    if req.window_ns:
-        clauses.append(f"time > now() - INTERVAL '{req.window_ns // 10**9} seconds'")
+    params["history_start"] = _iso(req.history_start_ns)
+    params["history_end"] = _iso(req.history_end_ns)
+    clauses.append("time >= $history_start AND time < $history_end")
     for i, (tag, values) in enumerate(req.tag_filter.items()):
         placeholders = []
         for j, value in enumerate(values):
@@ -1398,8 +1416,10 @@ def _read_query(influxdb3_local, req: ForecastRequest, task_id: str) -> tuple[li
     if req.window_ns:
         # Repeats the server's filter, or applies it when the query could not be wrapped;
         # before the split, so a series with no rows in the window does not exist.
-        cutoff = _time.time_ns() - req.window_ns
-        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) > cutoff]
+        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) >= req.history_start_ns]
+    if req.sampling_ns:
+        # The query defines its history, so only the buckets of sampling_interval end it.
+        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) < req.history_end_ns]
     if not rows:
         return [], 0
     columns = list(dict.fromkeys(column for row in rows for column in row))
@@ -1464,15 +1484,11 @@ def _bucket(series: Series, step_ns: int) -> None:
 def _regularize(series: Series, req: ForecastRequest, limit: int) -> None:
     """Lay the series on a regular grid, as Chronos reads points as equally spaced.
 
-    With sampling_interval the cells are its buckets, without the one still filling;
-    raw points go to the nearest cell of a grid at their spacing (_grid_anchor).
-    Points in one cell are averaged, an empty cell is a gap (NaN), and the last limit
-    cells are kept.
+    With sampling_interval the cells are its buckets; raw points go to the nearest cell
+    of a grid at their spacing (_grid_anchor). Points in one cell are averaged, an empty
+    cell is a gap (NaN), and the last limit cells are kept.
     """
     step = req.sampling_ns
-    if step and series.times and series.times[-1] + step > _time.time_ns():
-        series.times, series.values = series.times[:-1], series.values[:-1]
-        series.covariates = [(name, column[:-1]) for name, column in series.covariates]
     if not series.times:
         series.step_ns = step or FALLBACK_STEP_NS
         return
@@ -1774,10 +1790,8 @@ def _run_forecast(influxdb3_local, req: ForecastRequest, task_id: str) -> dict:
     limit = _history_limit(pipeline, req) if pipeline else req.point_limit or FALLBACK_CONTEXT
     held_out = req.backtest_points or 0
     if not req.query:
-        # At most limit points per series, plus the backtest's held-out ones; with
-        # sampling_interval one bucket more, as the one still filling is dropped.
-        read = limit + held_out + (1 if req.sampling_ns else 0)
-        series_list = _read_measurement(influxdb3_local, req, plan, read)
+        # At most limit points per series, plus the backtest's held-out ones.
+        series_list = _read_measurement(influxdb3_local, req, plan, limit + held_out)
 
     for series in series_list:
         _regularize(series, req, limit + held_out)

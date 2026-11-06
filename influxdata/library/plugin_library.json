@@ -348,7 +348,7 @@
                 "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/chronos_forecasting/README.md",
                 "required_plugins": [],
                 "required_libraries": ["chronos-forecasting", "torch", "influxdata-plugin-utils>=0.5.0"],
-                "last_update": "2026-10-30",
+                "last_update": "2026-11-06",
                 "trigger_types_supported": ["scheduler", "http"]
             },
             {

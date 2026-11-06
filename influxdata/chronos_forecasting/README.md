@@ -22,9 +22,8 @@ request with the forecast.
 - **Covariates**: Chronos-2 models take extra fields as past covariates.
 - **Backtest**: on request, the forecast is checked on the latest history in the same model call: the share of points
   inside each interval and the mean absolute error.
-- **Shared forecasting interface**: requests, responses, errors and stored rows follow the contract InfluxDB 3 Explorer
-  uses for every forecasting plugin, and [`forecast_interface.json`](forecast_interface.json) describes what this plugin
-  supports.
+- **Shared forecasting interface**: requests, responses, errors and stored rows follow the contract shared by
+  forecasting plugins, and [`forecast_interface.json`](forecast_interface.json) describes what this plugin supports.
 
 ## Software requirements
 
@@ -548,8 +547,12 @@ The plugin logs a `bad_request` at `WARN` and the other codes at `ERROR`.
   With neither, it keeps the last 512 cells.
 - Without `window`, a read in measurement mode covers `point_limit` buckets of `sampling_interval` back from now (at
   most 365 days, plus `backtest_points` and the bucket still filling), or the last day of raw points.
+  This keeps every read bounded by time: an unbounded read would scan the whole table on each call, and on InfluxDB 3
+  Core it hits `query-file-limit` (432 files).
   Pick `sampling_interval` so that this covers several seasonal cycles: `1h` with the default 512 buckets is 21 days.
   With `query` there is no default window; see [Forecasting a query](#forecasting-a-query).
+- In measurement mode the history ends now, so a row with a later timestamp is not read until its time comes: with a
+  device whose clock runs an hour fast, its latest hour stays out of the forecast.
 - Chronos reads points as equally spaced, so history reaches the model on a grid.
   With `sampling_interval` the cells are its buckets, aligned like `date_bin`, and the bucket still filling is left out.
   Without it, the step is the median spacing of the points, rounded to a round unit about 1% of it (so 10 s, 1 h or 1
@@ -582,6 +585,11 @@ The plugin reads the whole result into memory before `point_limit` cuts it, so t
 With `window`, the server filters the result by its `time` column, as
 `SELECT * FROM (<query>) WHERE time > now() - <window>`; a query that cannot be wrapped this way, such as one with an
 integer `time`, is read whole and filtered by the plugin, which logs a warning.
+
+The query defines its own history, so rows with later timestamps stay, and the forecast continues after them, as with
+day-ahead prices.
+To leave them out, add `WHERE time < now()` to the query.
+Only `sampling_interval` ends the result at the last full bucket.
 
 ### Output data structure
 
@@ -621,10 +629,11 @@ give each its own `forecast_id` and read by it.
 
 ### Forecast interface manifest
 
-[`forecast_interface.json`](forecast_interface.json) describes this plugin under the shared forecasting interface,
+[`forecast_interface.json`](forecast_interface.json) describes this plugin under the
+[shared forecasting interface](https://github.com/influxdata/influxdb3_plugins/blob/main/docs/FORECASTING_INTERFACE.md),
 contract version 1: the engine's name and description, its modes, filters, history and horizon controls, models with
 their labels and limits, and advanced parameters.
-InfluxDB 3 Explorer reads it from the plugin's registry package to configure its forecasting UI.
+An app can read it from the plugin's registry package to configure its UI.
 The plugin never reads it: it validates every request on its own and runs any model the library can load.
 
 ## Code overview
@@ -648,8 +657,8 @@ The plugin never reads it: it validates every request on its own and runs any mo
   `EXPLAIN` for its source measurement, run it before the model loads (with `window` as a filter the server applies when
   the query can be wrapped), split the result into series by column type, sort them, and apply `series_limit`.
 - **`_history_limit(pipeline, req)`** / **`_regularize(series, req, limit)`**: cap the history at `point_limit` and the
-  model's context, and lay it on a grid: the `sampling_interval` buckets without the one still filling, or, for raw
-  points, a grid at their median spacing that keeps their rhythm (`_grid_anchor`); empty cells are gaps.
+  model's context, and lay it on a grid: the `sampling_interval` buckets, or, for raw points, a grid at their median
+  spacing that keeps their rhythm (`_grid_anchor`); empty cells are gaps.
 - **`_pipeline_for(influxdb3_local, req, task_id)`**: loads the model when a series has enough points, either from the
   row counts or, when rows arrived between two queries, from the history read, and checks it for covariates.
 - **`_quantile_plan(pipeline, levels)`** / **`_predict(pipeline, inputs, horizon, quantiles)`**: turn each level `L`

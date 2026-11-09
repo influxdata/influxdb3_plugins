@@ -2,8 +2,8 @@ manifest_schema_version = "1.3"
 
 [plugin]
 name = "prophet_forecasting"
-version = "1.6.0"
-description = "Provides time series forecasting capabilities for InfluxDB 3 data using the Prophet library."
+version = "2.0.0"
+description = "Time series forecasting with Prophet: on-demand HTTP and scheduled forecasts of a measurement field or any SQL query, per series, with prediction intervals and optional validation."
 triggers = ["process_scheduled_call", "process_request"]
 homepage = "https://www.influxdata.com/"
 repository = "https://github.com/influxdata/influxdb3_plugins/tree/main/influxdata/prophet_forecasting"
@@ -11,12 +11,12 @@ documentation = "https://github.com/influxdata/influxdb3_plugins/blob/main/influ
 exclude = [
   ".git/", ".venv/", "__pycache__/", "*.pyc", "tests/**",
   ".claude/", ".vscode/", ".idea/", ".DS_Store",
-  "*.py", "!prophet_forecasting.py",
+  "*.py", "!prophet_forecasting.py", "!forecast_interface.json",
 ]
 
 [dependencies]
-database_version = ">=3.0.0"
-python = ["influxdata-plugin-utils>=0.4.0", "pandas", "requests", "prophet"]
+database_version = ">=3.8.2"
+python = ["influxdata-plugin-utils>=0.5.0", "pandas>=2.0", "requests", "prophet"]
 
 [[dependencies.plugins]]
 index_url = "https://github.com/influxdata/influxdb3_plugins/releases/download/registry/index.json"

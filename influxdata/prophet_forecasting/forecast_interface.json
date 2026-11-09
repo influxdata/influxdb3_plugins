@@ -1,0 +1,121 @@
+{
+  "forecast_contract_version": 1,
+  "name": "Prophet",
+  "description": "Meta's Prophet, run inside InfluxDB: fits a model to each series, strong on daily and weekly cycles and holidays over long histories. The first forecast of a series trains its model.",
+  "modes": [
+    "on_demand",
+    "scheduled"
+  ],
+  "accepts_query": true,
+  "filter": [
+    "tag_filter",
+    "sql_filter"
+  ],
+  "group_by": true,
+  "history": [
+    "window",
+    "point_limit"
+  ],
+  "sampling": true,
+  "horizon": [
+    "steps",
+    "duration"
+  ],
+  "backtest": true,
+  "data_leaves_server": false,
+  "credentials": [],
+  "models": [
+    {
+      "id": "prophet",
+      "label": "Prophet",
+      "default": true,
+      "levels": [
+        0.5,
+        0.8,
+        0.9,
+        0.95
+      ],
+      "min_points": 3,
+      "max_history_points": null,
+      "max_horizon_steps": null
+    }
+  ],
+  "advanced_params": [
+    {
+      "name": "seasonality_mode",
+      "type": "string",
+      "default": "additive",
+      "values": [
+        "additive",
+        "multiplicative"
+      ]
+    },
+    {
+      "name": "changepoint_prior_scale",
+      "type": "number",
+      "default": 0.05
+    },
+    {
+      "name": "changepoints",
+      "type": "list",
+      "default": []
+    },
+    {
+      "name": "holiday_date_list",
+      "type": "list",
+      "default": []
+    },
+    {
+      "name": "holiday_names",
+      "type": "list",
+      "default": []
+    },
+    {
+      "name": "holiday_country_names",
+      "type": "list",
+      "default": []
+    },
+    {
+      "name": "forecast_freq",
+      "type": "string"
+    },
+    {
+      "name": "model_mode",
+      "type": "string",
+      "default": "train",
+      "values": [
+        "train",
+        "predict"
+      ]
+    },
+    {
+      "name": "unique_suffix",
+      "type": "string"
+    },
+    {
+      "name": "validation_window",
+      "type": "string"
+    },
+    {
+      "name": "validation_alignment",
+      "type": "string",
+      "default": "position",
+      "values": [
+        "position",
+        "nearest"
+      ]
+    },
+    {
+      "name": "msre_threshold",
+      "type": "number"
+    },
+    {
+      "name": "start_time",
+      "type": "string"
+    },
+    {
+      "name": "end_time",
+      "type": "string"
+    }
+  ]
+}

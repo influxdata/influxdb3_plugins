@@ -154,7 +154,7 @@ class FakeLocal:
         """The rows with the forecast field, within the time bounds passed as parameters."""
         field = re.search(r'"(\w+)" IS NOT NULL', sql).group(1)
         start = plugin._to_ns(self.params["history_start"])
-        end = plugin._to_ns(self.params["history_end"])
+        end = plugin._to_ns(self.params["history_end"]) if "history_end" in self.params else math.inf
         return [
             row
             for row in self.rows
@@ -437,6 +437,22 @@ def test_duration_refuses_anything_else(raw):
 
 
 @pytest.mark.parametrize(
+    "raw, offset",
+    [("latest", None), ("now", 0), ("now+1h", 3600 * SECOND), (" now+5min ", 5 * MINUTE)],
+)
+def test_history_end_forms(raw, offset):
+    assert plugin._history_end(raw) == offset
+
+
+@pytest.mark.parametrize(
+    "raw", ["", "Now", "now-1h", "now+", "now+0s", "now+1m", "1h", "tomorrow", 5, None]
+)
+def test_history_end_refuses_anything_else(raw):
+    with pytest.raises(ValueError):
+        plugin._history_end(raw)
+
+
+@pytest.mark.parametrize(
     "ns, text",
     [(86400 * SECOND, "1d"), (90 * SECOND, "90s"), (7 * 86400 * SECOND, "1w"), (5, "5ns")],
 )
@@ -671,6 +687,9 @@ def test_what_counts_as_set_in_a_choice(value, given):
             "the horizon is 120 points",
         ),
         ({"backtest_points": 1025}, "backtest_points is 1025"),
+        ({"window": "200000w"}, "years 1 to 9999"),
+        ({"history_end": "now+500000w"}, "years 1 to 9999"),
+        ({"source_measurement": None, "field": None, "query": QUERY, "history_end": "now+500000w"}, "years 1 to 9999"),
         ({"group_by": ["model"], "write_results": True}, "clashes"),
         ({"group_by": ["forecast"], "write_results": True}, "clashes"),
         ({"group_by": ["forecast_id"], "write_results": True}, "clashes"),
@@ -697,6 +716,7 @@ def test_requests_refused_before_any_query_or_model(keys, fragment, hub):
         {"max_forecast_points": 0},
         {"window": "1m"},
         {"sampling_interval": "1q"},
+        {"history_end": "tomorrow"},
         {"levels": [1.5]},
         {"write_results": "maybe"},
         {"group_by": 5},
@@ -913,7 +933,8 @@ def test_non_finite_values_are_null_and_not_written(hub, monkeypatch):
         ({"sampling_interval": "1min"}, 513 * 60),
         ({"sampling_interval": "1min", "point_limit": 100}, 101 * 60),
         ({"sampling_interval": "1min", "backtest_points": 12}, 525 * 60),
-        ({"sampling_interval": "1d"}, 365 * 86400),
+        # NOW sits on the edge of a minute, not of a day: the start moves up to the next day's edge.
+        ({"sampling_interval": "1d"}, 365 * 86400 - (-(NOW - 365 * 86400 * SECOND) % (86400 * SECOND)) // SECOND),
         ({"window": "6h"}, 6 * 3600),
         ({"window": "6h", "sampling_interval": "1min"}, 6 * 3600),
     ],
@@ -924,11 +945,10 @@ def test_every_measurement_read_is_bounded_by_time(keys, seconds):
     answered(forecast(local, **keys))
 
     for query in (local.history_query(), local.sent("count(*) AS __rows")[0]):
-        assert "time >= $history_start AND time < $history_end" in query.sql
+        assert "time >= $history_start" in query.sql
         assert query.params["history_start"] == plugin._iso(NOW - seconds * SECOND)
-    # NOW sits on the edge of a minute, not of a day.
-    day_bucket = keys.get("sampling_interval") == "1d"
-    assert query.params["history_end"] == plugin._iso(NOW - NOW % (1440 * MINUTE) if day_bucket else NOW)
+        # history_end latest leaves the end open.
+        assert "$history_end" not in query.sql
 
 
 @pytest.mark.parametrize(
@@ -938,7 +958,10 @@ def test_every_measurement_read_is_bounded_by_time(keys, seconds):
         ({"point_limit": 30}, 30),
         ({"point_limit": 5000}, 2048),
         ({"window": "1d"}, 2048),
-        ({"point_limit": 30, "sampling_interval": "1min"}, 30),
+        # One bucket more, as a last bucket still filling is dropped.
+        ({"point_limit": 30, "sampling_interval": "1min"}, 31),
+        ({"point_limit": 30, "sampling_interval": "1min", "history_end": "now+1h"}, 31),
+        ({"point_limit": 30, "sampling_interval": "1min", "history_end": "now"}, 31),
         ({"point_limit": 30, "backtest_points": 5}, 35),
     ],
 )
@@ -1006,55 +1029,127 @@ def test_iso_is_a_utc_time_the_timestamps_read_back():
     assert plugin._to_ns(plugin._iso(NOW)) == NOW
 
 
-def test_a_row_from_the_future_is_not_history(at_0840, hub):
+def test_by_default_history_reaches_the_latest_row(at_0840, hub):
     local = FakeLocal(rows_with_a_fast_clock())
 
     result = answered(forecast(local))["results"][0]
+
+    assert "$history_end" not in local.history_query().sql
+    assert max(model_input(hub.pipeline)) == 500.0
+    assert first_time(result) == NOW + 75 * MINUTE
+
+
+def test_history_end_now_leaves_out_a_row_from_the_future(at_0840, hub):
+    local = FakeLocal(rows_with_a_fast_clock())
+
+    result = answered(forecast(local, history_end="now"))["results"][0]
 
     assert local.history_query().params["history_end"] == plugin._iso(NOW_0840)
     assert max(model_input(hub.pipeline)) == 20.0
     assert first_time(result) == NOW + 40 * MINUTE
 
 
-def test_history_with_sampling_ends_at_the_last_full_bucket(at_0840, hub):
+@pytest.mark.parametrize(
+    "history_end, end, peak",
+    [("now+15min", NOW + 55 * MINUTE, 20.0), ("now+1h", NOW + 100 * MINUTE, 500.0)],
+)
+def test_history_end_reaches_that_long_past_now(history_end, end, peak, at_0840, hub):
     local = FakeLocal(rows_with_a_fast_clock())
 
-    result = answered(forecast(local, sampling_interval="1h"))["results"][0]
+    answered(forecast(local, history_end=history_end))
 
-    assert local.history_query().params["history_end"] == plugin._iso(NOW)
+    assert local.history_query().params["history_end"] == plugin._iso(end)
+    assert max(model_input(hub.pipeline)) == peak
+
+
+@pytest.mark.parametrize(
+    "history_end, end, first",
+    [
+        # The read reaches the 09:00 bucket, which ends after now and is dropped; 08:00 stays.
+        (None, None, NOW + HOUR),
+        ("now+2h", NOW + 2 * HOUR, NOW + HOUR),
+        # The read ends at 09:00 or earlier; the 08:00 bucket is the last and ends after now.
+        ("now+1h", NOW + HOUR, NOW),
+        # The read ends at 08:00, so every bucket read has ended.
+        ("now", NOW, NOW),
+    ],
+)
+def test_with_sampling_a_last_bucket_ending_after_now_is_left_out(
+    history_end, end, first, at_0840, hub
+):
+    local = FakeLocal(rows_with_a_fast_clock())
+
+    body = answered(forecast(local, sampling_interval="1h", history_end=history_end))
+
+    assert local.history_query().params.get("history_end") == (plugin._iso(end) if end else None)
     assert max(model_input(hub.pipeline)) == 20.0
+    assert first_time(body["results"][0]) == first
+
+
+def test_a_window_starts_at_a_bucket_edge_inside_it(at_0840, hub):
+    """window=24h at 08:40 reads from 09:00 yesterday, not 08:40, so the first bucket is whole."""
+    rows = history(300, step=5 * MINUTE, end=NOW + 35 * MINUTE, value=lambda i: 20.0)
+    rows += [{"time": NOW - 23 * HOUR - 10 * MINUTE, "usage": 500.0}]  # 08:50 yesterday, inside 24h
+    local = FakeLocal(rows)
+
+    result = answered(forecast(local, window="24h", sampling_interval="1h"))["results"][0]
+
+    assert local.history_query().params["history_start"] == plugin._iso(NOW - 23 * HOUR)
+    assert result["points_read"] == 23
+    assert max(model_input(hub.pipeline)) == 20.0
+
+
+def test_only_the_last_bucket_is_dropped(at_0840, hub):
+    """A bucket holding now stays when a later one follows: a fast clock has filled it."""
+    rows = history(144, step=5 * MINUTE, end=NOW + 55 * MINUTE, value=lambda i: 20.0)
+    rows += [{"time": NOW + 65 * MINUTE, "usage": 500.0}]
+
+    result = answered(forecast(FakeLocal(rows), sampling_interval="1h"))["results"][0]
+
+    assert max(model_input(hub.pipeline)) == 20.0
+    assert first_time(result) == NOW + HOUR
+    assert result["points_read"] == 12
+
+
+def test_a_bucket_that_closed_while_the_model_loaded_is_kept(hub):
+    """The clock is read when the buckets are checked, not when the request was resolved."""
+    clocks = itertools.chain([NOW - 10 * SECOND], itertools.repeat(NOW + 10 * SECOND))
+    plugin._time.time_ns = lambda: next(clocks)
+    rows = history(144, step=5 * MINUTE, end=NOW - 5 * MINUTE, value=lambda i: 20.0)
+
+    result = answered(forecast(FakeLocal(rows), sampling_interval="1h"))["results"][0]
+
+    # Requested at 07:59:50 and read at 08:00:10: the 07:00 bucket has ended by then.
     assert first_time(result) == NOW
+    assert result["points_read"] == 12
 
 
-def test_the_backtest_holds_out_no_row_from_the_future(at_0840, hub):
-    result = answered(forecast(FakeLocal(rows_with_a_fast_clock()), backtest_points=3))["results"][0]
+def test_history_end_now_holds_out_no_row_from_the_future_for_the_backtest(at_0840, hub):
+    local = FakeLocal(rows_with_a_fast_clock())
+
+    result = answered(forecast(local, history_end="now", backtest_points=3))["results"][0]
 
     assert result["backtest"]["points"] == 3
     assert result["backtest"]["mae"] == pytest.approx(0.0)
     assert max(model_input(hub.pipeline)) == 20.0
 
 
-def test_a_series_wholly_in_the_future_does_not_exist_yet():
+@pytest.mark.parametrize("history_end, hosts", [(None, ["a", "b"]), ("now", ["a"])])
+def test_a_series_wholly_in_the_future_exists_only_when_read(history_end, hosts):
     rows = history(host="a") + history(end=NOW + 20 * HOUR, host="b")
 
-    body = answered(forecast(FakeLocal(rows), group_by=["host"]))
+    body = answered(forecast(FakeLocal(rows), group_by=["host"], history_end=history_end))
 
-    assert [r["tags"]["host"] for r in body["results"]] == ["a"]
-    assert body["series_total"] == 1
-
-
-def test_without_group_by_a_future_only_series_has_too_few_points(hub):
-    result = answered(forecast(FakeLocal(history(end=NOW + 20 * HOUR))))["results"][0]
-
-    assert result["code"] == "too_few_points"
-    assert hub.loads == []
+    assert [r["tags"]["host"] for r in body["results"]] == hosts
+    assert body["series_total"] == len(hosts)
 
 
-def test_mixed_tag_sets_in_the_future_do_not_count():
+def test_mixed_tag_sets_in_the_future_count_only_when_read():
     rows = history(host="a") + history(5, end=NOW + 10 * HOUR, host="a")
     rows += history(5, end=NOW + 10 * HOUR, host="b")
 
-    assert answered(forecast(FakeLocal(rows)))["results"][0]["points_read"] == 20
+    assert "several tag sets" in refused(forecast(FakeLocal(rows)))
+    assert answered(forecast(FakeLocal(rows), history_end="now"))["results"][0]["points_read"] == 20
 
 
 def test_a_query_keeps_its_rows_from_the_future(at_0840, hub):
@@ -1070,19 +1165,31 @@ def test_a_query_with_a_window_keeps_its_rows_from_the_future(at_0840, hub):
     assert max(model_input(hub.pipeline)) == 500.0
 
 
-def test_a_query_with_sampling_ends_at_the_last_full_bucket(at_0840, hub):
-    rows = rows_with_a_fast_clock()
+def test_history_end_now_leaves_out_a_querys_rows_from_the_future(at_0840, hub):
+    local = FakeLocal(query_rows=rows_with_a_fast_clock())
 
-    result = answered(forecast_query(FakeLocal(query_rows=rows), sampling_interval="1h"))["results"][0]
+    result = answered(forecast_query(local, history_end="now"))["results"][0]
 
     assert max(model_input(hub.pipeline)) == 20.0
-    assert first_time(result) == NOW
+    assert first_time(result) == NOW + 40 * MINUTE
 
 
-def test_a_query_series_wholly_after_the_last_full_bucket_does_not_exist(at_0840):
+@pytest.mark.parametrize("history_end, first", [(None, NOW + HOUR), ("now", NOW)])
+def test_a_query_with_sampling_leaves_out_the_bucket_still_filling(
+    history_end, first, at_0840, hub
+):
+    local = FakeLocal(query_rows=rows_with_a_fast_clock())
+
+    body = answered(forecast_query(local, sampling_interval="1h", history_end=history_end))
+
+    assert max(model_input(hub.pipeline)) == 20.0
+    assert first_time(body["results"][0]) == first
+
+
+def test_a_query_series_wholly_after_the_history_end_does_not_exist(at_0840):
     rows = history(end=NOW + 10 * HOUR, host="b")
 
-    body = answered(forecast_query(FakeLocal(query_rows=rows), sampling_interval="1h"))
+    body = answered(forecast_query(FakeLocal(query_rows=rows), history_end="now"))
 
     assert body["series_total"] == 0
 
@@ -1090,7 +1197,8 @@ def test_a_query_series_wholly_after_the_last_full_bucket_does_not_exist(at_0840
 def test_a_window_inside_the_bucket_still_filling_finds_no_rows(at_0840, hub):
     local = FakeLocal(rows_with_a_fast_clock())
 
-    result = answered(forecast(local, window="30min", sampling_interval="1h"))["results"][0]
+    keys = {"window": "30min", "sampling_interval": "1h", "history_end": "now"}
+    result = answered(forecast(local, **keys))["results"][0]
 
     assert result["code"] == "too_few_points"
     assert hub.loads == []
@@ -1109,11 +1217,12 @@ def test_a_window_inside_the_bucket_still_filling_finds_no_rows(at_0840, hub):
         {"sampling_interval": "2w"},
     ],
 )
-def test_every_read_range_holds_something(keys, at_0840):
+@pytest.mark.parametrize("history_end", ["now", "now+1min"])
+def test_every_read_range_holds_something(keys, history_end, at_0840):
     """The server answers an error to a range whose start is not before its end."""
     local = FakeLocal(history())
 
-    forecast(local, **keys)
+    forecast(local, history_end=history_end, **keys)
 
     for query in local.sent("$history_start"):
         start, end = query.params["history_start"], query.params["history_end"]
@@ -1162,6 +1271,21 @@ def test_no_history_with_group_by_has_no_series(hub):
             "need >= 10 points, got 4 in the last 513min; "
             "set window, raise point_limit or shorten sampling_interval",
         ),
+        # The window is too short for the buckets, whatever the data; NOW is on an hour's edge.
+        (
+            {"window": "30min", "sampling_interval": "1h", "history_end": "now"},
+            "need >= 10 points, got 0 in the last 30min; the window fits 0 whole 1h buckets",
+        ),
+        (
+            {"window": "3h", "sampling_interval": "1h"},
+            "need >= 10 points, got 1 in the last 3h; the window fits 3 whole 1h buckets",
+        ),
+        (
+            {"window": "1h", "sampling_interval": "1h"},
+            "need >= 10 points, got 1 in the last 1h; the window fits 1 whole 1h bucket",
+        ),
+        # A window that holds enough buckets gets no hint about them.
+        ({"window": "1d", "sampling_interval": "1h"}, "need >= 10 points, got 1 in the last 1d"),
     ],
 )
 def test_too_few_points_says_what_was_read(keys, message, hub):
@@ -2472,6 +2596,7 @@ def test_scheduled_arguments_are_strings():
         levels="0.5 0.8",
         point_limit="15",
         window="1d",
+        history_end="now+1h",
         series_limit="1",
         forecast_id="ops",
         target_measurement="fc",
@@ -2483,6 +2608,7 @@ def test_scheduled_arguments_are_strings():
     assert {row.measurement for row in local.written} == {"fc"}
     assert {row.database for row in local.written} == {"archive"}
     assert '"region" = $tf0_0' in local.history_query().sql
+    assert local.history_query().params["history_end"] == plugin._iso(NOW + 60 * MINUTE)
 
 
 def test_toml_overrides_trigger_arguments(tmp_path):
@@ -2600,6 +2726,8 @@ def test_manifest_matches_the_plugin():
     for param in manifest["advanced_params"]:
         assert param["name"] in plugin.PLUGIN_KEYS
         assert param["name"] not in plugin.CONTRACT_KEYS
+    param_defaults = {param["name"]: param.get("default") for param in manifest["advanced_params"]}
+    assert param_defaults["history_end"] == "latest"
 
 
 def test_the_manifest_ships_and_the_tests_do_not():

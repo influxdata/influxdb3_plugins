@@ -2,7 +2,7 @@ manifest_schema_version = "1.2"
 
 [plugin]
 name = "chronos_forecasting"
-version = "1.0.1"
+version = "1.1.0"
 description = "Zero-shot forecasting with Amazon Chronos models: on-demand HTTP and scheduled forecasts of a measurement field or any SQL query, per series, with prediction intervals."
 triggers = ["process_scheduled_call", "process_request"]
 homepage = "https://www.influxdata.com/"

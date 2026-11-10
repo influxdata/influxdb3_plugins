@@ -98,6 +98,11 @@
       "name": "covariate_fields",
       "type": "list",
       "default": []
+    },
+    {
+      "name": "history_end",
+      "type": "string",
+      "default": "latest"
     }
   ]
 }

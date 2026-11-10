@@ -156,12 +156,12 @@ An object in `models`:
 
 An object in `advanced_params`:
 
-| Field     | Required | Type   | Description                                                                                   | Example                         |
-|-----------|----------|--------|-----------------------------------------------------------------------------------------------|---------------------------------|
-| `name`    | Yes      | string | Request key, sent at the top level of the body. Must not be a [reserved key](#reserved-keys). | `"covariate_fields"`            |
-| `type`    | Yes      | string | Value type, so the app renders the right input: `string`, `number`, `bool`, `list`, `object`. | `"list"`                        |
-| `default` | No       | any    | Default value to show.                                                                        | `[]`                            |
-| `values`  | No       | array  | Allowed values, so the app renders a dropdown instead of free input.                          | `["additive","multiplicative"]` |
+| Field     | Required | Type   | Description                                                                                                                                                              | Example                         |
+|-----------|----------|--------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------|
+| `name`    | Yes      | string | Request key, sent at the top level of the body. Must not be a [reserved key](#reserved-keys), except an [optional shared key](#optional-shared-keys) the plugin accepts. | `"covariate_fields"`            |
+| `type`    | Yes      | string | Value type, so the app renders the right input: `string`, `number`, `bool`, `list`, `object`.                                                                            | `"list"`                        |
+| `default` | No       | any    | Default value to show.                                                                                                                                                   | `[]`                            |
+| `values`  | No       | array  | Allowed values, so the app renders a dropdown instead of free input.                                                                                                     | `["additive","multiplicative"]` |
 
 Example, shortened to one model:
 
@@ -236,9 +236,10 @@ gives `bad_request`.
 | `sql_filter`         | No             | string            | SQL condition on tags and fields, without the `WHERE` keyword, inserted into the query as is. Applies together with `tag_filter`.                                                                   | `"usage > 0"`                  |
 | `group_by`           | No             | array(string)     | Tags to split by; each distinct combination of their values is one series. Default: one series of all matching rows.                                                                                | `["host"]`                     |
 | `series_limit`       | No             | integer           | At least 1 and at most the plugin's series cap. Forecasts only the first N forecasts, and skips the rest. See [Series order and limit](#series-order-and-limit).                                    | `5`                            |
-| `window`             | No             | string (duration) | History as a time window ending now. See [History](#history).                                                                                                                                       | `"6h"`                         |
+| `window`             | No             | string (duration) | History as a time window starting this long before now. See [History](#history).                                                                                                                    | `"6h"`                         |
 | `point_limit`        | No             | integer           | History as the most recent points of each series, at least the model's `min_points`. See [History](#history).                                                                                       | `512`                          |
 | `sampling_interval`  | No             | string (duration) | Resamples history to a grid of this step before the model: the mean of each bucket, and an empty bucket stays a gap. The response's `step_ms` equals it.                                            | `"30s"`                        |
+| `history_end`        | No             | string            | [Optional shared key](#optional-shared-keys): where history ends, `latest`, `now` or `now+<duration>`. Default: the plugin's. See [History](#history).                                              | `"now"`                        |
 | `horizon_steps`      | One of the two | integer           | Horizon as a number of future points, at least 1. See [Horizon](#horizon).                                                                                                                          | `64`                           |
 | `horizon_duration`   | One of the two | string (duration) | Horizon as a length of time. See [Horizon](#horizon).                                                                                                                                               | `"1h"`                         |
 | `levels`             | No             | array(number)     | Interval levels, each between 0 and 1. Level `L` is the interval between the quantiles `(1 - L) / 2` and `(1 + L) / 2`. Default: the plugin's. A level the model can't produce gives `null` bounds. | `[0.5, 0.8]`                   |
@@ -291,6 +292,7 @@ For plugins whose manifest `accepts_query` is `true`. The query defines the seri
 | `window`             | No                        | string (duration) | Keeps the result's rows inside this time window. Usually omitted, as the query defines its history.                                                                                                 | `"6h"`                           |
 | `point_limit`        | No                        | integer           | How many of the most recent points of each series reach the model.                                                                                                                                  | `512`                            |
 | `sampling_interval`  | No                        | string (duration) | Resamples the result to a grid of this step before the model. Usually omitted, as the query defines the aggregation.                                                                                | `"30s"`                          |
+| `history_end`        | No                        | string            | [Optional shared key](#optional-shared-keys): where history ends, `latest`, `now` or `now+<duration>`. Default: the plugin's. See [History](#history).                                              | `"now"`                          |
 | `horizon_steps`      | One of the two            | integer           | Horizon as a number of future points, at least 1. See [Horizon](#horizon).                                                                                                                          | `64`                             |
 | `horizon_duration`   | One of the two            | string (duration) | Horizon as a length of time. See [Horizon](#horizon).                                                                                                                                               | `"1h"`                           |
 | `levels`             | No                        | array(number)     | Interval levels, each between 0 and 1. Level `L` is the interval between the quantiles `(1 - L) / 2` and `(1 + L) / 2`. Default: the plugin's. A level the model can't produce gives `null` bounds. | `[0.5, 0.8]`                     |
@@ -386,6 +388,18 @@ With `sampling_interval`, history ends at the last full bucket, so a bucket stil
 
 In query mode, the query defines its own history and keeps later rows. Only `sampling_interval` ends the result at the
 last full bucket.
+
+A plugin that accepts [`history_end`](#optional-shared-keys) ends history by its value instead, in both modes, and lists
+its default in the manifest:
+
+| Value            | History ends        | With `sampling_interval`          |
+|------------------|---------------------|-----------------------------------|
+| `latest`         | At the latest row   | At the latest bucket              |
+| `now`            | Now                 | At the last full bucket           |
+| `now+<duration>` | That long after now | At the last full bucket before it |
+
+In every case, a last bucket that ends after now is dropped, as it may still be filling. `window` still counts back from
+now. `point_limit`, `backtest_points`, the series and their tags apply to the history this gives.
 
 ### Source database
 
@@ -625,6 +639,7 @@ The arguments select the data in measurement mode or in query mode, as a request
 | `window`             | No                        | string (duration) | History as a time window, rolling with each run. See [History](#history).                                                                                         | `6h`                       |
 | `point_limit`        | No                        | integer           | History as the most recent points of each series, at least the model's `min_points`. See [History](#history).                                                     | `512`                      |
 | `sampling_interval`  | No                        | string (duration) | Resamples history to a grid of this step before the model: the mean of each bucket, and an empty bucket stays a gap.                                              | `30s`                      |
+| `history_end`        | No                        | string            | [Optional shared key](#optional-shared-keys): where history ends, `latest`, `now` or `now+<duration>`. Default: the plugin's. See [History](#history).            | `now`                      |
 | `horizon_steps`      | One of the two            | integer           | Horizon as a number of future points, at least 1. See [Horizon](#horizon).                                                                                        | `64`                       |
 | `horizon_duration`   | One of the two            | string (duration) | Horizon as a length of time. See [Horizon](#horizon).                                                                                                             | `1h`                       |
 | `levels`             | No                        | string or list    | Interval levels, each between 0 and 1. Default: the plugin's. A level the model can't produce isn't written.                                                      | `0.5 0.8`                  |
@@ -833,6 +848,16 @@ server, which is the only way for a scheduled or on-write trigger. A header wins
 A missing or rejected secret gives `unauthorized`. An app asks the user for a secret only after this answer, so it never
 asks for a secret already set on the server.
 
+### Optional shared keys
+
+A plugin doesn't have to accept these keys. One that does gives them the meaning described here and lists them in its
+manifest `advanced_params`, with its default. A plugin that doesn't gives `bad_request`, and no plugin uses these names
+for anything else.
+
+| Key           | Type   | Description                                                                                                      |
+|---------------|--------|------------------------------------------------------------------------------------------------------------------|
+| `history_end` | string | Where history ends: `latest`, `now`, or `now+<duration>` with a [duration](#durations). See [History](#history). |
+
 ### Reserved keys
 
 An advanced parameter can't reuse these keys:
@@ -840,3 +865,6 @@ An advanced parameter can't reuse these keys:
 `source_measurement`, `field`, `tag_filter`, `sql_filter`, `group_by`, `series_limit`, `query`, `source_database`,
 `window`, `point_limit`, `sampling_interval`, `horizon_steps`, `horizon_duration`, `levels`, `model`, `write_results`,
 `target_measurement`, `target_database`, `forecast_id`, `backtest_points`.
+
+The [optional shared keys](#optional-shared-keys) are reserved too: `history_end`. An advanced parameter may use one of
+them only with the meaning described there.

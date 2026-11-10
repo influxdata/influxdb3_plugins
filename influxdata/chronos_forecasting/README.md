@@ -81,9 +81,10 @@ In trigger arguments every value is a string; see [Value formats](#value-formats
 | `sql_filter`          | string          | none                              | SQL condition on tags and fields, without `WHERE`, AND-ed with `tag_filter` and inserted as is; see [Security](#security). Not with `query` |
 | `group_by`            | list            | none                              | Tags to split by; each distinct combination is its own series; see [Series](#series). Not with `query`                                      |
 | `series_limit`        | integer ≥ 1     | none                              | Forecast only the first N forecasts (series × fields) in the order of [Series](#series) and skip the rest; at most `max_series`             |
-| `window`              | duration        | derived                           | History as a time window ending now; see [History](#history)                                                                                |
+| `window`              | duration        | derived                           | History as a time window starting this long before now; see [History](#history)                                                             |
 | `point_limit`         | integer ≥ 10    | `512` without `window`            | History as the most recent cells of each series' grid, at most the model's context; see [History](#history)                                 |
 | `sampling_interval`   | duration        | none                              | Resample history to the mean per bucket; see [History](#history)                                                                            |
+| `history_end`         | string          | `latest`                          | Where history ends: `latest`, `now` or `now+<duration>`; see [History](#history)                                                            |
 | `horizon_steps`       | integer ≥ 1     | required²                         | Forecast length in points at the data spacing                                                                                               |
 | `horizon_duration`    | duration        | required²                         | Forecast length as a duration, converted to points by the data spacing                                                                      |
 | `levels`              | list of numbers | `0.5 0.8`                         | Interval levels, each between 0 and 1; a level the model cannot produce is not written                                                      |
@@ -227,9 +228,10 @@ The trigger's arguments and TOML file set defaults for the same keys; see
 | `sql_filter`          | string                          | none                              | SQL condition on tags and fields, without `WHERE`, AND-ed with `tag_filter` and inserted as is; see [Security](#security). Not with `query` |
 | `group_by`            | list                            | none                              | Tags to split by; each distinct combination is its own series; see [Series](#series). Not with `query`                                      |
 | `series_limit`        | integer ≥ 1                     | none                              | Forecast only the first N forecasts (series × fields) in the order of [Series](#series) and skip the rest; at most `max_series`             |
-| `window`              | duration                        | derived                           | History as a time window ending now; see [History](#history)                                                                                |
+| `window`              | duration                        | derived                           | History as a time window starting this long before now; see [History](#history)                                                             |
 | `point_limit`         | integer ≥ 10                    | `512` without `window`            | History as the most recent cells of each series' grid, at most the model's context; see [History](#history)                                 |
 | `sampling_interval`   | duration                        | none                              | Resample history to the mean per bucket; see [History](#history)                                                                            |
+| `history_end`         | string                          | `latest`                          | Where history ends: `latest`, `now` or `now+<duration>`; see [History](#history)                                                            |
 | `horizon_steps`       | integer ≥ 1                     | required²                         | Forecast length in points at the data spacing                                                                                               |
 | `horizon_duration`    | duration                        | required²                         | Forecast length as a duration, converted to points by the data spacing                                                                      |
 | `levels`              | list of numbers                 | `[0.5, 0.8]`                      | Interval levels, each between 0 and 1; a level the model cannot produce is `null` in the response and not written                           |
@@ -259,6 +261,7 @@ Their values are strings; see [Value formats](#value-formats).
 - A header with the plugin's prefix that names no parameter answers `bad_request`; other headers, such as the client's
   own, are ignored.
 - An unknown query-string parameter answers `bad_request`.
+- In the query string a `+` means a space, so write it as `%2B`: `?history_end=now%2B1h`.
 - The body, then the headers, then the query string: each overrides the one before.
 
 ```bash
@@ -476,12 +479,12 @@ A request that fails as a whole answers with an HTTP error status and a JSON bod
 }
 ```
 
-| Code                | HTTP  | When                                                                                                                                                                                          |
-|---------------------|-------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `bad_request`       | `400` | Unknown or invalid parameter, unknown measurement, field or database, a query that does not plan, too many forecasts or forecast points, a series mixing tag sets without `sampling_interval` |
-| `model_unavailable` | `503` | The model failed to download or load                                                                                                                                                          |
-| `internal`          | `500` | A query, the inference or the write failed, or a forecast row cannot be built                                                                                                                 |
-| `too_few_points`    | —     | Per series, in `results`, with the request still `200`                                                                                                                                        |
+| Code                | HTTP  | When                                                                                                                                                                                                                                 |
+|---------------------|-------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `bad_request`       | `400` | Unknown or invalid parameter, unknown measurement, field or database, a query that does not plan, too many forecasts or forecast points, a series mixing tag sets without `sampling_interval`, a history outside the years 1 to 9999 |
+| `model_unavailable` | `503` | The model failed to download or load                                                                                                                                                                                                 |
+| `internal`          | `500` | A query, the inference or the write failed, or a forecast row cannot be built                                                                                                                                                        |
+| `too_few_points`    | —     | Per series, in `results`, with the request still `200`                                                                                                                                                                             |
 
 The plugin logs a `bad_request` at `WARN` and the other codes at `ERROR`.
 
@@ -551,14 +554,25 @@ The plugin logs a `bad_request` at `WARN` and the other codes at `ERROR`.
   Core it hits `query-file-limit` (432 files).
   Pick `sampling_interval` so that this covers several seasonal cycles: `1h` with the default 512 buckets is 21 days.
   With `query` there is no default window; see [Forecasting a query](#forecasting-a-query).
-- In measurement mode the history ends now, so a row with a later timestamp is not read until its time comes: with a
-  device whose clock runs an hour fast, its latest hour stays out of the forecast.
+- `history_end` sets where history ends, in both modes. The window still counts back from now, and `point_limit`,
+  `backtest_points` and the series apply to the history this gives.
+  - `latest`, the default: at the latest row, so rows with later timestamps are read too, and the forecast continues
+    after them.
+  - `now`: at the plugin's clock, so a later row is not read until its time comes.
+  - `now+<duration>`: rows up to that long after now, such as `now+1h` for a device whose clock runs up to an hour
+    fast, or `now+7d` for a plan written a week ahead.
+
+  With `sampling_interval`, `now` and `now+<duration>` end at the last full bucket before that end, and in every case a
+  last bucket that ends after now is left out, as it may still be filling: the plugin can't tell a bucket written ahead
+  from one a fast clock is filling. Data written ahead usually lies on a grid already and needs no `sampling_interval`.
+  The window starts at the first bucket edge inside it, so every bucket read is whole.
 - Chronos reads points as equally spaced, so history reaches the model on a grid.
-  With `sampling_interval` the cells are its buckets, aligned like `date_bin`, and the bucket still filling is left out.
+  With `sampling_interval` the cells are its buckets, aligned like `date_bin`.
   Without it, the step is the median spacing of the points, rounded to a round unit about 1% of it (so 10 s, 1 h or 1
   week stay exact), and each point goes to the nearest cell of a grid that keeps the rhythm most points follow.
   Points in one cell are averaged, and an empty cell is passed as a gap, which Chronos treats as missing.
-- A series needs at least 10 observed points; fewer answers `too_few_points` for that series, naming the window read.
+- A series needs at least 10 observed points; fewer answers `too_few_points` for that series, naming the window read,
+  and how many whole buckets of `sampling_interval` fit in it when that is fewer than 10.
 
 ### Forecasting a query
 
@@ -579,17 +593,15 @@ With `query`, the plugin runs the SQL against `source_database` and forecasts wh
   When the query reads one measurement, it is the `source_measurement` tag and names the default `target_measurement`;
   with several, writing needs `target_measurement`.
 
-`window`, `point_limit` and `sampling_interval` apply to the query's result.
+`window`, `point_limit`, `sampling_interval` and `history_end` apply to the query's result.
 The plugin reads the whole result into memory before `point_limit` cuts it, so the query must bound its own time range
 (`WHERE time > now() - INTERVAL '6 hours'`), above all in a scheduled trigger, which runs it on every run.
 With `window`, the server filters the result by its `time` column, as
 `SELECT * FROM (<query>) WHERE time > now() - <window>`; a query that cannot be wrapped this way, such as one with an
 integer `time`, is read whole and filtered by the plugin, which logs a warning.
 
-The query defines its own history, so rows with later timestamps stay, and the forecast continues after them, as with
-day-ahead prices.
-To leave them out, add `WHERE time < now()` to the query.
-Only `sampling_interval` ends the result at the last full bucket.
+With the default `history_end` of `latest`, rows with later timestamps stay, and the forecast continues after them, as
+with day-ahead prices; `now` leaves them out. See [History](#history).
 
 ### Output data structure
 
@@ -632,7 +644,7 @@ give each its own `forecast_id` and read by it.
 [`forecast_interface.json`](forecast_interface.json) describes this plugin under the
 [shared forecasting interface](https://github.com/influxdata/influxdb3_plugins/blob/main/docs/FORECASTING_INTERFACE.md),
 contract version 1: the engine's name and description, its modes, filters, history and horizon controls, models with
-their labels and limits, and advanced parameters.
+their labels and limits, and advanced parameters, among them `history_end`, an optional shared key of the interface.
 An app can read it from the plugin's registry package to configure its UI.
 The plugin never reads it: it validates every request on its own and runs any model the library can load.
 
@@ -653,9 +665,13 @@ The plugin never reads it: it validates every request on its own and runs any mo
   `max_series` and `series_limit`, keeping only the chosen series with `_chosen_series`), and refuse a series mixing tag
   sets that write at the same time, before the model loads; then read the history of every series in one query, at most
   `limit` points each, averaging rows that share a timestamp.
+  Every query reads from the window's start up to `history_end`.
 - **`_query_measurements(influxdb3_local, req)`** / **`_read_query(influxdb3_local, req)`**: plan the query with
   `EXPLAIN` for its source measurement, run it before the model loads (with `window` as a filter the server applies when
-  the query can be wrapped), split the result into series by column type, sort them, and apply `series_limit`.
+  the query can be wrapped), keep its rows before `history_end`, split the result into series by column type, sort
+  them, and apply `series_limit`.
+- **`_drop_unfinished_bucket(series, req)`**: leaves out a last `sampling_interval` bucket that ends after now, as it
+  may still be filling; the clock is read there, after the model has loaded.
 - **`_history_limit(pipeline, req)`** / **`_regularize(series, req, limit)`**: cap the history at `point_limit` and the
   model's context, and lay it on a grid: the `sampling_interval` buckets, or, for raw points, a grid at their median
   spacing that keeps their rhythm (`_grid_anchor`); empty cells are gaps.

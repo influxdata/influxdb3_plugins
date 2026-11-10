@@ -54,9 +54,9 @@ horizon_steps = 64
 #series_limit = 5
 
 ########## History ##########
-# History as a time window ending now; never more points than the model's
-# context. Default: point_limit buckets of sampling_interval (at most 365d), or
-# 1d of raw points; none with query
+# History as a time window starting this long before now; never more points
+# than the model's context. Default: point_limit buckets of sampling_interval
+# (at most 365d), or 1d of raw points; none with query
 #window = "6h"
 
 # History as the most recent cells of each series' grid (buckets with
@@ -64,10 +64,16 @@ horizon_steps = 64
 # Default: 512 when window is not set either
 #point_limit = 512
 
-# Resample history to the mean per bucket; empty buckets stay as gaps and the
-# bucket still filling is left out. Default: a grid at the median spacing of
-# the points
+# Resample history to the mean per bucket; empty buckets stay as gaps, and a
+# last bucket that ends after now is left out, as it may still be filling.
+# Default: a grid at the median spacing of the points
 #sampling_interval = "30s"
+
+# Where history ends: "latest" reads rows with later timestamps too, "now" ends
+# it at the plugin's clock, "now+<duration>" reads rows up to that long after
+# now. With sampling_interval, now and now+<duration> end at the last full
+# bucket. Also applies to query. Default: "latest"
+#history_end = "now"
 
 ########## Model and intervals ##########
 # HuggingFace model ID: amazon/chronos-bolt-tiny|mini|small|base,

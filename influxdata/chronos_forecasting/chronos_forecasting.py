@@ -53,7 +53,7 @@
         {
             "name": "window",
             "example": "6h",
-            "description": "History as a time window ending now: a whole number and s, min, h, d or w. With point_limit, the last point_limit points of the window; never more points than the model's context. Default: point_limit buckets of sampling_interval (at most 365d), or 1d of raw points; none with query.",
+            "description": "History as a time window starting this long before now: a whole number and s, min, h, d or w. With point_limit, the last point_limit points of the window; never more points than the model's context. Default: point_limit buckets of sampling_interval (at most 365d), or 1d of raw points; none with query.",
             "required": false
         },
         {
@@ -65,7 +65,13 @@
         {
             "name": "sampling_interval",
             "example": "30s",
-            "description": "Resamples history to the mean per bucket of this duration (s, min, h, d, w); empty buckets are passed as gaps and the bucket still filling is left out. Default: a grid at the median spacing of the points.",
+            "description": "Resamples history to the mean per bucket of this duration (s, min, h, d, w); empty buckets are passed as gaps, and a last bucket that ends after now is left out, as it may still be filling. Default: a grid at the median spacing of the points.",
+            "required": false
+        },
+        {
+            "name": "history_end",
+            "example": "now+1h",
+            "description": "Where history ends: latest (every later row too), now (the plugin's clock), or now+<duration> (s, min, h, d, w) for rows up to that long after now. With sampling_interval, now and now+<duration> end at the last full bucket. Default: latest.",
             "required": false
         },
         {
@@ -187,7 +193,7 @@
         {
             "name": "window",
             "example": "6h",
-            "description": "Default history as a time window ending now: a whole number and s, min, h, d or w. With point_limit, the last point_limit points of the window; never more points than the model's context. Default: point_limit buckets of sampling_interval (at most 365d), or 1d of raw points; none with query.",
+            "description": "Default history as a time window starting this long before now: a whole number and s, min, h, d or w. With point_limit, the last point_limit points of the window; never more points than the model's context. Default: point_limit buckets of sampling_interval (at most 365d), or 1d of raw points; none with query.",
             "required": false
         },
         {
@@ -199,7 +205,13 @@
         {
             "name": "sampling_interval",
             "example": "30s",
-            "description": "Default resampling to the mean per bucket of this duration (s, min, h, d, w); empty buckets are passed as gaps and the bucket still filling is left out. Default: a grid at the median spacing of the points.",
+            "description": "Default resampling to the mean per bucket of this duration (s, min, h, d, w); empty buckets are passed as gaps, and a last bucket that ends after now is left out, as it may still be filling. Default: a grid at the median spacing of the points.",
+            "required": false
+        },
+        {
+            "name": "history_end",
+            "example": "now+1h",
+            "description": "Default end of history: latest (every later row too), now (the plugin's clock), or now+<duration> (s, min, h, d, w) for rows up to that long after now. With sampling_interval, now and now+<duration> end at the last full bucket. Default: latest.",
             "required": false
         },
         {
@@ -333,7 +345,7 @@
         {
             "name": "window",
             "example": "6h",
-            "description": "History as a time window ending now: a whole number and s, min, h, d or w. With point_limit, the last point_limit points of the window; never more points than the model's context. Default: point_limit buckets of sampling_interval (at most 365d), or 1d of raw points; none with query.",
+            "description": "History as a time window starting this long before now: a whole number and s, min, h, d or w. With point_limit, the last point_limit points of the window; never more points than the model's context. Default: point_limit buckets of sampling_interval (at most 365d), or 1d of raw points; none with query.",
             "required": false
         },
         {
@@ -345,7 +357,13 @@
         {
             "name": "sampling_interval",
             "example": "30s",
-            "description": "Resample history to the mean per bucket of this duration (s, min, h, d, w); empty buckets are passed as gaps and the bucket still filling is left out. Default: a grid at the median spacing of the points.",
+            "description": "Resample history to the mean per bucket of this duration (s, min, h, d, w); empty buckets are passed as gaps, and a last bucket that ends after now is left out, as it may still be filling. Default: a grid at the median spacing of the points.",
+            "required": false
+        },
+        {
+            "name": "history_end",
+            "example": "now+1h",
+            "description": "Where history ends: latest (every later row too), now (the plugin's clock), or now+<duration> (s, min, h, d, w) for rows up to that long after now. With sampling_interval, now and now+<duration> end at the last full bucket. Default: latest.",
             "required": false
         },
         {
@@ -538,7 +556,7 @@ CONTRACT_KEYS = (
     "forecast_id",
     "backtest_points",
 )
-PLUGIN_KEYS = ("covariate_fields", "max_series", "max_forecast_points")
+PLUGIN_KEYS = ("covariate_fields", "history_end", "max_series", "max_forecast_points")
 SETTING_NAMES = CONTRACT_KEYS + PLUGIN_KEYS
 # A scheduled run always writes and returns no response: no write_results, no backtest.
 SCHEDULED_NAMES = tuple(
@@ -584,6 +602,23 @@ def _duration_ns(raw) -> int:
             f"expected a whole number above 0 and a unit (s, min, h, d, w), got {raw!r}"
         )
     return int(match.group(1)) * _UNIT_NS[match.group(2)]
+
+
+def _history_end(raw) -> int | None:
+    """How far past now history reaches: None for latest (no end), 0 for now, else nanoseconds."""
+    text = raw.strip() if isinstance(raw, str) else None
+    if text == "latest":
+        return None
+    if text == "now":
+        return 0
+    if text and text.startswith("now+"):
+        try:
+            return _duration_ns(text[len("now+"):])
+        except ValueError:
+            pass
+    raise ValueError(
+        f"expected latest, now, or now+<duration> with a unit (s, min, h, d, w), got {raw!r}"
+    )
 
 
 def _duration_text(ns: int) -> str:
@@ -658,6 +693,7 @@ SETTING_VALIDATORS = [
     Validator("tag_filter", cast=_tag_filter),
     Validator("group_by", "covariate_fields", default=[], cast=_names),
     Validator("window", "sampling_interval", "horizon_duration", cast=_duration_ns),
+    Validator("history_end", default="latest", cast=_history_end),
     # A series needs MIN_POINTS points, so a shorter history is refused up front.
     Validator("point_limit", cast=lambda raw: parse_int(raw, minimum=MIN_POINTS)),
     Validator("horizon_steps", "series_limit", cast=lambda raw: parse_int(raw, minimum=1)),
@@ -776,6 +812,10 @@ class ForecastRequest:
     series_limit: int | None
     window_ns: int | None
     default_window: bool
+    # None only for a query without window.
+    history_start_ns: int | None
+    # None with history_end latest: no end.
+    history_end_ns: int | None
     point_limit: int | None
     sampling_ns: int | None
     horizon_steps: int | None
@@ -866,12 +906,38 @@ def _resolve(cfg: dict, scheduled: bool) -> ForecastRequest:
     backtest_points = cfg.get("backtest_points")
     default_window = window_ns is None and not query_mode
     if default_window:
-        # The backtest's held-out buckets come on top, and one more: the bucket still
-        # filling is dropped.
+        # The backtest's held-out buckets come on top, and one more for the bucket still
+        # filling.
         buckets = point_limit + (backtest_points or 0) + 1
         window_ns = (
             min(buckets * sampling_ns, MAX_DEFAULT_WINDOW_NS) if sampling_ns else DEFAULT_WINDOW_NS
         )
+    # The window counts back from now. History ends at now plus history_end's offset, or
+    # nowhere with latest; with sampling_interval at the edge of the last full bucket
+    # before that end.
+    now_ns = _time.time_ns()
+    history_end_ns = None
+    if cfg["history_end"] is not None:
+        history_end_ns = now_ns + cfg["history_end"]
+        if sampling_ns:
+            history_end_ns -= history_end_ns % sampling_ns
+    history_start_ns = now_ns - window_ns if window_ns else None
+    if history_start_ns is not None and sampling_ns:
+        # Up to the first bucket's edge inside the window, so every bucket read is whole.
+        history_start_ns += -history_start_ns % sampling_ns
+    if history_start_ns is not None and history_end_ns is not None:
+        # The server refuses a range that holds nothing, so a window inside the bucket
+        # still filling reads one microsecond and finds no rows.
+        history_start_ns = min(history_start_ns, history_end_ns - 1000)
+    try:
+        for bound in (history_start_ns, history_end_ns):
+            if bound is not None:
+                _iso(bound)
+    except OverflowError:
+        raise ForecastError(
+            "bad_request",
+            "the history reaches outside the years 1 to 9999; shorten window or history_end",
+        ) from None
 
     req = ForecastRequest(
         source_measurement=cfg.get("source_measurement"),
@@ -884,6 +950,8 @@ def _resolve(cfg: dict, scheduled: bool) -> ForecastRequest:
         series_limit=cfg.get("series_limit"),
         window_ns=window_ns,
         default_window=default_window,
+        history_start_ns=history_start_ns,
+        history_end_ns=history_end_ns,
         point_limit=point_limit,
         sampling_ns=sampling_ns,
         horizon_steps=cfg.get("horizon_steps"),
@@ -1040,6 +1108,11 @@ def _to_ns(value) -> int | None:
     return (value - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
+def _iso(ns: int) -> str:
+    """Nanoseconds as an ISO 8601 UTC time, for a query parameter."""
+    return (_EPOCH + timedelta(microseconds=ns // 1000)).isoformat()
+
+
 def _numeric(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -1084,8 +1157,11 @@ def _measurement_tags(influxdb3_local, req: ForecastRequest) -> list[str]:
 def _where(req: ForecastRequest, params: dict) -> str:
     """The WHERE clause shared by the series and the data queries."""
     clauses = [f"{_quote_ident(req.field)} IS NOT NULL"]
-    if req.window_ns:
-        clauses.append(f"time > now() - INTERVAL '{req.window_ns // 10**9} seconds'")
+    params["history_start"] = _iso(req.history_start_ns)
+    clauses.append("time >= $history_start")
+    if req.history_end_ns is not None:
+        params["history_end"] = _iso(req.history_end_ns)
+        clauses.append("time < $history_end")
     for i, (tag, values) in enumerate(req.tag_filter.items()):
         placeholders = []
         for j, value in enumerate(values):
@@ -1316,6 +1392,7 @@ def _read_measurement(influxdb3_local, req: ForecastRequest, plan: tuple, limit:
 
     for group, series in by_key.items():
         series.covariates = list(zip(req.covariate_fields, covariate_values[group]))
+        _drop_unfinished_bucket(series, req)
     return list(by_key.values())
 
 
@@ -1395,11 +1472,12 @@ def _read_query(influxdb3_local, req: ForecastRequest, task_id: str) -> tuple[li
         raise ForecastError(
             "bad_request", "no time column in query result; alias the timestamp AS time"
         )
+    # Before the split, so a series with no rows in the history does not exist.
     if req.window_ns:
-        # Repeats the server's filter, or applies it when the query could not be wrapped;
-        # before the split, so a series with no rows in the window does not exist.
-        cutoff = _time.time_ns() - req.window_ns
-        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) > cutoff]
+        # Repeats the server's filter, or applies it when the query could not be wrapped.
+        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) >= req.history_start_ns]
+    if req.history_end_ns is not None:
+        rows = [row for row in rows if (_to_ns(row.get("time")) or 0) < req.history_end_ns]
     if not rows:
         return [], 0
     columns = list(dict.fromkeys(column for row in rows for column in row))
@@ -1445,6 +1523,7 @@ def _read_query(influxdb3_local, req: ForecastRequest, task_id: str) -> tuple[li
         series.values = [value for _, value in points]
         if req.sampling_ns:
             _bucket(series, req.sampling_ns)
+            _drop_unfinished_bucket(series, req)
         series_list.append(series)
     return series_list, total
 
@@ -1461,18 +1540,27 @@ def _bucket(series: Series, step_ns: int) -> None:
     series.values = [sums[t][0] / sums[t][1] for t in series.times]
 
 
+def _drop_unfinished_bucket(series: Series, req: ForecastRequest) -> None:
+    """Drop a last sampling bucket that ends after now: it may still be filling.
+
+    The clock is read here, as a model load may have passed since the request was
+    resolved. With history_end now, every bucket read has ended.
+    """
+    if not (req.sampling_ns and series.times):
+        return
+    if series.times[-1] + req.sampling_ns > _time.time_ns():
+        series.times, series.values = series.times[:-1], series.values[:-1]
+        series.covariates = [(name, column[:-1]) for name, column in series.covariates]
+
+
 def _regularize(series: Series, req: ForecastRequest, limit: int) -> None:
     """Lay the series on a regular grid, as Chronos reads points as equally spaced.
 
-    With sampling_interval the cells are its buckets, without the one still filling;
-    raw points go to the nearest cell of a grid at their spacing (_grid_anchor).
-    Points in one cell are averaged, an empty cell is a gap (NaN), and the last limit
-    cells are kept.
+    With sampling_interval the cells are its buckets; raw points go to the nearest cell
+    of a grid at their spacing (_grid_anchor). Points in one cell are averaged, an empty
+    cell is a gap (NaN), and the last limit cells are kept.
     """
     step = req.sampling_ns
-    if step and series.times and series.times[-1] + step > _time.time_ns():
-        series.times, series.values = series.times[:-1], series.values[:-1]
-        series.covariates = [(name, column[:-1]) for name, column in series.covariates]
     if not series.times:
         series.step_ns = step or FALLBACK_STEP_NS
         return
@@ -1726,6 +1814,17 @@ def _too_few_message(req: ForecastRequest, observed: int) -> str:
             message += "; set window, raise point_limit or shorten sampling_interval"
         elif req.default_window:
             message += "; set window or sampling_interval"
+        elif req.sampling_ns:
+            # A window set by hand may hold too few whole buckets, whatever the data.
+            end = req.history_end_ns
+            if end is None:
+                end = _time.time_ns() - _time.time_ns() % req.sampling_ns
+            whole = max(0, (end - req.history_start_ns) // req.sampling_ns)
+            if whole < MIN_POINTS:
+                message += (
+                    f"; the window fits {whole} whole {_duration_text(req.sampling_ns)} "
+                    f"bucket{'s' if whole != 1 else ''}"
+                )
     return message
 
 
@@ -1775,7 +1874,7 @@ def _run_forecast(influxdb3_local, req: ForecastRequest, task_id: str) -> dict:
     held_out = req.backtest_points or 0
     if not req.query:
         # At most limit points per series, plus the backtest's held-out ones; with
-        # sampling_interval one bucket more, as the one still filling is dropped.
+        # sampling_interval one bucket more, as a last one still filling is dropped.
         read = limit + held_out + (1 if req.sampling_ns else 0)
         series_list = _read_measurement(influxdb3_local, req, plan, read)
 

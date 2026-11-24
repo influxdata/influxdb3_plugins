@@ -1,0 +1,4 @@
+influxdata-plugin-utils>=0.5.0
+requests
+boto3
+google-auth

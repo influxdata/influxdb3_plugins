@@ -1,0 +1,109 @@
+# LLM Usage Collector: configuration for the scheduled trigger
+# Reference this file with `--trigger-arguments config_file_path=llm_usage_scheduled_config.toml`.
+# The path may be absolute or relative to the plugin directory. Values here
+# override the same keys passed inline. An unknown key is an error, and so are
+# the settings of the HTTP trigger (start, end).
+# Do not put secrets in this file: the *_env settings name the environment
+# variables that hold them. config_file_path itself is accepted only as a
+# trigger argument.
+
+########## Required parameters ##########
+# Providers to collect: a list of "anthropic", "openai", "bedrock", "azure", "google" (at least one)
+providers = ["anthropic", "openai", "bedrock", "azure", "google"]
+
+########## Anthropic ##########
+# Environment variable that holds the admin key. Default: "ANTHROPIC_ADMIN_KEY"
+#anthropic_admin_key_env = "ANTHROPIC_ADMIN_KEY"
+# Label written as the account tag. Default: "default"
+#anthropic_account = "default"
+
+########## OpenAI ##########
+# Environment variable that holds the admin key. Default: "OPENAI_ADMIN_KEY"
+#openai_admin_key_env = "OPENAI_ADMIN_KEY"
+# Label written as the account tag. Default: "default"
+#openai_account = "default"
+
+########## AWS Bedrock ##########
+# AWS region codes such as "us-east-1" to read Bedrock usage and cost from (at least one; required when "bedrock" is listed in providers).
+# A missing value or a name that isn't a region code refuses the run with an error naming it. Charges and usage in other regions are not collected.
+bedrock_regions = ["us-east-1", "eu-west-1"]  # e.g. ["us-east-1"], ["us-east-1", "eu-west-1"]
+# false: read the access key from the variables below and ignore the standard AWS_* variables.
+# true: use the standard AWS credential chain (AWS_* variables, then an instance or container role).
+# Default: false. Set in trigger arguments, the TOML file or the environment; not accepted from an HTTP request.
+#bedrock_use_default_credentials = false
+# Environment variables that hold the credentials. Defaults as shown
+#bedrock_access_key_id_env = "BEDROCK_AWS_ACCESS_KEY_ID"
+#bedrock_secret_access_key_env = "BEDROCK_AWS_SECRET_ACCESS_KEY"
+#bedrock_session_token_env = "BEDROCK_AWS_SESSION_TOKEN"  # optional token, used only when the variable is set
+# Label written as the account tag. Default: the AWS account ID of the credentials
+#bedrock_account = "aws-main"
+
+########## Azure OpenAI / Microsoft Foundry ##########
+# Entra tenant ID, application (client) ID and subscriptions (all required when "azure" is listed in providers; a missing value or one that isn't a GUID refuses the run with an error naming the setting)
+azure_tenant_id = "00000000-0000-0000-0000-000000000000"
+azure_client_id = "11111111-1111-1111-1111-111111111111"
+azure_subscription_ids = ["22222222-2222-2222-2222-222222222222"]  # at least one
+# Environment variable that holds the client secret. Default: "AZURE_CLIENT_SECRET"
+#azure_client_secret_env = "AZURE_CLIENT_SECRET"
+# Label written as the account tag; one label for several subscriptions sums their rows.
+# Default: the subscription ID
+#azure_account = "azure-main"
+
+########## Google Vertex AI / Gemini API ##########
+# Project IDs to read usage and cost from (at least one; required when "google" is listed in providers; a missing value or an ID of another form refuses the run with an error naming the setting)
+google_project_ids = ["my-project-1", "my-project-2"]
+# Environment variable that holds the service account key: its JSON on one line (a value starting with "{"; the server
+# passes a value only up to its first line break), or a path to the key file (absolute or relative to the plugin directory).
+# Default: "GOOGLE_LLM_USAGE_CREDENTIALS"
+# Set in trigger arguments, the TOML file or the environment; not accepted from an HTTP request.
+#google_credentials_env = "GOOGLE_LLM_USAGE_CREDENTIALS"
+# Label written as the account tag. Default: "default"
+#google_account = "gcp-main"
+# Sources: a list of "vertex_metrics", "gemini_api_metrics" (usage) and "billing_export" (cost), at least one.
+# Default: "vertex_metrics", "gemini_api_metrics". Google cost is collected only with "billing_export".
+#google_sources = ["vertex_metrics", "gemini_api_metrics", "billing_export"]
+# BigQuery table of the standard usage cost export, as <project>.<dataset>.<table> (dataset and table names of 1 to 1024 characters). Required when "billing_export"
+# is listed in google_sources; a missing value, or one in another form, refuses the run.
+#google_billing_table = "my-billing-project.billing_export.gcp_billing_export_v1_XXXXXX_XXXXXX_XXXXXX"
+
+########## Output ##########
+# Database that receives both tables. Default: the database of the trigger.
+# Names: letters, digits, "_" and "-", starting with a letter or digit
+#target_database = "llm_usage"
+# Table names: any printable characters except spaces and backslashes, not starting with "#".
+# Defaults: "llm_usage" and "llm_cost"; the two must differ
+#usage_table = "llm_usage"
+#cost_table = "llm_cost"
+
+########## Collection ##########
+# What each run reads for every provider: a list of "usage", "cost" (at least one). Default: both
+# Without "cost", no cost endpoint is called and the time of the last cost fetch is left unchanged.
+#collect = ["usage"]
+# Usage types to collect: a list of "input_tokens", "cache_read_tokens", "cache_write_tokens",
+# "output_tokens", "requests", "images", "audio_seconds", "tts_characters",
+# "web_search_requests", "file_search_requests", "code_interpreter_sessions",
+# "vector_store_bytes" (at least one). Default: all
+#usage_types = ["input_tokens", "output_tokens", "requests"]
+# Usage bucket width: "1h" or "1d". Cost is always daily. Default: "1h"
+# Changing it on a table that already has data mixes granularities; use a new table.
+#bucket_width = "1h"
+# Tags left out of both tables: a list of "account", "project", "api_key_id", "user_id".
+# Rows that become identical are summed. Default: none
+# Changing it on a table that already has data mixes granularities; use a new table.
+#exclude_tags = ["user_id", "api_key_id"]
+
+########## Scheduling ##########
+# Durations are an integer and a unit: s, min, h, d, w
+# How far back each run re-reads usage: at least one bucket (1h, or 1d when bucket_width is "1d").
+# Only complete buckets are read, up to the start of the current bucket; rows are overwritten in place. Default: "48h"
+#usage_lookback = "48h"
+# How far back a cost fetch re-reads daily cost: at least "1d", rounded up to whole days. Default: "40d"
+#cost_lookback = "40d"
+# Minimum time between cost fetches of one provider: greater than zero. A run before it has passed fetches usage only.
+# For AWS, a longer interval spaces out the Cost Explorer calls; CloudWatch usage is read on every run.
+# STS is called with each cost fetch, and on every run unless bedrock_account is set or "account" is in exclude_tags. Default: "6h"
+#cost_interval = "6h"
+# Longest time a run spends calling providers: greater than zero. What is left of it is shared equally by the
+# providers not started yet; a provider whose share is used up skips the rest of its work with an error naming it.
+# Choose a trigger interval longer than this. Default: "15min"
+#max_run_time = "15min"

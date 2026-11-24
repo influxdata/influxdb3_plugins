@@ -2,8 +2,10 @@ import base64
 import builtins
 import copy
 import json
+import os
 import re
 import sys
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -209,6 +211,30 @@ def test_scheduled_run_reads_no_request_period(fake_connectors, monkeypatch, tmp
         load_settings(FakeLocal(), "t", {"providers": "openai", "config_file_path": str(toml)})
 
 
+@pytest.fixture
+def server_time_zone():
+    """Sets the process time zone (a POSIX TZ string) for one test."""
+    saved = os.environ.get("TZ")
+
+    def use(value):
+        os.environ["TZ"] = value
+        time.tzset()
+
+    yield use
+    if saved is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = saved
+    time.tzset()
+
+
+def test_scheduled_call_time_is_read_in_the_server_time_zone(fake_connectors, server_time_zone):
+    calls = fake_connectors(good=[])
+    server_time_zone("UTC-3")  # POSIX sign: three hours east of UTC
+    plugin.process_scheduled_call(FakeLocal(), datetime(2026, 11, 14, 13, 30), {"providers": "fake_ok", "collect": "usage"})
+    assert calls["usage"][0][1] == datetime(2026, 11, 14, 10, tzinfo=timezone.utc)
+
+
 def test_request_reads_no_scheduled_window(fake_connectors, monkeypatch):
     fake_connectors(good=[])
     monkeypatch.setenv("INFLUXDB3_LLM_USAGE_USAGE_LOOKBACK", "not a duration")
@@ -380,7 +406,7 @@ def settings_for(providers, **overrides):
 def fake_connectors(monkeypatch):
     """Register fake_ok and fake_bad; an exception in a result list is raised when reached.
 
-    `good` may be a function of the fetched window that returns its records.
+    `good` and `bad` may be functions of the fetched window that return its records.
     """
 
     def install(good, bad=None, cost=(), oldest_usage=None, collects_cost=True):
@@ -416,7 +442,7 @@ def fake_connectors(monkeypatch):
             name = "fake_bad"
 
             def fetch_usage(self, start, end, bucket_width, usage_types):
-                yield from emit(bad)
+                yield from emit(bad(start, end) if callable(bad) else bad)
 
             def fetch_cost(self, start_day, end_day):
                 yield from ()
@@ -484,24 +510,57 @@ def test_http_client_hides_request_exception_text():
     assert e.value.status is None and "SECRET" not in str(e.value)
 
 
-def test_http_client_backs_off_exponentially_and_gives_up():
+def test_http_client_backs_off_exponentially_and_gives_up_after_three_attempts():
     session = FakeSession().route("GET", "https://x/a", [FakeResponse(529, {})])
     slept = []
     with pytest.raises(ProviderError) as e:
-        HttpClient(session, sleep=slept.append, max_retries=3).request_json("GET", "https://x/a")
-    assert slept == [1, 2, 4] and e.value.status == 529 and len(session.calls) == 4
+        HttpClient(session, sleep=slept.append).request_json("GET", "https://x/a")
+    assert slept == [1, 2] and e.value.status == 529 and len(session.calls) == 3
 
 
-def test_http_client_retries_transport_errors_three_times():
+def test_http_client_three_attempts_cover_transport_errors_and_statuses_together():
     session = FakeSession().route("GET", "https://x/a", [requests.ConnectionError("reset"), requests.ConnectionError("reset"), FakeResponse(200, {"ok": 1})])
     session.route("GET", "https://x/b", [requests.ReadTimeout("slow")])
+    session.route("GET", "https://x/c", [requests.ConnectionError("reset"), FakeResponse(503, {}), FakeResponse(200, {"ok": 1})])
     slept = []
     client = HttpClient(session, sleep=slept.append)
     assert client.request_json("GET", "https://x/a") == {"ok": 1} and slept == [1, 2]
     with pytest.raises(ProviderError) as e:
         client.request_json("GET", "https://x/b")
-    assert (e.value.status, str(e.value)) == (None, "ReadTimeout") and slept == [1, 2, 1, 2, 4]
-    assert len([c for c in session.calls if c["url"] == "https://x/b"]) == 4
+    assert (e.value.status, str(e.value)) == (None, "ReadTimeout") and slept == [1, 2, 1, 2]
+    assert len([c for c in session.calls if c["url"] == "https://x/b"]) == 3
+    assert client.request_json("GET", "https://x/c") == {"ok": 1} and slept == [1, 2, 1, 2, 1, 2]
+
+
+class FakeClock:
+    """Stands in for the plugin's `time` module: time passes only when a test or a fake sleep says so."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def test_http_client_starts_no_retry_or_call_past_its_deadline(monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(plugin, "time", clock)
+    session = FakeSession().route("GET", "https://x/a", [FakeResponse(429, {}, {"Retry-After": "30"}), FakeResponse(200, {"ok": 1})])
+    client = HttpClient(session, sleep=clock.sleep)
+    client.deadline = 20.0
+    with pytest.raises(ProviderError) as e:
+        client.request_json("GET", "https://x/a")
+    assert e.value.status == 429 and len(session.calls) == 1 and session.calls[0]["timeout"] == 20.0
+    clock.sleep(20)
+    with pytest.raises(plugin.RunTimeExceeded):
+        client.request_json("GET", "https://x/a")
+    assert len(session.calls) == 1
 
 
 def test_usage_and_cost_windows():
@@ -522,13 +581,16 @@ def test_backfill_reads_whole_complete_buckets_only(fake_connectors):
     assert period(end="2026-11-14T05:30:00Z") == ["2026-11-14T02:00:00+00:00", "2026-11-14T06:00:00+00:00"]
     assert period() == ["2026-11-14T02:00:00+00:00", "2026-11-14T10:00:00+00:00"]
     assert period(end="2026-11-15T00:00:00Z") == ["2026-11-14T02:00:00+00:00", "2026-11-14T10:00:00+00:00"]
+    assert period(end="9999-12-31T23:59:59Z") == ["2026-11-14T02:00:00+00:00", "2026-11-14T10:00:00+00:00"]
 
 
-def test_backfill_cost_stops_at_today(fake_connectors):
+@pytest.mark.parametrize("end", ["2027-01-01T00:00:00Z", "9999-12-31T23:59:59Z"])
+def test_backfill_cost_stops_at_today(fake_connectors, end):
     fake_connectors(good=[])
     settings = load_settings(FakeLocal(), "t", {"providers": "fake_ok"}, request_body=json.dumps(
-        {"start": "2026-11-01T00:00:00Z", "end": "2027-01-01T00:00:00Z", "collect": ["cost"]}), http=True, now=NOW)
-    assert collect(FakeLocal(), settings, "t", now=NOW, backfill=True)["fake_ok"]["cost_period"] == ["2026-11-01", "2026-11-15"]
+        {"start": "2026-11-01T00:00:00Z", "end": end, "collect": ["cost"]}), http=True, now=NOW)
+    result = collect(FakeLocal(), settings, "t", now=NOW, backfill=True)["fake_ok"]
+    assert (result["cost_period"], result["errors"]) == (["2026-11-01", "2026-11-15"], [])
 
 
 def test_one_failing_connector_does_not_stop_the_others(fake_connectors):
@@ -579,6 +641,14 @@ def test_backfill_start_clamped_to_unaligned_history_is_aligned_to_the_bucket(fa
     assert expected.isoformat() in result["notes"][0] and result["usage_period"][0] == expected.isoformat()
 
 
+def test_scheduled_run_logs_each_note_as_a_warning(fake_connectors):
+    fake_connectors(good=[], oldest_usage=datetime(2026, 11, 13, 10, tzinfo=timezone.utc))
+    local = FakeLocal()
+    plugin.process_scheduled_call(local, NOW, {"providers": "fake_ok", "collect": "usage"})
+    [warning] = local.messages["warn"]
+    assert warning.endswith("] fake_ok: usage is available from 2026-11-13T10:00:00+00:00; the period starts there")
+
+
 def test_repeated_list_items_are_dropped_in_order():
     args = {
         "providers": "openai bedrock openai",
@@ -602,9 +672,13 @@ def test_a_failed_write_is_recorded_for_its_provider_only(fake_connectors, monke
     assert len(written_rows(local)[0]) == 1
 
 
-def test_request_with_bad_settings_returns_an_error():
-    assert process_request(FakeLocal(), {}, {}, "{}", {"providers": "openai"})["status"] == "error"
-    assert process_request(FakeLocal(), {}, {}, json.dumps({"start": "2026-10-01T00:00:00Z", "nope": 1}), {"providers": "openai"})["status"] == "error"
+def test_request_answers_400_for_bad_settings_and_500_for_an_unexpected_failure(monkeypatch):
+    for body in ("{}", json.dumps({"start": "2026-10-01T00:00:00Z", "nope": 1})):
+        response, status = process_request(FakeLocal(), {}, {}, body, {"providers": "openai"})
+        assert status == 400 and response["status"] == "error"
+    monkeypatch.setattr(plugin, "collect", lambda *args, **kwargs: 1 / 0)
+    assert process_request(FakeLocal(), {}, {}, SLICED_BACKFILL, {"providers": "openai"}) == (
+        {"status": "error", "error": "division by zero"}, 500)
 
 
 def test_backfill_aligns_to_buckets_and_days(fake_connectors):
@@ -639,6 +713,15 @@ def test_failed_slice_writes_are_recorded_per_slice_and_the_other_slices_are_wri
                                 "usage of 2026-10-15T00:00:00Z to 2026-10-21T00:00:00Z not written: line rejected"]
 
 
+@pytest.mark.parametrize("bad", ["abc", float("nan")])
+def test_a_value_that_is_not_a_number_skips_only_its_slice(fake_connectors, bad):
+    fake_connectors(good=lambda start, end: [UsageRecord(start, "fake_ok", "requests", bad if start.day == 8 else 1, {})])
+    result = process_request(FakeLocal(), {}, {}, SLICED_BACKFILL, {"providers": "fake_ok"})["providers"]["fake_ok"]
+    assert result["usage_rows"] == 2
+    assert result["errors"] == ["usage of 2026-10-08T00:00:00Z to 2026-10-15T00:00:00Z not written: "
+                                f"not a number: {bad!r} (fake_ok requests at 2026-10-08T00:00:00Z)"]
+
+
 def test_daily_usage_and_cost_are_sliced_by_92_days(fake_connectors):
     calls = fake_connectors(good=[])
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -653,6 +736,23 @@ def test_scheduled_run_with_default_lookbacks_is_one_slice(fake_connectors):
     calls = fake_connectors(good=[])
     collect(FakeLocal(), settings_for("fake_ok"), "t", now=NOW, backfill=False)
     assert len(calls["usage"]) == 1 and len(calls["cost"]) == 1
+
+
+def test_max_run_time_is_shared_by_providers_and_its_end_skips_the_rest_with_one_error(fake_connectors, monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(plugin, "time", clock)
+
+    def slow(start, end):
+        clock.sleep(240)
+        return [UsageRecord(start, "fake_ok", "requests", 1, {})]
+
+    fake_connectors(good=slow, bad=lambda start, end: [UsageRecord(start, "fake_bad", "requests", 1, {})])
+    body = json.dumps({"start": "2026-10-01T00:00:00Z", "end": "2026-10-21T00:00:00Z", "collect": ["usage"], "max_run_time": "10min"})
+    results = process_request(FakeLocal(), {}, {}, body, {"providers": "fake_ok fake_bad"})["providers"]
+    # fake_ok's share is 5 of the 10 minutes, so its third slice, due at minute 8, isn't started
+    assert results["fake_ok"]["usage_rows"] == 2
+    assert results["fake_ok"]["errors"] == ["max_run_time reached: usage of 2026-10-15T00:00:00Z to 2026-10-21T00:00:00Z skipped"]
+    assert (results["fake_bad"]["usage_rows"], results["fake_bad"]["errors"]) == (3, [])
 
 
 def test_failing_cost_still_waits_for_the_interval(fake_connectors):
@@ -942,7 +1042,7 @@ def test_openai_cost_project_and_model(openai):
     assert [(r.billing_item, r.tags.get("model"), r.tags["project"], r.currency) for r in rows] == [
         ("gpt-5-nano-2025-08-07, cached input", "gpt-5-nano-2025-08-07", "proj_1", "USD"),
         ("text-embedding-3-small", None, "proj_1", "USD")]
-    assert "project_id" not in openai.last_params()["group_by"]
+    assert openai.last_params()["group_by"] == ["project_id", "user_id", "api_key_id", "line_item"]
     assert openai.last_params()["bucket_width"] == "1d" and openai.last_params()["limit"] == 180
 
 
@@ -959,6 +1059,7 @@ def test_openai_key_names_across_projects(openai):
     openai.route("projects/proj_2/api_keys", [{"data": [{"id": "key_2", "name": "test-service", "owner": {"type": "service_account"}}], "has_more": False}])
     assert openai.connector.key_names() == {"key_1": "test", "key_2": "test-service"}
     assert openai.all_params("projects") == [{"limit": 100, "include_archived": "true"}]
+    assert openai.all_params("projects/proj_1/api_keys") == [{"limit": 100, "owner_project_access": "any"}]
     assert openai.local.cache.values["api_key_names:openai"] == {"key_1": "test", "key_2": "test-service"}
 
 
@@ -1072,15 +1173,17 @@ class BedrockHarness:
             self.stubs[(service, region)] = client, stubber
         return self.stubs[(service, region)]
 
-    def list_metrics(self, namespace, series, region="us-east-1"):
+    def list_metrics(self, namespace, series, region="us-east-1", next_token=None):
         metrics = [
             {"Namespace": namespace, "MetricName": name, "Dimensions": [{"Name": n, "Value": v} for n, v in dimensions]}
             for name, dimensions in series
         ]
-        self.stub("cloudwatch", region)[1].add_response("list_metrics", {"Metrics": metrics})
+        response = {"Metrics": metrics, **({"NextToken": next_token} if next_token else {})}
+        self.stub("cloudwatch", region)[1].add_response("list_metrics", response)
         return self
 
-    def metric_data(self, series, region="us-east-1", next_token=None):
+    def metric_data(self, series, region="us-east-1", next_token=None, statuses=None):
+        """One GetMetricData page; a series is PartialData before a next page, else Complete, unless `statuses` names it."""
         results = []
         for key, points in series.items():
             model, _, metric = key.rpartition("/")
@@ -1091,7 +1194,7 @@ class BedrockHarness:
                     "Label": key,
                     "Timestamps": [moment for moment, _ in points],
                     "Values": [value for _, value in points],
-                    "StatusCode": "Complete",
+                    "StatusCode": (statuses or {}).get(key) or ("PartialData" if next_token else "Complete"),
                 }
             )
         response = {"MetricDataResults": results, **({"NextToken": next_token} if next_token else {})}
@@ -1241,6 +1344,39 @@ def test_bedrock_queries_are_batched_by_500_and_follow_next_token(bedrock):
     assert len(set(ids)) == 500 and all(re.fullmatch(r"[a-z][A-Za-z0-9_]*", i) for i in ids)
 
 
+@pytest.mark.parametrize("status", ["InternalError", "Forbidden", "PartialData"])
+def test_bedrock_failed_series_skips_its_model_and_usage_type_with_one_error(bedrock, status):
+    bedrock.list_metrics("AWS/Bedrock", [("InputTokenCount", [("ModelId", "a")]), ("OutputTokenCount", [("ModelId", "a")]),
+                                         ("InputTokenCount", [("ModelId", "b")])])
+    bedrock.list_metrics("AWS/BedrockMantle", [("TotalInputTokens", [("Model", "a")])])
+    bedrock.metric_data({"a/InputTokenCount": [(T0, 30.0)], "a/OutputTokenCount": [(T0, 7.0)], "b/InputTokenCount": [(T0, 10.0)],
+                         "a/TotalInputTokens": []}, statuses={"a/TotalInputTokens": status})
+    rows = sorted((r.tags["model"], r.usage_type, r.quantity) for r in bedrock.fetch_usage(["input_tokens", "output_tokens"]))
+    assert rows == [("a", "output_tokens", 7.0), ("b", "input_tokens", 10.0)]
+    assert bedrock.connector.errors == ["GetMetricData in us-east-1 2026-11-12T19:00:00Z to 2026-11-12T20:00:00Z: "
+                                        f"1 of 4 series failed ({status}), rows of their model and usage type skipped"]
+
+
+def test_bedrock_failed_batch_skips_the_same_model_and_usage_type_in_other_batches(bedrock):
+    bedrock.list_metrics("AWS/Bedrock", [("Invocations", [("ModelId", f"model-{index}")]) for index in range(500)])
+    bedrock.list_metrics("AWS/BedrockMantle", [("Inferences", [("Model", "model-0")]), ("Inferences", [("Model", "x")])])
+    bedrock.fail("cloudwatch", "get_metric_data").metric_data({"model-0/Inferences": [(T0, 2.0)], "x/Inferences": [(T0, 3.0)]})
+    assert [(r.tags["model"], r.quantity) for r in bedrock.fetch_usage(["requests"])] == [("x", 3.0)]
+    assert bedrock.connector.errors == [
+        "GetMetricData in us-east-1 2026-11-12T19:00:00Z to 2026-11-12T20:00:00Z skipped: AccessDeniedException"]
+
+
+def test_bedrock_repeated_next_token_is_an_error_not_a_loop(bedrock):
+    bedrock.list_metrics("AWS/Bedrock", [("Invocations", [("ModelId", "m")])], next_token="t1")
+    bedrock.list_metrics("AWS/Bedrock", [], next_token="t1")
+    bedrock.list_metrics("AWS/BedrockMantle", [("Inferences", [("Model", "x")])])
+    bedrock.metric_data({"x/Inferences": [(T0, 3.0)]}, next_token="p1").metric_data({"x/Inferences": [(T0, 3.0)]}, next_token="p1")
+    assert list(bedrock.fetch_usage(["requests"])) == []
+    assert bedrock.connector.errors == [
+        "ListMetrics AWS/Bedrock in us-east-1 skipped: page cursor repeated: NextToken already followed",
+        "GetMetricData in us-east-1 2026-11-12T19:00:00Z to 2026-11-12T20:00:00Z skipped: page cursor repeated: NextToken already followed"]
+
+
 def test_bedrock_account_resolved_through_next_region_when_first_fails(bedrock):
     bedrock.settings(bedrock_regions="us-esat-1 us-east-1")
     bedrock.fail("sts", "get_caller_identity", "us-esat-1")
@@ -1338,10 +1474,10 @@ def account(name, kind):
     return {"id": account_id(name), "name": name, "kind": kind, "location": "eastus"}
 
 
-def batch_value(name, metrics):
-    """One getBatch values[] entry; metrics: metric -> [(dimensions, [(timestamp, total)])]."""
+def batch_value(name, metrics, errors=None):
+    """One getBatch values[] entry; metrics: metric -> [(dimensions, [(timestamp, total)])]; errors: metric -> errorCode."""
     return {"resourceid": account_id(name).lower(), "resourceregion": "eastus", "value": [
-        {"name": {"value": metric}, "timeseries": [
+        {"name": {"value": metric}, "errorCode": (errors or {}).get(metric, "Success"), "timeseries": [
             {"metadatavalues": [{"name": {"value": key}, "value": value} for key, value in dimensions.items()],
              "data": [{"timeStamp": stamp} if total is None else {"timeStamp": stamp, "total": total} for stamp, total in points]}
             for dimensions, points in series]}
@@ -1443,6 +1579,18 @@ def test_azure_failed_batch_is_recorded_and_the_rest_continues(azure):
     assert azure.connector.errors[0].endswith("skipped: HTTP 403: AuthorizationFailed")
 
 
+def test_azure_metric_with_an_error_code_skips_its_usage_type_of_the_resource(azure):
+    azure.discovered(account("usage-test-foundry", "AIServices"))
+    claude = {"modeldeploymentname": "claude", "modelname": "claude-haiku-5-5"}
+    azure.route_metrics([batch_value("usage-test-foundry", {
+        "InputTokens": [(claude, [("2026-11-12T18:00:00Z", 50)])],
+        "ephemeral5mInputTokens": [(claude, [("2026-11-12T18:00:00Z", 7)])],
+        "ephemeral1hInputTokens": []}, errors={"ephemeral1hInputTokens": "InternalServerError"})])
+    assert [(r.usage_type, r.quantity) for r in azure.fetch_usage()] == [("input_tokens", 50)]
+    assert azure.connector.errors == [f"getBatch {SUBSCRIPTION_ID} eastus chunk 2026-11-12T18:00:00Z to 2026-11-12T20:00:00Z: "
+                                      "cache_write_tokens of usage-test-foundry skipped: InternalServerError"]
+
+
 def test_azure_cost_rows_matched_case_insensitively(azure):
     azure.discovered(account("usage-test-aoai", "OpenAI"))
     azure.route_cost([{"properties": {"columns": [{"name": "Cost"}, {"name": "UsageDate"}, {"name": "ResourceId"}, {"name": "Meter"}, {"name": "Currency"}],
@@ -1473,6 +1621,32 @@ def test_azure_cost_query_body_monthly_chunks_and_next_link(azure):
                                     "filter": {"dimensions": {"name": "ResourceType", "operator": "In",
                                                               "values": ["microsoft.cognitiveservices/accounts"]}},
                                     "grouping": [{"type": "Dimension", "name": "ResourceId"}, {"type": "Dimension", "name": "Meter"}]}
+
+
+def test_azure_cost_query_answered_204_is_an_empty_result(azure):
+    class NoContent(FakeResponse):
+        def json(self):
+            raise ValueError("no body")
+
+    azure.discovered(account("usage-test-aoai", "OpenAI"))
+    azure.route_cost([NoContent(204, None)])
+    assert list(azure.fetch_cost(date(2026, 10, 31), date(2026, 11, 1))) == [] and azure.connector.errors == []
+
+
+def test_azure_repeated_next_link_is_an_error_not_a_second_count(azure):
+    page_2 = ARM_ACCOUNTS + "&$skiptoken=2"
+    azure.route_arm_accounts([{"value": [account("usage-test-aoai", "OpenAI")], "nextLink": page_2},
+                              {"value": [account("usage-test-foundry", "AIServices")], "nextLink": page_2}])
+    assert [a["name"] for a in azure.connector.accounts()] == ["usage-test-aoai", "usage-test-foundry"]
+    columns = [{"name": "Cost"}, {"name": "UsageDate"}, {"name": "ResourceId"}, {"name": "Meter"}, {"name": "Currency"}]
+    row = [1.5, 20261031, account_id("usage-test-aoai").lower(), "meter", "USD"]
+    next_page = COST_URL + "?api-version=2025-03-01&$skiptoken=2"
+    azure.route_cost([{"properties": {"columns": columns, "rows": [row], "nextLink": next_page}}])
+    azure.session.route("POST", next_page, [{"properties": {"columns": columns, "rows": [row], "nextLink": next_page}}])
+    assert [r.cost for r in azure.fetch_cost(date(2026, 10, 31), date(2026, 11, 1))] == [1.5, 1.5]
+    assert azure.connector.errors == [
+        f"account discovery in subscription {SUBSCRIPTION_ID} skipped: page cursor repeated: nextLink already followed",
+        f"cost query {SUBSCRIPTION_ID} chunk 2026-10-31 to 2026-10-31 skipped: page cursor repeated: nextLink already followed"]
 
 
 def test_azure_cost_of_resources_not_found_is_summed_in_one_note(azure, monkeypatch):
@@ -1778,6 +1952,18 @@ def test_google_billing_export_rows(google):
     assert second.tags == {"account": "default", "project": "usage-test-1", "service": "gemini_api"} and second.cost == 1.5
 
 
+def test_google_repeated_page_token_is_an_error_not_a_second_count(google):
+    billing(google, bq_page([VERTEX_ROW], pageToken="p1"), bq_page([VERTEX_ROW], pageToken="p1"))
+    google.route_series("usage-test-1", plugin.VERTEX_INVOCATIONS,
+                        {"timeSeries": [vertex_series({"int64Value": "5"})], "nextPageToken": "page-1"},
+                        {"timeSeries": [vertex_series({"int64Value": "2"})], "nextPageToken": "page-1"})
+    assert google.usage(["requests"]) == []
+    assert [r.cost for r in google.connector.fetch_cost(*EXPORT_DAY)] == [0.01385, 0.01385]
+    assert google.connector.errors == [
+        "Vertex AI metrics of project usage-test-1 skipped: page cursor repeated: nextPageToken already followed",
+        "billing export chunk 2026-11-16 to 2026-11-17 skipped: page cursor repeated: pageToken already followed"]
+
+
 def test_google_billing_export_polls_and_pages(google):
     billing(google, {"jobComplete": False, "jobReference": {"jobId": "job-1", "location": "EU"}},
             {"jobComplete": False, "jobReference": {"jobId": "job-1", "location": "EU"}},
@@ -1788,10 +1974,13 @@ def test_google_billing_export_polls_and_pages(google):
     assert [p["params"].get("pageToken") for p in polls] == [None, None, "p2"]
 
 
-def test_google_billing_export_that_never_completes_is_recorded(google):
+def test_google_billing_export_that_never_completes_is_cancelled_and_recorded(google):
     billing(google, {"jobComplete": False, "jobReference": {"jobId": "job-1", "location": "EU"}})
+    google.session.route("POST", f"{BQ_URL}/jobs/job-1/cancel", [{"kind": "bigquery#jobCancelResponse"}])
     assert list(google.connector.fetch_cost(*EXPORT_DAY)) == []
-    assert google.connector.errors == ["billing export chunk 2026-11-16 to 2026-11-17 skipped: query did not complete"]
+    assert len(bq_calls(google, "GET")) == 1 + plugin.BIGQUERY_MAX_POLLS
+    assert [c["params"] for c in google.session.calls if c["url"] == f"{BQ_URL}/jobs/job-1/cancel"] == [{"location": "EU"}]
+    assert google.connector.errors == ["billing export chunk 2026-11-16 to 2026-11-17 skipped: query did not complete; job cancelled"]
 
 
 def test_google_billing_export_failed_query_skips_only_its_slice(google, monkeypatch):
@@ -1801,7 +1990,8 @@ def test_google_billing_export_failed_query_skips_only_its_slice(google, monkeyp
     monkeypatch.setattr(plugin, "COST_SLICE_SPAN", timedelta(days=1))
     result = {"cost_rows": 0, "errors": []}
     plugin.collect_in_slices(FakeLocal(), settings, result, result["errors"].append, "cost",
-                             plugin.period_chunks(*EXPORT_DAY, plugin.COST_SLICE_SPAN), google.connector.fetch_cost)
+                             plugin.period_chunks(*EXPORT_DAY, plugin.COST_SLICE_SPAN), google.connector.fetch_cost,
+                             google.connector.http)
     assert google.connector.errors == ["billing export chunk 2026-11-16 to 2026-11-16 skipped: HTTP 403: denied"]
     assert result["cost_rows"] == 1 and result["errors"] == []
 
@@ -1954,6 +2144,18 @@ def test_gemini_tiers_are_summed(google):
     records = google.usage(["input_tokens"])
     assert sorted(r.quantity for r in records) == [300, 700]
     assert sum(r.quantity for r in records) == 1000
+
+
+@pytest.mark.parametrize("partial, reason", [
+    ({"executionErrors": [{"code": 14, "message": "unavailable"}]}, "execution errors"),
+    ({"unreachable": ["us-central1", "europe-west4"]}, "unreachable regions us-central1, europe-west4"),
+])
+def test_google_incomplete_result_skips_the_whole_source_of_the_project(google, partial, reason):
+    route_gemini(google, FREE_INPUT, gemini_series("m", "PerDay", (16, 300)))
+    google.route_series("usage-test-1", PAID_INPUT, {"timeSeries": [gemini_series("m", "PerDay", (16, 700))], **partial})
+    vertex_routes(google)
+    assert [(r.tags["service"], r.quantity) for r in google.usage(["input_tokens"])] == [("vertex", 40496)]
+    assert google.connector.errors == [f"Gemini API metrics of project usage-test-1 skipped: incomplete result: {reason}"]
 
 
 def test_gemini_smaller_limit_ignored_and_ties_deterministic(google):
@@ -2130,7 +2332,7 @@ def test_backfill_response_reports_each_provider(all_providers, monkeypatch):
 
 
 NAME_RULE = "use letters, digits, _ and -, starting with a letter or digit"
-TABLE_RULE = "spaces, control characters and backslashes aren't allowed"
+TABLE_RULE = "spaces, control characters and backslashes aren't allowed, and a name can't start with #"
 # trigger arguments, environment variables (None removes one), modules made unimportable, the error
 CONFIG_ERRORS = [
     ({"bedrock_regions": ""}, {}, (), "bedrock_regions required when bedrock is listed in providers"),
@@ -2156,6 +2358,7 @@ CONFIG_ERRORS = [
     ({"usage_table": "llm\\usage"}, {}, (), f"usage_table: invalid name {'llm' + chr(92) + 'usage'!r}; {TABLE_RULE}"),
     ({"usage_table": "llm\x01usage"}, {}, (), f"usage_table: invalid name {'llm' + chr(1) + 'usage'!r}; {TABLE_RULE}"),
     ({"cost_table": "llm cost"}, {}, (), f"cost_table: invalid name 'llm cost'; {TABLE_RULE}"),
+    ({"cost_table": "#llm_cost"}, {}, (), f"cost_table: invalid name '#llm_cost'; {TABLE_RULE}"),
     ({"target_database": "llm.usage"}, {}, (), f"target_database: invalid name llm.usage; {NAME_RULE}"),
     ({"usage_table": "llm", "cost_table": "llm"}, {}, (), "usage_table and cost_table must differ"),
     ({}, {}, ("boto3",), "boto3 is not installed; install it with `influxdb3 install package boto3`"),
@@ -2203,7 +2406,7 @@ def test_configuration_error_refuses_the_whole_run(all_providers):
     plugin.process_scheduled_call(local, NOW, args)
     body = json.dumps({"start": "2026-11-12T00:00:00Z", "end": "2026-11-13T00:00:00Z"})
     error = "bedrock_regions: invalid region name us_east_1"
-    assert process_request(local, {}, {}, body, args) == {"status": "error", "error": error}
+    assert process_request(local, {}, {}, body, args) == ({"status": "error", "error": error}, 400)
     assert local.written == [] and all_providers.session.calls == [] and all_providers.bedrock.calls == []
     assert [m.split("] ", 1)[1] for m in local.messages["error"]] == [f"Collection failed: {error}", f"Invalid request: {error}"]
 

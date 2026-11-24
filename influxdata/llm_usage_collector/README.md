@@ -58,8 +58,9 @@ A provider's settings are required only when that provider is listed in `provide
 settings, libraries and secrets of every provider in the run are checked: a missing or malformed setting, an unset
 secret, a missing `boto3` or `google-auth` package, an invalid table or database name. Any of these refuses the whole
 run with an error naming the cause. A scheduled run logs `Collection failed: <error>` and collects nothing; an HTTP
-request answers `{"status": "error", "error": "<error>"}`. Every setting is still parsed and validated for the whole
-trigger; a request that narrows `providers` narrows only the provider checks (required settings, formats, libraries, secrets). 
+request answers HTTP 400 with `{"status": "error", "error": "<error>"}`. Every setting is still parsed and validated
+for the whole trigger; a request that narrows `providers` narrows only the provider checks (required settings,
+formats, libraries, secrets).
 Failures of provider calls (a revoked key, no access) stay per provider: the others collect.
 
 ### Plugin metadata
@@ -84,13 +85,14 @@ parameters. This metadata enables the [InfluxDB 3 Explorer](https://docs.influxd
 | `collect`                         | string/list | `usage cost`                        | What each run reads for every provider: `usage`, `cost`, at least one. Without `usage`, no usage endpoint is called; without `cost`, no cost endpoint is called and the time of the last cost fetch in the trigger cache is left unchanged. `usage` alone suits credentials without cost permissions and avoids the paid Bedrock Cost Explorer calls. Space-separated string in trigger arguments, list in TOML.                                                                                                                        |
 | `usage_types`                     | string/list | all                                 | Usage types to collect, at least one of `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `requests`, `images`, `audio_seconds`, `tts_characters`, `web_search_requests`, `file_search_requests`, `code_interpreter_sessions`, `vector_store_bytes`. A provider writes only the types it reports; OpenAI endpoints for unselected types are not called. Space-separated string in trigger arguments, list in TOML.                                                                                            |
 | `target_database`                 | string      | trigger database                    | Database that receives both tables: letters, digits, `_` and `-`, starting with a letter or digit.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `usage_table`                     | string      | `llm_usage`                         | Table that receives usage rows: any printable characters except spaces and backslashes. Must differ from `cost_table`.                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `cost_table`                      | string      | `llm_cost`                          | Table that receives cost rows: any printable characters except spaces and backslashes. Must differ from `usage_table`.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `usage_table`                     | string      | `llm_usage`                         | Table that receives usage rows: any printable characters except spaces and backslashes, not starting with `#`. Must differ from `cost_table`.                                                                                                                                                                                                                                                                                                                                                                                           |
+| `cost_table`                      | string      | `llm_cost`                          | Table that receives cost rows: any printable characters except spaces and backslashes, not starting with `#`. Must differ from `usage_table`.                                                                                                                                                                                                                                                                                                                                                                                           |
 | `bucket_width`                    | string      | `1h`                                | Width of a usage bucket: `1h` or `1d`. Cost is always daily. Changing it on a table that already has data mixes granularities; use a new table.                                                                                                                                                                                                                                                                                                                                                                                         |
 | `exclude_tags`                    | string/list | none                                | Tags left out of both tables: any of `account`, `project`, `api_key_id`, `user_id`. Rows that become identical are summed, so totals stay intact. `api_key_name` goes with `api_key_id`. Where the provider can skip a breakdown, the plugin doesn't request it. Changing it on a table that already has data mixes granularities; use a new table. Space-separated string in trigger arguments, list in TOML.                                                                                                                          |
 | `usage_lookback`                  | duration    | `48h`                               | How far back each scheduled run re-reads usage. At least one bucket (`1h`, or `1d` when `bucket_width` is `1d`). Only complete buckets are read, up to the start of the current bucket.                                                                                                                                                                                                                                                                                                                                                 |
-| `cost_lookback`                   | duration    | `40d`                               | How far back a cost fetch re-reads daily cost. At least `1d`; rounded up to whole days. The default covers the corrections providers make into the first week of the following month.                                                                                                                                                                                                                                                                                                                                                                             |
+| `cost_lookback`                   | duration    | `40d`                               | How far back a cost fetch re-reads daily cost. At least `1d`; rounded up to whole days. The default covers the corrections providers make into the first week of the following month.                                                                                                                                                                                                                                                                                                                                                   |
 | `cost_interval`                   | duration    | `6h`                                | Minimum time between cost fetches of one provider. Greater than zero. A run before it has passed fetches usage only. For AWS, a longer interval spaces out the Cost Explorer calls; CloudWatch usage is read on every run. STS is called with each cost fetch, and on every run unless `bedrock_account` is set or `account` is in `exclude_tags`. The time of the last fetch is kept in the trigger cache; losing the cache causes one extra fetch.                                                                                    |
+| `max_run_time`                    | duration    | `15min`                             | Longest time a run spends calling providers. Greater than zero. What is left of it is shared equally by the providers not started yet; when a provider's share is used up, the rest of its work is skipped with an error naming what was skipped. Choose a trigger interval longer than `max_run_time`. See [Collection behavior](#collection-behavior).                                                                                                                                                                                |
 | `anthropic_admin_key_env`         | string      | `ANTHROPIC_ADMIN_KEY`               | Name of the environment variable that holds the Anthropic admin key. When `anthropic` is listed in `providers`, a variable that is not set or holds a control character refuses the run. Set in trigger arguments, the TOML file or the environment; not accepted from an HTTP request.                                                                                                                                                                                                                                                 |
 | `anthropic_account`               | string      | `default`                           | Free-text label written as the `account` tag of Anthropic rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `openai_admin_key_env`            | string      | `OPENAI_ADMIN_KEY`                  | Name of the environment variable that holds the OpenAI admin key. When `openai` is listed in `providers`, a variable that is not set or holds a control character refuses the run. Set in trigger arguments, the TOML file or the environment; not accepted from an HTTP request.                                                                                                                                                                                                                                                       |
@@ -121,15 +123,16 @@ settings once; the request body, headers and query parameters add or override th
 | Parameter                         | Type        | Default                             | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 |-----------------------------------|-------------|-------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `providers`                       | string/list | required                            | Providers to collect: `anthropic`, `openai`, `bedrock`, `azure`, `google`, at least one. Space-separated string in trigger arguments and query parameters, list in TOML and the JSON body. A request may name only providers its trigger is configured with.                                                                                                                                                                                                                                                                                                                   |
-| `start`                           | timestamp   | required                            | Start of the period. A start before a provider's oldest available data is served from that moment, and the response says so.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `end`                             | timestamp   | now                                 | End of the period, exclusive. Must be after `start`. Usage is read in whole buckets around `start` and `end`, but only complete ones: up to the start of the current bucket. Cost is read in whole days through the day of `end`, no later than today. The response's `usage_period` and `cost_period` show what was read.                                                                                                                                                                                                                                                                         |
+| `start`                           | timestamp   | none                                | Start of the period. Required for each request: usually sent in the request; set it on the trigger only to give every request the same start. A start before a provider's oldest available data is served from that moment, and the response says so.                                                                                                                                                                                                                                                                                                                          |
+| `end`                             | timestamp   | now                                 | End of the period, exclusive. Must be after `start`. Usage is read in whole buckets around `start` and `end`, but only complete ones: up to the start of the current bucket. Cost is read in whole days through the day of `end`, no later than today. The response's `usage_period` and `cost_period` show what was read.                                                                                                                                                                                                                                                     |
 | `collect`                         | string/list | `usage cost`                        | What the request reads for every provider: `usage`, `cost`, at least one. Without `usage`, no usage endpoint is called and `usage_period` is `null`; without `cost`, no cost endpoint is called and `cost_period` is `null`. Space-separated string in trigger arguments and query parameters, list in TOML and the JSON body.                                                                                                                                                                                                                                                 |
 | `usage_types`                     | string/list | all                                 | Usage types to collect, at least one of `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `requests`, `images`, `audio_seconds`, `tts_characters`, `web_search_requests`, `file_search_requests`, `code_interpreter_sessions`, `vector_store_bytes`. A provider writes only the types it reports; OpenAI endpoints for unselected types are not called. Space-separated string in trigger arguments and query parameters, list in TOML and the JSON body.                                                                                            |
 | `target_database`                 | string      | trigger database                    | Database that receives both tables: letters, digits, `_` and `-`, starting with a letter or digit.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `usage_table`                     | string      | `llm_usage`                         | Table that receives usage rows: any printable characters except spaces and backslashes. Must differ from `cost_table`.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `cost_table`                      | string      | `llm_cost`                          | Table that receives cost rows: any printable characters except spaces and backslashes. Must differ from `usage_table`.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `usage_table`                     | string      | `llm_usage`                         | Table that receives usage rows: any printable characters except spaces and backslashes, not starting with `#`. Must differ from `cost_table`.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `cost_table`                      | string      | `llm_cost`                          | Table that receives cost rows: any printable characters except spaces and backslashes, not starting with `#`. Must differ from `usage_table`.                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `bucket_width`                    | string      | `1h`                                | Width of a usage bucket: `1h` or `1d`. Cost is always daily. Changing it on a table that already has data mixes granularities; use a new table.                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `exclude_tags`                    | string/list | none                                | Tags left out of both tables: any of `account`, `project`, `api_key_id`, `user_id`. Rows that become identical are summed, so totals stay intact. `api_key_name` goes with `api_key_id`. Where the provider can skip a breakdown, the plugin doesn't request it. Changing it on a table that already has data mixes granularities; use a new table. Space-separated string in trigger arguments and query parameters, list in TOML and the JSON body.                                                                                                                          |
+| `max_run_time`                    | duration    | `15min`                             | Longest time a request spends calling providers. Greater than zero. What is left of it is shared equally by the providers not started yet; when a provider's share is used up, the rest of its work is skipped with an error naming what was skipped. A backfill of a long period may need more; repeating the request with a larger value is safe.                                                                                                                                                                                                                            |
 | `anthropic_admin_key_env`         | string      | `ANTHROPIC_ADMIN_KEY`               | Name of the environment variable that holds the Anthropic admin key. When `anthropic` is listed in `providers`, a variable that is not set or holds a control character refuses the run. Set in trigger arguments, the TOML file or the environment; not accepted from an HTTP request.                                                                                                                                                                                                                                                                                        |
 | `anthropic_account`               | string      | `default`                           | Free-text label written as the `account` tag of Anthropic rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `openai_admin_key_env`            | string      | `OPENAI_ADMIN_KEY`                  | Name of the environment variable that holds the OpenAI admin key. When `openai` is listed in `providers`, a variable that is not set or holds a control character refuses the run. Set in trigger arguments, the TOML file or the environment; not accepted from an HTTP request.                                                                                                                                                                                                                                                                                              |
@@ -240,7 +243,8 @@ spaces out the Cost Explorer calls, and `collect=usage` stops them; CloudWatch i
 
 Each Google cost fetch runs an on-demand BigQuery query billed to the project of the export table. It scans the export
 from the first day of the window to now (a backfill does this per 92-day slice). Typical exports are small, and
-BigQuery's free monthly query allowance usually covers it.
+BigQuery's free monthly query allowance usually covers it. A query that hasn't completed after about 5 minutes (30 waits
+of 10 s, within `max_run_time`) is cancelled, and its slice is reported as `query did not complete`.
 
 ### Azure OpenAI / Microsoft Foundry
 
@@ -293,7 +297,7 @@ One row is one measurement of one usage type over one bucket. Time is the bucket
 | tag   | `account`      | Label that keeps the rows of two triggers apart: `anthropic_account`, `openai_account` or `google_account` (default `default`); `bedrock_account` (default the AWS account ID); `azure_account` (default the subscription ID) |
 | tag   | `model`        | Model name exactly as the provider reports it                                                                                                                                                                                 |
 | tag   | `project`      | Anthropic workspace ID, OpenAI project ID, Azure `<resource name>/<deployment name>`, Google project ID                                                                                                                       |
-| tag   | `region`       | Bedrock, Azure and Google Vertex AI (the location that served the request, for example `global` or `us-central1`)                                                                                                             |
+| tag   | `region`       | Bedrock: a region of `bedrock_regions`. Azure: the resource's location in ARM, also for Global and Data Zone deployments. Google Vertex AI: the location Cloud Monitoring reports, for example `global` or `us-central1`      |
 | tag   | `service`      | Google only: `vertex` or `gemini_api`                                                                                                                                                                                         |
 | tag   | `api_key_id`   | Anthropic and OpenAI                                                                                                                                                                                                          |
 | tag   | `user_id`      | Anthropic and OpenAI                                                                                                                                                                                                          |
@@ -308,7 +312,7 @@ One row is one measurement of one usage type over one bucket. Time is the bucket
 | `cache_read_tokens`         | `tokens`     | Input tokens read from a cache                                  |
 | `cache_write_tokens`        | `tokens`     | Input tokens written to a cache, all retention periods summed   |
 | `output_tokens`             | `tokens`     | Output tokens                                                   |
-| `requests`                  | `requests`   | Model requests                                                  |
+| `requests`                  | `requests`   | Model requests; Anthropic code execution counts spans           |
 | `images`                    | `images`     | Generated images                                                |
 | `audio_seconds`             | `seconds`    | Transcribed audio                                               |
 | `tts_characters`            | `characters` | Synthesized speech input                                        |
@@ -341,18 +345,18 @@ amount; the plugin doesn't compute it from price lists.
 
 ### Which tags are empty for which provider
 
-| Tag              | Anthropic    | OpenAI                                                            | Bedrock                               | Azure                                    | Google                                                                                                  |
-|------------------|--------------|-------------------------------------------------------------------|---------------------------------------|------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| `account`        | set          | set                                                               | set                                   | set                                      | set                                                                                                     |
-| `model` in usage | set          | set                                                               | set                                   | set                                      | set                                                                                                     |
-| `model` in cost  | set          | set, empty for line items with no model part (such as embeddings) | set, empty for days before 2026-09-01 | always empty                             | always empty                                                                                            |
-| `project`        | workspace ID | project ID                                                        | always empty                          | resource and deployment (cost: resource) | project ID                                                                                              |
-| `region`         | always empty | always empty                                                      | set                                   | set                                      | usage: Vertex AI location, Gemini API always empty; cost: the serving location, when the export has one |
-| `service`        | always empty | always empty                                                      | always empty                          | always empty                             | `vertex` or `gemini_api`                                                                                |
-| `api_key_id`     | set          | set                                                               | always empty                          | always empty                             | always empty                                                                                            |
-| `user_id`        | set          | set                                                               | always empty                          | always empty                             | always empty                                                                                            |
+| Tag              | Anthropic                     | OpenAI                                                            | Bedrock                               | Azure                                    | Google                                                                                                  |
+|------------------|-------------------------------|-------------------------------------------------------------------|---------------------------------------|------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| `account`        | set                           | set                                                               | set                                   | set                                      | set                                                                                                     |
+| `model` in usage | set, empty for code execution | set                                                               | set                                   | set                                      | set                                                                                                     |
+| `model` in cost  | set, empty for code execution | set, empty for line items with no model part (such as embeddings) | set, empty for days before 2026-09-01 | always empty                             | always empty                                                                                            |
+| `project`        | workspace ID                  | project ID                                                        | always empty                          | resource and deployment (cost: resource) | project ID                                                                                              |
+| `region`         | always empty                  | always empty                                                      | set                                   | set                                      | usage: Vertex AI location, Gemini API always empty; cost: the serving location, when the export has one |
+| `service`        | always empty                  | always empty                                                      | always empty                          | always empty                             | `vertex` or `gemini_api`                                                                                |
+| `api_key_id`     | set                           | set                                                               | always empty                          | always empty                             | always empty                                                                                            |
+| `user_id`        | set                           | set                                                               | always empty                          | always empty                             | always empty                                                                                            |
 
-Anthropic charges that aren't tied to a model (code execution) have no `model`. A key or user the provider doesn't
+Anthropic code execution rows, in usage and cost, have no `model`. A key or user the provider doesn't
 attribute has no `api_key_id` or `user_id`. Some OpenAI usage endpoints don't support every breakdown.
 
 ### API key names
@@ -360,7 +364,8 @@ attribute has no `api_key_id` or `user_id`. Some OpenAI usage endpoints don't su
 For Anthropic and OpenAI, the plugin resolves `api_key_id` to the key's display name and writes it to the
 `api_key_name` field, which is a field and not a tag so that a renamed key can't create a second row for the same
 bucket. The names are cached for an hour in the trigger cache. A failed lookup leaves the field out and never fails
-collection. With `api_key_id` in `exclude_tags`, nothing is looked up.
+collection. OpenAI names come from every enabled key of every project, archived projects included, whether or not the
+key's owner still has access to the project. With `api_key_id` in `exclude_tags`, nothing is looked up.
 
 ### Users
 
@@ -372,13 +377,16 @@ it is the user or service account of the key. User names and email addresses are
 
 - **Scheduled.** Every run reads complete usage buckets from `now - usage_lookback` to the start of the current
   bucket. Cost days from `today - cost_lookback` through today are fetched when at least `cost_interval` has passed
-  since the last cost fetch. Providers deliver data late and revise it, so each run overwrites the same rows. A trigger
-  that was down longer than its lookback leaves a gap; a backfill closes it.
+  since the last cost fetch. The time of a cost fetch is saved when the fetch starts, so a fetch that fails or is cut
+  short by `max_run_time` is tried again only after `cost_interval` too; the run that failed reports the error.
+  Providers deliver data late and revise it, so each run overwrites the same rows. A trigger
+  that was down longer than its lookback leaves a gap; a backfill closes it. A run logs an INFO summary per provider,
+  an ERROR line per error and a WARN line per note, such as cost rows that were skipped.
 - **Cost for the current month is preliminary** and is corrected by later runs. Anthropic and Azure revise cost into
   the first week of the following month.
 - **Backfill.** A `POST` to the HTTP trigger collects usage and cost for `start` to `end`. The request runs until
-  everything is collected, with no limit on the period. The period is collected and written in slices: 7 days of
-  hourly usage, 92 days of daily usage or cost. The response sums the rows of all slices, and a failed write loses
+  everything is collected or `max_run_time` is reached, with no limit on the period. The period is collected and
+  written in slices: 7 days of hourly usage, 92 days of daily usage or cost. The response sums the rows of all slices, and a failed write loses
   only its slice. Each provider splits a slice into requests it accepts. A failed chunk is logged and skipped, and
   repeating the request fills in whatever failed. A period that starts before a provider's oldest available data is
   served from the oldest moment, and the response notes it.
@@ -390,14 +398,28 @@ it is the user or service account of the key. User names and email addresses are
 - **Changing tags or buckets.** Changing `exclude_tags` or `bucket_width` on a table that already has data mixes
   granularities. Write to a new table (`usage_table`, `cost_table`) instead.
 - **Failures.** Configuration errors refuse the whole run (see [Configuration](#configuration)). Every provider is
-  isolated: an exception is logged with the task ID and the others continue. HTTP 429 and 5xx responses are retried up to 
-  five times, waiting as long as the provider asks (`Retry-After`, or the longest of Azure Cost Management's per-quota 
-  retry-after headers, up to 120 s) or 1, 2, 4… s; connection errors and timeouts are retried three times. An error 
+  isolated: an exception is logged with the task ID and the others continue. Every provider API call is tried at most
+  three times: after HTTP 429 or 5xx the plugin waits as long as the provider asks (`Retry-After`, or the longest of
+  Azure Cost Management's per-quota retry-after headers, up to 120 s) or 1, then 2 s; after a connection error or
+  timeout, 1, then 2 s. AWS calls are retried by boto3 within the same three attempts. An error 
   carries the provider's own message, cut to 200 characters; each distinct error is reported once per run. A slice that 
-  fails to be read or written is named in its error, for example `usage of <start> to <end> not written: <reason>`. 
+  fails to be read or written, or holds a value that isn't a finite number (such a slice isn't written), is named in
+  its error, for example `usage of <start> to <end> not written: <reason>`.
+  Data a provider marks as missing in a successful answer (a failed CloudWatch series, an Azure Monitor metric error,
+  Cloud Monitoring execution errors or unreachable regions) counts as an error too. 
   When a run reports an error, rows of its period can be incomplete until a later successful run covers that period: 
   a scheduled run does so within its lookback; for an older period, repeat the backfill, which is safe. Secrets never 
   appear in logs, responses or rows.
+- **Run time.** A scheduled run or a request spends at most `max_run_time`, 15 minutes by default, calling providers.
+  What is left of it is shared equally by the providers not started yet, so a slow provider can't take the time of the
+  others. When a provider's share is used up, a retry whose wait would outlast it isn't made, no new call starts, and
+  the slice in progress and the rest are skipped with an error naming them, such as
+  `max_run_time reached: usage of <start> to <end> skipped`. An HTTP call in progress waits for its answer no longer
+  than the time left; an AWS call in progress can take its three attempts of up to a minute each. So a run ends within
+  `max_run_time` and a few minutes. Choose a trigger interval longer than that, such as `every:1h` with the default:
+  when a run outlasts the interval, the engine queues the next runs and starts them back to back. Each queued run reads
+  its own window, so the rows stay right, but its calls are repeated. A backfill of a long period may need a larger
+  `max_run_time` in the request; repeating a backfill that was cut short is safe.
 
 ## Provider notes
 
@@ -405,7 +427,9 @@ it is the user or service account of the key. User names and email addresses are
 
 Reads the Usage and Cost Analytics API, the only one that gives cost per API key. Usage appears about 4 hours late.
 `requests` counts model requests, which can exceed API calls: a call with web search counts once per model turn of
-the search, for example two or three. Cost is the amount after discounts and before credits.
+the search, for example two or three. Code execution comes as rows without `model`: their `requests` are execution
+spans, not model requests, so filter on `model` to count model requests only. Cost is the amount after discounts and
+before credits.
 
 Not reported:
 
@@ -425,8 +449,8 @@ Not reported:
 Reads the organization usage endpoints (completions, embeddings, moderations, decisions, images, audio speeches, audio
 transcriptions, web search, file search, code interpreter sessions, vector stores) and the costs endpoint. OpenAI's
 `input_tokens` includes cached tokens; the plugin writes them as separate types so the token types don't overlap.
-Reasoning tokens are inside `output_tokens`. Cost has no project grouping of its own; `project` is the project ID the
-costs endpoint returns on each row.
+Reasoning tokens are inside `output_tokens`. Cost is read per project, user, API key and line item, like usage per
+project, user, API key and model; a tag left out with `exclude_tags` isn't requested.
 
 Not reported:
 
@@ -480,12 +504,14 @@ Cognitive Services accounts and then to the discovered
 - Claude cost comes as one meter per resource (`… claude-consumption-units`), not split by token type or deployment.
 - An `AIServices` resource can carry non-LLM meters next to model meters. They are written too and stay
   distinguishable by `billing_item`.
+- `region` is the resource's location in ARM. A Global or Data Zone deployment can serve a request in another region;
+  the row still carries the resource's location.
 - One `azure_account` label for several subscriptions sums their rows.
 - `currency` is the billing currency, which needn't be USD.
 - A new subscription answers 404 for cost for its first day or two, so cost rows appear later than usage.
 - Cost of a resource that was deleted or moved to another resource group isn't collected, because cost rows are
-  matched to the resources discovered now. The response notes how many rows were skipped and their total, per
-  subscription.
+  matched to the resources discovered now. The response, or a WARN line of a scheduled run, notes how many rows were
+  skipped and their total, per subscription.
 - Metrics go back 93 days, so a backfill of usage is limited to that.
 
 Not reported:
@@ -507,7 +533,8 @@ comes from the Cloud Billing export, only when `billing_export` is listed; witho
 
 - `input_tokens` includes cache reads, and `output_tokens` includes thinking tokens, because the metrics don't report
   them separately.
-- Vertex AI `region` is the location that served the request, which can differ from the endpoint that was called.
+- Vertex AI `region` is the location Cloud Monitoring reports: `global` for Gemini calls to the `global` endpoint,
+  otherwise the region that served the call (an embedding call to the `global` endpoint shows its serving region).
   Gemini API rows have no `region`.
 - Vertex AI `requests` counts successful requests.
 - Gemini API input tokens and requests come from the per-tier, per-model token and request limits of the Gemini API
@@ -528,8 +555,8 @@ Cost (`billing_export`):
 - One row per UTC day, project, serving location, service and SKU. `billing_item` is the SKU description, unmodified;
   there is no `model`, because the model is only part of the SKU text. `service` is `vertex` or `gemini_api`;
   `currency` is as exported.
-- `region` is the location that served the request. For a call to the `global` endpoint it differs from the `global`
-  that `llm_usage` shows.
+- `region` is the location that served the request. For a Gemini call to the `global` endpoint it differs from the
+  `global` that `llm_usage` shows.
 - New rows appear one to two days after the usage, so the latest days are incomplete or missing; later runs fill them,
   and corrections to earlier days are picked up.
 - History is whatever the export table holds, from the start of the month before the export was enabled. A backfill
@@ -586,7 +613,7 @@ Collect recent usage and cost every hour:
 ```bash
 influxdb3 create trigger \
   --database llm \
-  --plugin-filename gh:influxdata/llm_usage_collector/llm_usage_collector.py \
+  --path "gh:influxdata/llm_usage_collector/llm_usage_collector.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'providers=anthropic openai,usage_lookback=48h' \
   llm_usage_scheduled
@@ -597,7 +624,7 @@ With a TOML file:
 ```bash
 influxdb3 create trigger \
   --database llm \
-  --plugin-filename gh:influxdata/llm_usage_collector/llm_usage_collector.py \
+  --path "gh:influxdata/llm_usage_collector/llm_usage_collector.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'config_file_path=llm_usage_scheduled_config.toml' \
   llm_usage_scheduled
@@ -610,7 +637,7 @@ Create a trigger that backfills a period on request. The endpoint is `/api/v3/en
 ```bash
 influxdb3 create trigger \
   --database llm \
-  --plugin-filename gh:influxdata/llm_usage_collector/llm_usage_collector.py \
+  --path "gh:influxdata/llm_usage_collector/llm_usage_collector.py" \
   --trigger-spec "request:llm_usage" \
   --trigger-arguments 'providers=anthropic openai' \
   llm_usage_backfill
@@ -626,7 +653,7 @@ Collect Anthropic and OpenAI every hour, leaving user IDs out of the database:
 # Create the trigger
 influxdb3 create trigger \
   --database llm \
-  --plugin-filename gh:influxdata/llm_usage_collector/llm_usage_collector.py \
+  --path "gh:influxdata/llm_usage_collector/llm_usage_collector.py" \
   --trigger-spec "every:1h" \
   --trigger-arguments 'providers=anthropic openai,exclude_tags=user_id' \
   llm_usage_scheduled
@@ -676,7 +703,9 @@ influxdb3 query \
 
 ### Expected output
 
-The response lists, per provider, the period covered, the rows written to each table, the errors and the notes:
+The response lists, per provider, the period covered, the rows written to each table, the errors and the notes. It
+answers HTTP 200 once the request has run, even when some provider calls failed (see each provider's `errors`),
+HTTP 400 for a configuration error and HTTP 500 for an unexpected failure:
 
 ```json
 {
@@ -780,6 +809,7 @@ Key operations:
 
 1. **Connectors**: each provider is one class with the same interface: validation, usage types, oldest available data,
    `fetch_usage` and `fetch_cost`. Authentication, pagination, chunking and retries are inside the connector.
+   Each provider works within its share of `max_run_time`.
 2. **Normalization**: connectors convert provider counters to the usage types above, so the token types never overlap.
 3. **Writer**: drops excluded and empty tags, sums rows that became identical, skips zeros and writes the lines.
 
@@ -789,7 +819,7 @@ Key operations:
 
 #### Issue: the run is refused with a configuration error
 
-**Solution**: an HTTP response `{"status": "error", "error": "<error>"}`, or a log line `Collection failed: <error>`
+**Solution**: an HTTP 400 response `{"status": "error", "error": "<error>"}`, or a log line `Collection failed: <error>`
 on a scheduled trigger, names the cause; nothing was collected. A scheduled trigger repeats the error on every tick
 until it is fixed. Query the logs:
 
@@ -804,7 +834,7 @@ required for the provider (`bedrock_regions`, `azure_tenant_id`, `azure_client_i
 `google_project_ids`, `google_billing_table` with `billing_export`) is missing; a value has the wrong form (a
 `bedrock_regions` name that isn't a region code, an Azure ID that isn't a GUID, a malformed Google project ID or
 `google_billing_table`, a database name with other characters than letters, digits, `_` and `-`, a table name with a
-space, a control character or a backslash, or equal `usage_table` and `cost_table`); the Google variable holds neither a service account key nor the path of a readable key
+space, a control character or a backslash or with `#` at the start, or equal `usage_table` and `cost_table`); the Google variable holds neither a service account key nor the path of a readable key
 file; `boto3` or `google-auth` isn't installed. To keep an unrelated provider from blocking a request, narrow
 `providers` in the request: only the providers it names are checked.
 
@@ -821,7 +851,7 @@ variables are ignored without an error.
 #### Issue: Bedrock usage is missing for an older model
 
 **Solution**: models are discovered from metrics with data in the last two weeks. A backfill further back covers only
-those models. The response notes it.
+those models. The response, or a WARN line of a scheduled run, notes it.
 
 #### Issue: Google: Vertex AI metrics of project … skipped: HTTP 403
 
@@ -859,6 +889,12 @@ and `cost_table`.
 
 **Solution**: increase `cost_interval` to space out Cost Explorer calls, or set `collect=usage` to stop them; reduce
 `bedrock_regions` or the trigger frequency to cut CloudWatch calls.
+
+#### Issue: errors `max_run_time reached: … skipped`
+
+**Solution**: the provider throttled or answered slowly, or the period was too long for the provider's share of
+`max_run_time`. A scheduled run's skipped slices are read again by later runs within `usage_lookback` and
+`cost_lookback`. For a backfill, repeat the request with a larger `max_run_time`, fewer `providers` or a shorter period.
 
 ## Questions/Comments
 

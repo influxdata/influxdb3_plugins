@@ -14,11 +14,12 @@
 # A request may name only providers its trigger is configured with.
 providers = ["anthropic", "openai"]
 
-# Start of the period: ISO 8601 with Z or an offset; a value without a zone is UTC.
-# A start before a provider's oldest available data is served from that moment.
-start = "2026-01-01T00:00:00Z"
-
 ########## Optional parameters ##########
+# Start of the period: ISO 8601 with Z or an offset; a value without a zone is UTC. Required: usually sent with
+# each request. Set it here only to give every request the same start; a request's own start overrides it.
+# A start before a provider's oldest available data is served from that moment.
+#start = "2026-01-01T00:00:00Z"
+
 # End of the period, exclusive: ISO 8601 with Z or an offset; must be after start.
 # Default: the time of the request. Usage is read in whole buckets, complete ones only (up to the start of the current
 # bucket); cost in whole days through the day of end, no later than today
@@ -27,8 +28,8 @@ start = "2026-01-01T00:00:00Z"
 # Database that receives both tables. Default: the database of the trigger.
 # Names: letters, digits, "_" and "-", starting with a letter or digit
 #target_database = "llm_usage"
-# Table names: any printable characters except spaces and backslashes. Defaults: "llm_usage" and "llm_cost"; the two
-# must differ
+# Table names: any printable characters except spaces and backslashes, not starting with "#".
+# Defaults: "llm_usage" and "llm_cost"; the two must differ
 #usage_table = "llm_usage"
 #cost_table = "llm_cost"
 
@@ -46,6 +47,10 @@ start = "2026-01-01T00:00:00Z"
 # Rows that become identical are summed. Default: none
 # Changing it on a table that already has data mixes granularities; use a new table.
 #exclude_tags = ["user_id", "api_key_id"]
+# Longest time a request spends calling providers: an integer and a unit (s, min, h, d, w), greater than zero.
+# What is left of it is shared equally by the providers not started yet; a provider whose share is used up skips
+# the rest of its work with an error naming it. A backfill of a long period may need more. Default: "15min"
+#max_run_time = "1h"
 
 ########## Anthropic ##########
 # Environment variable that holds the admin key. Default: "ANTHROPIC_ADMIN_KEY"

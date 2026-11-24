@@ -70,8 +70,8 @@ google_project_ids = ["my-project-1", "my-project-2"]
 # Database that receives both tables. Default: the database of the trigger.
 # Names: letters, digits, "_" and "-", starting with a letter or digit
 #target_database = "llm_usage"
-# Table names: any printable characters except spaces and backslashes. Defaults: "llm_usage" and "llm_cost"; the two
-# must differ
+# Table names: any printable characters except spaces and backslashes, not starting with "#".
+# Defaults: "llm_usage" and "llm_cost"; the two must differ
 #usage_table = "llm_usage"
 #cost_table = "llm_cost"
 
@@ -103,3 +103,7 @@ google_project_ids = ["my-project-1", "my-project-2"]
 # For AWS, a longer interval spaces out the Cost Explorer calls; CloudWatch usage is read on every run.
 # STS is called with each cost fetch, and on every run unless bedrock_account is set or "account" is in exclude_tags. Default: "6h"
 #cost_interval = "6h"
+# Longest time a run spends calling providers: greater than zero. What is left of it is shared equally by the
+# providers not started yet; a provider whose share is used up skips the rest of its work with an error naming it.
+# Choose a trigger interval longer than this. Default: "15min"
+#max_run_time = "15min"

@@ -7,7 +7,7 @@
     "scheduled_args_config": [
         {
             "name": "providers",
-            "example": "anthropic openai bedrock azure google",
+            "example": "anthropic openai",
             "description": "Providers to collect: a list (space-separated string in trigger arguments, list in TOML) of anthropic, openai, bedrock, azure and google (at least one). Each listed provider is collected on every run. A configuration error in a listed provider's settings, libraries or secrets refuses the whole run; a provider whose calls fail does not stop the others.",
             "required": true
         },
@@ -32,13 +32,13 @@
         {
             "name": "usage_table",
             "example": "llm_usage",
-            "description": "Table that receives usage rows: any printable characters except spaces and backslashes; must differ from cost_table. Default: llm_usage.",
+            "description": "Table that receives usage rows: any printable characters except spaces and backslashes, not starting with #; must differ from cost_table. Default: llm_usage.",
             "required": false
         },
         {
             "name": "cost_table",
             "example": "llm_cost",
-            "description": "Table that receives cost rows: any printable characters except spaces and backslashes; must differ from usage_table. Default: llm_cost.",
+            "description": "Table that receives cost rows: any printable characters except spaces and backslashes, not starting with #; must differ from usage_table. Default: llm_cost.",
             "required": false
         },
         {
@@ -69,6 +69,12 @@
             "name": "cost_interval",
             "example": "6h",
             "description": "Minimum time between cost fetches of one provider: an integer and a unit (s, min, h, d, w), greater than zero. Default: 6h. A run before that interval has passed fetches usage only. For AWS, a longer interval spaces out the Cost Explorer calls; CloudWatch usage is read on every run. STS is called with each cost fetch, and on every run unless bedrock_account is set or account is in exclude_tags.",
+            "required": false
+        },
+        {
+            "name": "max_run_time",
+            "example": "15min",
+            "description": "Longest time a run spends calling providers: an integer and a unit (s, min, h, d, w), greater than zero. Default: 15min. What is left of it is shared equally by the providers not started yet. When a provider's share is used up, a retry that would outlast it isn't made, no new call starts, and the rest of its work in the run is skipped with an error naming what was skipped. Choose a trigger interval longer than max_run_time: runs that outlast the interval are queued and run back to back.",
             "required": false
         },
         {
@@ -201,15 +207,15 @@
     "http_args_config": [
         {
             "name": "providers",
-            "example": "anthropic openai bedrock azure google",
+            "example": "anthropic openai",
             "description": "Providers to collect: a list (space-separated string in trigger arguments and query parameters, list in TOML and the JSON body) of anthropic, openai, bedrock, azure and google (at least one). Each listed provider is collected on every run. A configuration error in a listed provider's settings, libraries or secrets refuses the whole request; a provider whose calls fail does not stop the others. A request may name only providers its trigger is configured with.",
             "required": true
         },
         {
             "name": "start",
             "example": "2026-01-01T00:00:00Z",
-            "description": "Start of the period to collect: an ISO 8601 timestamp with Z or an offset; a value without a zone is UTC. Required. A start before a provider's oldest available data is served from that moment, and the response says so.",
-            "required": true
+            "description": "Start of the period to collect: an ISO 8601 timestamp with Z or an offset; a value without a zone is UTC. Required for each request: usually sent in the request; set it on the trigger only to give every request the same start. A start before a provider's oldest available data is served from that moment, and the response says so.",
+            "required": false
         },
         {
             "name": "end",
@@ -238,13 +244,13 @@
         {
             "name": "usage_table",
             "example": "llm_usage",
-            "description": "Table that receives usage rows: any printable characters except spaces and backslashes; must differ from cost_table. Default: llm_usage.",
+            "description": "Table that receives usage rows: any printable characters except spaces and backslashes, not starting with #; must differ from cost_table. Default: llm_usage.",
             "required": false
         },
         {
             "name": "cost_table",
             "example": "llm_cost",
-            "description": "Table that receives cost rows: any printable characters except spaces and backslashes; must differ from usage_table. Default: llm_cost.",
+            "description": "Table that receives cost rows: any printable characters except spaces and backslashes, not starting with #; must differ from usage_table. Default: llm_cost.",
             "required": false
         },
         {
@@ -257,6 +263,12 @@
             "name": "exclude_tags",
             "example": "user_id api_key_id",
             "description": "Tags left out of both tables: a list (space-separated string in trigger arguments and query parameters, list in TOML and the JSON body) of account, project, api_key_id and user_id. Default: none. Rows that become identical are summed, so totals stay intact; api_key_name goes with api_key_id. Where the provider can skip a breakdown, the plugin doesn't request it. Changing it on a table that already has data mixes granularities; use a new table.",
+            "required": false
+        },
+        {
+            "name": "max_run_time",
+            "example": "1h",
+            "description": "Longest time a request spends calling providers: an integer and a unit (s, min, h, d, w), greater than zero. Default: 15min. What is left of it is shared equally by the providers not started yet. When a provider's share is used up, a retry that would outlast it isn't made, no new call starts, and the rest of its work is skipped with an error naming what was skipped; repeating the request with a larger value is safe. A backfill of a long period may need more.",
             "required": false
         },
         {
@@ -389,7 +401,7 @@
     "http_body_config": [
         {
             "name": "providers",
-            "example": "['openai', 'azure']",
+            "example": "['openai']",
             "description": "Providers to collect in this request: a JSON array (a space-separated string also works) of anthropic, openai, bedrock, azure and google, at least one. Only providers the trigger is configured with; naming another refuses the request. Default: the trigger's providers.",
             "required": false
         },
@@ -426,13 +438,13 @@
         {
             "name": "usage_table",
             "example": "llm_usage",
-            "description": "Table that receives usage rows: any printable characters except spaces and backslashes; must differ from cost_table. Default: llm_usage.",
+            "description": "Table that receives usage rows: any printable characters except spaces and backslashes, not starting with #; must differ from cost_table. Default: llm_usage.",
             "required": false
         },
         {
             "name": "cost_table",
             "example": "llm_cost",
-            "description": "Table that receives cost rows: any printable characters except spaces and backslashes; must differ from usage_table. Default: llm_cost.",
+            "description": "Table that receives cost rows: any printable characters except spaces and backslashes, not starting with #; must differ from usage_table. Default: llm_cost.",
             "required": false
         },
         {
@@ -445,6 +457,12 @@
             "name": "exclude_tags",
             "example": "['user_id', 'api_key_id']",
             "description": "Tags left out of both tables: a JSON array (a space-separated string also works) of account, project, api_key_id and user_id. An empty array clears a value set on the trigger; an empty string counts as unset. Default: none. Rows that become identical are summed, so totals stay intact; api_key_name goes with api_key_id. Changing it on a table that already has data mixes granularities; use a new table.",
+            "required": false
+        },
+        {
+            "name": "max_run_time",
+            "example": "1h",
+            "description": "Longest time the request spends calling providers: an integer and a unit (s, min, h, d, w), greater than zero. Default: the trigger's value, else 15min. What is left of it is shared equally by the providers not started yet. When a provider's share is used up, a retry that would outlast it isn't made, no new call starts, and the rest of its work is skipped with an error naming what was skipped; repeating the request with a larger value is safe.",
             "required": false
         },
         {
@@ -587,8 +605,16 @@ DATABASE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 
 def is_table_name(value: str) -> bool:
-    """Printable, no whitespace (LineBuilder refuses spaces) and no backslash (it escapes the next separator)."""
-    return bool(value) and value.isprintable() and not any(char.isspace() or char == "\\" for char in value)
+    """
+    Printable, no whitespace (LineBuilder refuses spaces), no backslash (it escapes the next separator)
+    and no leading # (the server reads such a line as a comment and drops it).
+    """
+    return (
+        bool(value)
+        and value.isprintable()
+        and not value.startswith("#")
+        and not any(char.isspace() or char == "\\" for char in value)
+    )
 
 ENV_PREFIX = "INFLUXDB3_LLM_USAGE_"
 HEADER_PREFIX = "X-Influxdb3-Llm-Usage-"
@@ -689,6 +715,12 @@ COMMON_VALIDATORS = [
     Validator(
         "cost_interval",
         default=timedelta(hours=6),
+        cast=parse_timedelta,
+        gt=timedelta(0),
+    ),
+    Validator(
+        "max_run_time",
+        default=timedelta(minutes=15),
         cast=parse_timedelta,
         gt=timedelta(0),
     ),
@@ -800,6 +832,7 @@ class Settings:
     usage_lookback: timedelta
     cost_lookback: timedelta
     cost_interval: timedelta
+    max_run_time: timedelta
     start: datetime | None
     end: datetime | None
     provider: dict[str, Any]
@@ -851,7 +884,8 @@ def check_relations(config: dict, http: bool, now: datetime) -> None:
     for name in ("usage_table", "cost_table"):
         if not is_table_name(config[name]):
             raise ConfigError(
-                f"{name}: invalid name {config[name]!r}; spaces, control characters and backslashes aren't allowed"
+                f"{name}: invalid name {config[name]!r}; spaces, control characters and backslashes aren't allowed, "
+                f"and a name can't start with #"
             )
     if config["usage_table"] == config["cost_table"]:
         raise ConfigError("usage_table and cost_table must differ")
@@ -928,6 +962,7 @@ def load_settings(
             usage_lookback=config["usage_lookback"],
             cost_lookback=config["cost_lookback"],
             cost_interval=config["cost_interval"],
+            max_run_time=config["max_run_time"],
             start=config.get("start"),
             end=config.get("end"),
             provider={name: config.get(name) for name in PROVIDER_NAMES},
@@ -991,10 +1026,39 @@ class CostRecord:
     api_key_name: str | None = None
 
 
+MAX_VALUE_TEXT = 50
+
+
+def record_amount(record: UsageRecord | CostRecord) -> Decimal:
+    """
+    The quantity or cost of a record as a Decimal.
+
+    Raises:
+        ValueError: the provider gave a value that isn't a finite number.
+    """
+    is_usage = isinstance(record, UsageRecord)
+    value = record.quantity if is_usage else record.cost
+    try:
+        amount = Decimal(str(value))
+    except ArithmeticError:
+        amount = None
+    if amount is None or not amount.is_finite():
+        item = record.usage_type if is_usage else record.billing_item
+        raise ValueError(
+            f"not a number: {repr(value)[:MAX_VALUE_TEXT]} ({record.provider} {item} at {iso_utc(record.time)})"
+        )
+    return amount
+
+
 def prepare(
     records: Iterable[UsageRecord | CostRecord], exclude_tags: Sequence[str]
 ) -> list:
-    """Drop excluded and empty tags, add up rows that become equal, drop zero rows."""
+    """
+    Drop excluded and empty tags, add up rows that become equal, drop zero rows.
+
+    Raises:
+        ValueError: a value isn't a finite number.
+    """
     groups: dict[tuple, list] = {}
     for record in records:
         tags = {
@@ -1008,7 +1072,7 @@ def prepare(
         )
         key = (is_usage, record.time, record.provider, identity, tuple(sorted(tags.items())))
         group = groups.setdefault(key, [record, tags, Decimal(0), set()])
-        group[2] += Decimal(str(record.quantity if is_usage else record.cost))
+        group[2] += record_amount(record)
         if "api_key_id" not in exclude_tags:
             group[3].add(record.api_key_name)
 
@@ -1088,7 +1152,10 @@ COST_MANAGEMENT_RETRY_PREFIX = "x-ms-ratelimit-microsoft.costmanagement-"
 MAX_ERROR_TEXT = 200
 MAX_RETRY_AFTER_SECONDS = 120.0
 MIN_SECRET_LENGTH = 8
-TRANSPORT_RETRIES = 3
+# every provider call is tried at most this many times, the first one included
+MAX_ATTEMPTS = 3
+# a call started shortly before the deadline still gets this long to answer
+MIN_CALL_TIMEOUT = 1.0
 TRANSPORT_ERRORS = (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
 
 
@@ -1099,6 +1166,13 @@ class ProviderError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class RunTimeExceeded(Exception):
+    """The provider's share of max_run_time is used up: no further call of the run starts."""
+
+    def __init__(self):
+        super().__init__("max_run_time reached")
 
 
 def missing_page_cursor(field: str) -> ProviderError:
@@ -1115,6 +1189,16 @@ def next_page_cursor(body: dict, field: str, seen: set, fallback: str | None = N
         raise ProviderError(None, f"page cursor repeated: has_more with a {field} already followed")
     seen.add(cursor)
     return cursor
+
+
+def next_page_token(token: str | None, field: str, seen: set) -> str | None:
+    """The token of the next page, or None after the last; a token already followed fails instead of looping."""
+    if not token:
+        return None
+    if token in seen:
+        raise ProviderError(None, f"page cursor repeated: {field} already followed")
+    seen.add(token)
+    return token
 
 
 def provider_failure_reason(error: ProviderError) -> str:
@@ -1168,50 +1252,75 @@ def request_secrets(headers, data) -> list[str]:
 
 
 class HttpClient:
-    """JSON over HTTP with retries; errors never quote request headers."""
+    """JSON over HTTP with retries inside an optional deadline; errors never quote request headers."""
 
-    def __init__(self, session=None, *, sleep=time.sleep, max_retries: int = 5, timeout: float = 60):
+    def __init__(self, session=None, *, sleep=time.sleep, max_attempts: int = MAX_ATTEMPTS, timeout: float = 60):
         self.session = session or requests.Session()
         self.sleep = sleep
-        self.max_retries = max_retries
+        self.max_attempts = max_attempts
         self.timeout = timeout
+        # time.monotonic() value after which no call or retry starts; None means no limit
+        self.deadline: float | None = None
+
+    def time_left(self) -> float:
+        """Seconds until the deadline; infinite without one."""
+        return math.inf if self.deadline is None else self.deadline - time.monotonic()
+
+    def check_deadline(self) -> None:
+        """
+        Refuse to start work once the deadline has passed.
+
+        Raises:
+            RunTimeExceeded: the deadline has passed.
+        """
+        if self.time_left() <= 0:
+            raise RunTimeExceeded()
 
     def request_json(self, method: str, url: str, *, headers=None, params=None, json=None, data=None) -> dict:
         """
-        Call the API and return the JSON body.
+        Call the API and return the JSON body; HTTP 204 (no body) returns an empty dict.
 
-        Retries HTTP 429 and 5xx with exponential backoff, and connection errors
-        and timeouts three times, 1, 2 and 4 seconds apart.
+        A call is tried at most ``max_attempts`` times. After HTTP 429 or 5xx it waits as the
+        provider asks (``retry_delay``), after a connection error or timeout 1, 2, ... seconds.
+        No attempt starts after the deadline, a retry whose wait would outlast it isn't made,
+        and an attempt waits for its answer no longer than the time left.
 
         Raises:
+            RunTimeExceeded: the deadline passed before an attempt.
             ProviderError: any other non-2xx status, a transport failure or a non-JSON body.
         """
-        status_retries = transport_retries = 0
+        failures = 0
         while True:
+            self.check_deadline()
+            timeout = min(self.timeout, max(self.time_left(), MIN_CALL_TIMEOUT))
             try:
                 response = self.session.request(
-                    method, url, headers=headers, params=params, json=json, data=data, timeout=self.timeout
+                    method, url, headers=headers, params=params, json=json, data=data, timeout=timeout
                 )
             except TRANSPORT_ERRORS as error:
-                if transport_retries < TRANSPORT_RETRIES:
-                    self.sleep(float(2**transport_retries))
-                    transport_retries += 1
-                    continue
-                raise ProviderError(None, type(error).__name__) from None
+                failure = ProviderError(None, type(error).__name__)
+                delay = float(2**failures)
             except requests.RequestException as error:
                 raise ProviderError(None, type(error).__name__) from None
-            status = response.status_code
-            if (status == 429 or 500 <= status <= 599) and status_retries < self.max_retries:
-                self.sleep(retry_delay(response.headers, status_retries))
-                status_retries += 1
-                continue
-            if not 200 <= status < 300:
+            else:
+                status = response.status_code
+                if status == 204:
+                    # No Content: an empty result, as Azure Cost Management's query documents it
+                    return {}
+                if 200 <= status < 300:
+                    try:
+                        return response.json()
+                    except ValueError:
+                        raise ProviderError(status, "response is not JSON") from None
                 text = provider_error_text(response, request_secrets(headers, data))
-                raise ProviderError(status, f"HTTP {status}: {text}" if text else f"HTTP {status}")
-            try:
-                return response.json()
-            except ValueError:
-                raise ProviderError(status, "response is not JSON") from None
+                failure = ProviderError(status, f"HTTP {status}: {text}" if text else f"HTTP {status}")
+                if not (status == 429 or 500 <= status <= 599):
+                    raise failure
+                delay = retry_delay(response.headers, failures)
+            failures += 1
+            if failures >= self.max_attempts or delay >= self.time_left():
+                raise failure
+            self.sleep(delay)
 
 
 def make_http_client() -> HttpClient:
@@ -1303,6 +1412,8 @@ class Connector:
         if self.resolved_key_names is None:
             try:
                 self.resolved_key_names = cached(self.local, cache_key, load, ttl_seconds=KEY_NAMES_TTL_SECONDS)
+            except RunTimeExceeded:
+                raise
             except Exception as error:
                 reason = provider_failure_reason(error) if isinstance(error, ProviderError) else type(error).__name__
                 self.warn(f"API key names unavailable ({reason})")
@@ -1612,7 +1723,9 @@ class OpenAIConnector(Connector):
         names: dict[str, str] = {}
         projects = self.list_all("projects", {"limit": OPENAI_KEY_PAGE_LIMIT, "include_archived": "true"})
         for project in list(projects):
-            for key in self.list_all(f"projects/{project['id']}/api_keys", {"limit": OPENAI_KEY_PAGE_LIMIT}):
+            # without "any", keys whose owner lost access to the project can be left out
+            key_params = {"limit": OPENAI_KEY_PAGE_LIMIT, "owner_project_access": "any"}
+            for key in self.list_all(f"projects/{project['id']}/api_keys", key_params):
                 if key.get("id") and key.get("name"):
                     names[key["id"]] = key["name"]
         return names
@@ -1675,7 +1788,7 @@ class OpenAIConnector(Connector):
                 "end_time": int(chunk_end.timestamp()),
                 "bucket_width": "1d",
                 "limit": OPENAI_COST_BUCKET_LIMIT,
-                "group_by": self.group_by(("user_id", "api_key_id")) + ["line_item"],
+                "group_by": self.group_by(("project_id", "user_id", "api_key_id")) + ["line_item"],
             }
             for bucket in self.fetch_pages("costs", params):
                 for row in bucket.get("results") or []:
@@ -1702,6 +1815,8 @@ BEDROCK_PRODUCT_ATTRIBUTE_FROM = date(2026, 9, 1)
 BEDROCK_SERVICE = "Amazon Bedrock"
 BEDROCK_EDITION_SUFFIX = "(Amazon Bedrock Edition)"
 BEDROCK_MAX_QUERIES = 500
+# MetricDataResult.StatusCode values that mean the series has no or only part of its data
+CLOUDWATCH_FAILED_STATUSES = frozenset({"InternalError", "Forbidden"})
 BEDROCK_USAGE_RETENTION = timedelta(days=455)
 BEDROCK_DISCOVERY_WINDOW = timedelta(days=14)
 BEDROCK_COST_HISTORY_MONTHS = 13
@@ -1737,7 +1852,9 @@ def metric_query_id(namespace: str, dimensions: list[tuple[str, str]], metric: s
 
 
 def aws_failure_reason(error: Exception) -> str:
-    """The AWS error code when there is one, else the exception class; never the message."""
+    """The AWS error code when there is one, else the exception class; never AWS's message, only the plugin's own."""
+    if isinstance(error, ProviderError):
+        return provider_failure_reason(error)
     response = getattr(error, "response", None)
     code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
     return code or type(error).__name__
@@ -1795,7 +1912,10 @@ class BedrockConnector(Connector):
         return self.boto_session
 
     def _client(self, service: str, region: str):
-        return self._session().client(service, region_name=region)
+        from botocore.config import Config
+
+        retries = {"mode": "standard", "total_max_attempts": MAX_ATTEMPTS}
+        return self._session().client(service, region_name=region, config=Config(retries=retries))
 
     def _account_id(self) -> str:
         """The account ID from the first configured region whose STS answers."""
@@ -1813,9 +1933,10 @@ class BedrockConnector(Connector):
 
     @staticmethod
     def aws_errors() -> tuple[type[Exception], ...]:
+        """Exceptions of a failed AWS call; a repeated page token (ProviderError) counts as one."""
         from botocore.exceptions import BotoCoreError, ClientError
 
-        return BotoCoreError, ClientError
+        return BotoCoreError, ClientError, ProviderError
 
     def record_failure(self, what: str, error: Exception) -> None:
         """Note a skipped call by what it was and the AWS error code only."""
@@ -1852,6 +1973,7 @@ class BedrockConnector(Connector):
         dimension_name, metrics = BEDROCK_NAMESPACES[namespace]
         series: list[tuple[str, str]] = []
         token = None
+        seen: set[str] = set()
         try:
             while True:
                 params = {"Namespace": namespace}
@@ -1867,7 +1989,7 @@ class BedrockConnector(Connector):
                         and dimensions[0].get("Name") == dimension_name
                     ):
                         series.append((metric["MetricName"], dimensions[0]["Value"]))
-                token = response.get("NextToken")
+                token = next_page_token(response.get("NextToken"), "NextToken", seen)
                 if not token:
                     return series
         except self.aws_errors() as error:
@@ -1875,29 +1997,60 @@ class BedrockConnector(Connector):
             self.record_failure(f"ListMetrics {namespace} in {region}", error)
             return []
 
+    @staticmethod
+    def metric_data_batch(
+        client, batch: list[dict], start: datetime, end: datetime
+    ) -> tuple[list[dict], dict[str, str]]:
+        """All pages of one GetMetricData call, and Id -> status of the series CloudWatch returned incomplete."""
+        results: list[dict] = []
+        failed: dict[str, str] = {}
+        token = None
+        seen: set[str] = set()
+        while True:
+            params = {"MetricDataQueries": batch, "StartTime": start, "EndTime": end}
+            if token:
+                params["NextToken"] = token
+            response = client.get_metric_data(**params)
+            token = next_page_token(response.get("NextToken"), "NextToken", seen)
+            for result in response.get("MetricDataResults") or []:
+                status = result.get("StatusCode")
+                # PartialData on the last page has no next page to complete it
+                if status in CLOUDWATCH_FAILED_STATUSES or (status == "PartialData" and not token):
+                    failed[result["Id"]] = status
+                results.append(result)
+            if not token:
+                return results, failed
+
     def read_metric_data(
         self, client, region: str, queries: list[dict], start: datetime, end: datetime
-    ) -> Iterator[dict]:
-        """Results of the queries in batches of at most 500; a failed batch is recorded and skipped."""
+    ) -> tuple[list[dict], set[str]]:
+        """
+        Results of the queries in batches of at most 500, and the Ids of the series without complete data.
+
+        A failed call is recorded and fails its whole batch; series CloudWatch returns as failed are recorded in one error.
+        """
+        window = f"{iso_utc(start)} to {iso_utc(end)}"
+        results: list[dict] = []
+        incomplete: set[str] = set()
+        failed: dict[str, str] = {}
         for offset in range(0, len(queries), BEDROCK_MAX_QUERIES):
             batch = queries[offset : offset + BEDROCK_MAX_QUERIES]
-            results: list[dict] = []
-            token = None
             try:
-                while True:
-                    params = {"MetricDataQueries": batch, "StartTime": start, "EndTime": end}
-                    if token:
-                        params["NextToken"] = token
-                    response = client.get_metric_data(**params)
-                    results.extend(response.get("MetricDataResults") or [])
-                    token = response.get("NextToken")
-                    if not token:
-                        break
+                batch_results, batch_failed = self.metric_data_batch(client, batch, start, end)
             except self.aws_errors() as error:
                 self.note_unreachable(region, error)
-                self.record_failure(f"GetMetricData in {region} {iso_utc(start)} to {iso_utc(end)}", error)
+                self.record_failure(f"GetMetricData in {region} {window}", error)
+                incomplete.update(query["Id"] for query in batch)
                 continue
-            yield from results
+            results.extend(batch_results)
+            failed.update(batch_failed)
+        if failed:
+            codes = ", ".join(sorted(set(failed.values())))
+            self.errors.append(
+                f"GetMetricData in {region} {window}: {len(failed)} of {len(queries)} series failed ({codes}), "
+                "rows of their model and usage type skipped"
+            )
+        return results, incomplete | failed.keys()
 
     def fetch_usage(
         self, start: datetime, end: datetime, bucket_width: str, usage_types: list[str]
@@ -1923,6 +2076,8 @@ class BedrockConnector(Connector):
         for region in self.settings.provider["bedrock_regions"]:
             if region in self.unreachable_regions:
                 continue
+            # boto3 calls don't pass through the HTTP client, so the deadline is checked here
+            self.http.check_deadline()
             client = self._client("cloudwatch", region)
             queries: list[dict] = []
             meaning: dict[str, tuple[str, str]] = {}
@@ -1948,8 +2103,13 @@ class BedrockConnector(Connector):
                             "ReturnData": True,
                         }
                     )
-            for result in self.read_metric_data(client, region, queries, start, end):
+            results, incomplete = self.read_metric_data(client, region, queries, start, end)
+            # one model's usage type can add up series of both namespaces: skip it unless all of them are complete
+            skipped = {meaning[query_id] for query_id in incomplete}
+            for result in results:
                 usage_type, model = meaning[result["Id"]]
+                if (usage_type, model) in skipped:
+                    continue
                 tags = {key: value for key, value in (("account", label), ("model", model), ("region", region)) if value}
                 for moment, value in zip(result.get("Timestamps") or [], result.get("Values") or []):
                     yield UsageRecord(moment.astimezone(timezone.utc), self.name, usage_type, value, dict(tags))
@@ -1958,6 +2118,7 @@ class BedrockConnector(Connector):
         """Bedrock service names Cost Explorer knows over the period, as found."""
         services: list[str] = []
         token = None
+        seen: set[str] = set()
         while True:
             params: dict[str, Any] = {
                 "TimePeriod": {"Start": start_day.isoformat(), "End": end_day.isoformat()},
@@ -1970,7 +2131,7 @@ class BedrockConnector(Connector):
                 value = item.get("Value") or ""
                 if value == BEDROCK_SERVICE or value.endswith(BEDROCK_EDITION_SUFFIX):
                     services.append(value)
-            token = response.get("NextPageToken")
+            token = next_page_token(response.get("NextPageToken"), "NextPageToken", seen)
             if not token:
                 return services
 
@@ -1989,6 +2150,7 @@ class BedrockConnector(Connector):
             conditions.append({"Dimensions": {"Key": "SERVICE", "Values": services}})
         entries: list[dict] = []
         token = None
+        seen: set[str] = set()
         while True:
             params: dict[str, Any] = {
                 "TimePeriod": {"Start": start_day.isoformat(), "End": end_day.isoformat()},
@@ -2001,7 +2163,7 @@ class BedrockConnector(Connector):
                 params["NextPageToken"] = token
             response = client.get_cost_and_usage(**params)
             entries.extend(response.get("ResultsByTime") or [])
-            token = response.get("NextPageToken")
+            token = next_page_token(response.get("NextPageToken"), "NextPageToken", seen)
             if not token:
                 return entries
 
@@ -2026,6 +2188,7 @@ class BedrockConnector(Connector):
             for part_start, part_end, has_model in parts:
                 if not has_model and not services:
                     continue
+                self.http.check_deadline()
                 try:
                     entries = self.cost_groups(
                         client, region, account_id, part_start, part_end, None if has_model else services
@@ -2084,6 +2247,12 @@ AZURE_METRICS = {
 
 def parse_azure_time(stamp: str) -> datetime:
     return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def azure_usage_type(metric: dict) -> str | None:
+    """The usage type of a getBatch metric item, or None for a metric the plugin doesn't read."""
+    mapped = AZURE_METRICS.get(((metric.get("name") or {}).get("value") or "").lower())
+    return mapped[1] if mapped else None
 
 
 @register
@@ -2150,6 +2319,7 @@ class AzureConnector(Connector):
         accounts: list[dict] = []
         for subscription in self.settings.provider["azure_subscription_ids"]:
             url = f"{AZURE_ARM_URL}/subscriptions/{subscription}/providers/Microsoft.CognitiveServices/accounts?api-version={AZURE_ACCOUNTS_API_VERSION}"
+            seen = {url}
             try:
                 while url:
                     body = self.http.request_json("GET", url, headers=self.auth_headers(AZURE_ARM_SCOPE))
@@ -2165,7 +2335,7 @@ class AzureConnector(Connector):
                             )
                         else:
                             self.other_account_ids.add(str(item.get("id") or "").lower())
-                    url = body.get("nextLink")
+                    url = next_page_token(body.get("nextLink"), "nextLink", seen)
             except ProviderError as error:
                 self.errors.append(f"account discovery in subscription {subscription} skipped: {provider_failure_reason(error)}")
         return accounts
@@ -2214,20 +2384,36 @@ class AzureConnector(Connector):
         for chunk_start, chunk_end in period_chunks(start, end, AZURE_USAGE_SPANS[bucket_width]):
             for (subscription, location), members in groups.items():
                 names = {member["id"].lower(): member["name"] for member in members}
+                what = f"getBatch {subscription} {location} chunk {iso_utc(chunk_start)} to {iso_utc(chunk_end)}"
                 for offset in range(0, len(members), AZURE_BATCH_SIZE):
                     ids = [member["id"] for member in members[offset : offset + AZURE_BATCH_SIZE]]
                     entries = self.batch_usage(subscription, location, ids, chunk_start, chunk_end, bucket_width, metric_names)
                     for entry in entries:
                         resource = names.get((entry.get("resourceid") or "").lower())
                         if resource is not None:
-                            yield from self.entry_records(entry, resource, subscription, location, wanted)
+                            # a usage type can add up several metrics (cache writes): skip it when any of them failed
+                            failed = self.failed_usage_types(entry, resource, what)
+                            yield from self.entry_records(entry, resource, subscription, location, wanted - failed)
+
+    def failed_usage_types(self, entry: dict, resource: str, what: str) -> set[str]:
+        """Usage types of the entry's metrics that came back with an error code instead of data, recorded under `what`."""
+        codes: dict[str, str] = {}
+        for metric in entry.get("value") or []:
+            usage_type, code = azure_usage_type(metric), metric.get("errorCode") or "Success"
+            if usage_type and code != "Success":
+                codes[usage_type] = code
+        if codes:
+            self.errors.append(
+                f"{what}: {', '.join(sorted(codes))} of {resource} skipped: {', '.join(sorted(set(codes.values())))}"
+            )
+        return set(codes)
 
     def entry_records(
         self, entry: dict, resource: str, subscription: str, location: str, wanted: set[str]
     ) -> Iterator[UsageRecord]:
         for metric in entry.get("value") or []:
-            mapped = AZURE_METRICS.get(((metric.get("name") or {}).get("value") or "").lower())
-            if mapped is None or mapped[1] not in wanted:
+            usage_type = azure_usage_type(metric)
+            if usage_type not in wanted:
                 continue
             for series in metric.get("timeseries") or []:
                 dimensions = {
@@ -2245,7 +2431,7 @@ class AzureConnector(Connector):
                     if point.get("total") is None:
                         continue
                     yield UsageRecord(
-                        parse_azure_time(point["timeStamp"]), self.name, mapped[1], point["total"], dict(tags)
+                        parse_azure_time(point["timeStamp"]), self.name, usage_type, point["total"], dict(tags)
                     )
 
     @staticmethod
@@ -2276,6 +2462,7 @@ class AzureConnector(Connector):
         }
         url = f"{AZURE_ARM_URL}/subscriptions/{subscription}/providers/Microsoft.CostManagement/query"
         params: dict | None = {"api-version": AZURE_COST_API_VERSION}
+        seen: set[str] = set()
         try:
             while url:
                 response = self.http.request_json(
@@ -2285,7 +2472,7 @@ class AzureConnector(Connector):
                 names = [(column.get("name") or "").lower() for column in properties.get("columns") or []]
                 for row in properties.get("rows") or []:
                     yield dict(zip(names, row))
-                url, params = properties.get("nextLink"), None
+                url, params = next_page_token(properties.get("nextLink"), "nextLink", seen), None
         except ProviderError as error:
             self.record_chunk_failure(f"cost query {subscription}", str(first_day), str(last_day), error)
 
@@ -2489,6 +2676,16 @@ def largest_limit_series(series: list[dict]) -> dict[str, dict]:
     return {model: min(items, key=rank) for model, items in by_model.items()}
 
 
+def incomplete_result_reason(body: dict) -> str | None:
+    """Why a timeSeries.list page may lack data (execution errors, unreachable regions), or None for a complete page."""
+    reasons = []
+    if body.get("executionErrors"):
+        reasons.append("execution errors")
+    if body.get("unreachable"):
+        reasons.append("unreachable regions " + ", ".join(map(str, body["unreachable"])))
+    return "incomplete result: " + "; ".join(reasons) if reasons else None
+
+
 @register
 class GoogleConnector(Connector):
     """Vertex AI and Gemini API usage from Cloud Monitoring."""
@@ -2548,7 +2745,12 @@ class GoogleConnector(Connector):
         self, project: str, metric_type: str, group_by: list[str], start: datetime, end: datetime,
         bucket_width: str, extra_filter: str = "",
     ) -> list[dict]:
-        """All pages of one aligned, summed timeSeries.list query of a project."""
+        """
+        All pages of one aligned, summed timeSeries.list query of a project.
+
+        Raises:
+            ProviderError: a call failed, or a page reports execution errors or unreachable regions.
+        """
         metric_filter = f'metric.type = "{metric_type}"' + (f" AND {extra_filter}" if extra_filter else "")
         params = [
             ("filter", metric_filter),
@@ -2562,11 +2764,15 @@ class GoogleConnector(Connector):
         series: list[dict] = []
         url = GOOGLE_TIME_SERIES_URL.format(project=project)
         page_token = None
+        seen: set[str] = set()
         while True:
             page_params = params + ([("pageToken", page_token)] if page_token else [])
             body = self.http.request_json("GET", url, headers=self.auth_headers(), params=page_params)
+            incomplete = incomplete_result_reason(body)
+            if incomplete:
+                raise ProviderError(None, incomplete)
             series.extend(body.get("timeSeries") or [])
-            page_token = body.get("nextPageToken")
+            page_token = next_page_token(body.get("nextPageToken"), "nextPageToken", seen)
             if not page_token:
                 return series
 
@@ -2583,9 +2789,12 @@ class GoogleConnector(Connector):
                 if source not in self.settings.provider["google_sources"]:
                     continue
                 try:
-                    yield from records(project, start, end, bucket_width, wanted)
+                    # all or nothing: rows of one model can add up several queries (Gemini quota tiers)
+                    rows = list(records(project, start, end, bucket_width, wanted))
                 except ProviderError as error:
                     self.errors.append(f"{label} metrics of project {project} skipped: {provider_failure_reason(error)}")
+                    continue
+                yield from rows
 
     def vertex_records(
         self, project: str, start: datetime, end: datetime, bucket_width: str, wanted: set[str]
@@ -2674,22 +2883,35 @@ class GoogleConnector(Connector):
             ],
         }
         page = self.http.request_json("POST", f"{base_url}/queries", headers=self.auth_headers(), json=body)
-        results_url = f"{base_url}/queries/{page['jobReference']['jobId']}"
+        job_id = page["jobReference"]["jobId"]
+        results_url = f"{base_url}/queries/{job_id}"
         params = {"location": location, "timeoutMs": BIGQUERY_WAIT_MS}
         polls = 0
+        seen: set[str] = set()
         while True:
             if page.get("jobComplete"):
                 names = [field["name"] for field in (page.get("schema") or {}).get("fields") or []]
                 for row in page.get("rows") or []:
                     yield dict(zip(names, (cell["v"] for cell in row["f"])))
-                if not page.get("pageToken"):
+                token = next_page_token(page.get("pageToken"), "pageToken", seen)
+                if not token:
                     return
-                params["pageToken"] = page["pageToken"]
+                params["pageToken"] = token
             else:
                 polls += 1
                 if polls > BIGQUERY_MAX_POLLS:
-                    raise ProviderError(None, "query did not complete")
+                    raise ProviderError(None, f"query did not complete; {self.cancel_job(base_url, job_id, location)}")
             page = self.bigquery_get(results_url, dict(params))
+
+    def cancel_job(self, base_url: str, job_id: str, location: str) -> str:
+        """Ask BigQuery to cancel a query the plugin gave up on; a failed cancel is reported, not raised."""
+        try:
+            self.http.request_json(
+                "POST", f"{base_url}/jobs/{job_id}/cancel", headers=self.auth_headers(), params={"location": location}
+            )
+        except ProviderError as error:
+            return f"cancelling the job failed: {provider_failure_reason(error)}"
+        return "job cancelled"
 
     def fetch_cost(self, start_day: date, end_day: date) -> Iterator[CostRecord]:
         table = GOOGLE_BILLING_TABLE.fullmatch(self.settings.provider["google_billing_table"])
@@ -2741,16 +2963,18 @@ def cost_window(now: datetime, lookback: timedelta) -> tuple[date, date]:
 
 def backfill_usage_window(settings: Settings, now: datetime) -> tuple[datetime, datetime]:
     """Whole buckets around ``start``/``end``, ending no later than the start of the current bucket."""
-    end = min(ceil_to_bucket(settings.end, settings.bucket_width), floor_to_bucket(now, settings.bucket_width))
+    # an end after now counts as now, so a far-future end can't overflow the rounding
+    end = min(ceil_to_bucket(min(settings.end, now), settings.bucket_width), floor_to_bucket(now, settings.bucket_width))
     return floor_to_bucket(settings.start, settings.bucket_width), end
 
 
 def backfill_cost_window(settings: Settings, now: datetime) -> tuple[date, date]:
-    """Days of ``start`` through ``end``, no later than today; the last day counts unless ``end`` is midnight."""
-    last_day = settings.end.date()
-    if settings.end != datetime.combine(last_day, datetime.min.time(), timezone.utc):
+    """Days of ``start`` through ``end`` (an end after now counts as now); the last day counts unless at midnight."""
+    end = min(settings.end, now)
+    last_day = end.date()
+    if end != datetime.combine(last_day, datetime.min.time(), timezone.utc):
         last_day += timedelta(days=1)
-    return settings.start.date(), min(last_day, now.date() + timedelta(days=1))
+    return settings.start.date(), last_day
 
 
 def cost_is_due(local, settings: Settings, provider: str, now: datetime) -> bool:
@@ -2762,11 +2986,18 @@ def cost_is_due(local, settings: Settings, provider: str, now: datetime) -> bool
 
 
 def drain(records: Iterator, fail: Callable[[str], None], what: str) -> list:
-    """Collect what the iterator yields; an exception keeps the rows read before it."""
+    """
+    Collect what the iterator yields; an exception keeps the rows read before it.
+
+    Raises:
+        RunTimeExceeded: passed on, so the slice in progress isn't written.
+    """
     collected = []
     try:
         for record in records:
             collected.append(record)
+    except RunTimeExceeded:
+        raise
     except Exception as error:
         fail(f"{what} not fully read: {error}")
     return collected
@@ -2779,19 +3010,30 @@ def slice_text(start: datetime | date, end: datetime | date) -> str:
     return f"{start} to {end}"
 
 
-def collect_in_slices(local, settings, result, fail, kind: str, slices, fetch: Callable[..., Iterator]) -> None:
+def collect_in_slices(
+    local, settings, result, fail, kind: str, slices, fetch: Callable[..., Iterator], http: HttpClient
+) -> None:
     """
     Fetch, prepare and write one slice at a time and add up the rows written.
 
-    A failed fetch or write is recorded with its slice; the next slices still run.
+    A failed fetch, a value that isn't a finite number or a failed write is recorded with its slice; such a slice
+    isn't written (a failed fetch keeps the rows read before it), and the next slices still run. Once the
+    provider's deadline has passed, the slice in progress and the rest are skipped with one error.
     """
+    slices = list(slices)
     for slice_start, slice_end in slices:
         what = f"{kind} of {slice_text(slice_start, slice_end)}"
-        rows = prepare(drain(fetch(slice_start, slice_end), fail, what), settings.exclude_tags)
-        if not rows:
-            continue
-        usage, cost = (rows, []) if kind == "usage" else ([], rows)
         try:
+            http.check_deadline()
+            records = drain(fetch(slice_start, slice_end), fail, what)
+        except RunTimeExceeded as error:
+            fail(f"{error}: {kind} of {slice_text(slice_start, slices[-1][1])} skipped")
+            return
+        try:
+            rows = prepare(records, settings.exclude_tags)
+            if not rows:
+                continue
+            usage, cost = (rows, []) if kind == "usage" else ([], rows)
             result[f"{kind}_rows"] += sum(write_records(local, settings, usage, cost))
         except WriteFailed as error:
             result[f"{kind}_rows"] += error.written
@@ -2818,7 +3060,7 @@ def collect_usage(local, settings, connector, result, fail, now, backfill) -> No
     result["usage_period"] = [start.isoformat(), end.isoformat()]
     slices = period_chunks(start, end, USAGE_SLICE_SPANS[settings.bucket_width])
     fetch = partial(connector.fetch_usage, bucket_width=settings.bucket_width, usage_types=usage_types)
-    collect_in_slices(local, settings, result, fail, "usage", slices, fetch)
+    collect_in_slices(local, settings, result, fail, "usage", slices, fetch, connector.http)
 
 
 def collect_cost(local, settings, connector, result, fail, now, backfill) -> None:
@@ -2842,10 +3084,11 @@ def collect_cost(local, settings, connector, result, fail, now, backfill) -> Non
         return
     result["cost_period"] = [start_day.isoformat(), end_day.isoformat()]
     slices = period_chunks(start_day, end_day, COST_SLICE_SPAN)
-    collect_in_slices(local, settings, result, fail, "cost", slices, connector.fetch_cost)
+    collect_in_slices(local, settings, result, fail, "cost", slices, connector.fetch_cost, connector.http)
 
 
-def collect_provider(local, settings, task_id, name, now, backfill) -> dict:
+def collect_provider(local, settings, task_id, name, now, backfill, deadline: float) -> dict:
+    """Collect one provider's usage and cost; no call starts after `deadline` (a time.monotonic() value)."""
     result = {
         "usage_period": None,
         "cost_period": None,
@@ -2863,7 +3106,9 @@ def collect_provider(local, settings, task_id, name, now, backfill) -> dict:
         result["errors"].append(message)
 
     try:
-        connector = CONNECTORS[name](settings, make_http_client(), local)
+        http = make_http_client()
+        http.deadline = deadline
+        connector = CONNECTORS[name](settings, http, local)
         connector.task_id = task_id
     except Exception as error:
         fail(f"cannot start: {type(error).__name__}: {error}")
@@ -2890,11 +3135,19 @@ def collect(
     now: datetime,
     backfill: bool,
 ) -> dict[str, dict]:
-    """Collect usage and cost of every provider; one provider's failure never stops the others."""
-    return {
-        name: collect_provider(influxdb3_local, settings, task_id, name, now, backfill)
-        for name in settings.providers
-    }
+    """
+    Collect usage and cost of every provider; one provider's failure never stops the others.
+
+    Each provider gets an equal share of what is left of max_run_time, so a slow one can't take the others' time.
+    """
+    run_end = time.monotonic() + settings.max_run_time.total_seconds()
+    results = {}
+    for index, name in enumerate(settings.providers):
+        share = (run_end - time.monotonic()) / (len(settings.providers) - index)
+        results[name] = collect_provider(
+            influxdb3_local, settings, task_id, name, now, backfill, time.monotonic() + share
+        )
+    return results
 
 
 # --- entry points ---
@@ -2905,18 +3158,21 @@ def new_task_id() -> str:
 
 
 def log_summary(influxdb3_local, task_id: str, results: dict[str, dict]) -> None:
+    """One INFO line per provider, then a WARN line per note: a scheduled run has no response to carry them."""
     for name, result in results.items():
         influxdb3_local.info(
             f"[{task_id}] {name}: wrote {result['usage_rows']} usage and "
             f"{result['cost_rows']} cost rows, {len(result['errors'])} errors"
         )
+        for note in result["notes"]:
+            influxdb3_local.warn(f"[{task_id}] {name}: {note}")
 
 
 def process_scheduled_call(influxdb3_local, call_time, args=None):
     """Collect the trailing usage and, when due, cost window for every provider."""
     task_id = new_task_id()
-    now = call_time if call_time.tzinfo else call_time.replace(tzinfo=timezone.utc)
-    now = now.astimezone(timezone.utc)
+    # the engine passes a naive call_time in the server's local time zone; astimezone reads it as such
+    now = call_time.astimezone(timezone.utc)
     try:
         settings = load_settings(influxdb3_local, task_id, args, now=now)
         results = collect(influxdb3_local, settings, task_id, now=now, backfill=False)
@@ -2926,8 +3182,16 @@ def process_scheduled_call(influxdb3_local, call_time, args=None):
     log_summary(influxdb3_local, task_id, results)
 
 
-def process_request(influxdb3_local, query_parameters, request_headers, request_body, args=None) -> dict:
-    """Backfill the period given as ``start`` and ``end``; return the outcome per provider."""
+def process_request(
+    influxdb3_local, query_parameters, request_headers, request_body, args=None
+) -> dict | tuple[dict, int]:
+    """
+    Backfill the period given as ``start`` and ``end``.
+
+    Returns:
+        The outcome per provider, answered with HTTP 200 even when some provider calls failed;
+        ``(error body, 400)`` for a configuration error, ``(error body, 500)`` for an unexpected failure.
+    """
     task_id = new_task_id()
     now = datetime.now(timezone.utc)
     try:
@@ -2941,9 +3205,12 @@ def process_request(influxdb3_local, query_parameters, request_headers, request_
             http=True,
             now=now,
         )
+        results = collect(influxdb3_local, settings, task_id, now=now, backfill=True)
     except ConfigError as error:
         influxdb3_local.error(f"[{task_id}] Invalid request: {error}")
-        return {"status": "error", "error": str(error)}
-    results = collect(influxdb3_local, settings, task_id, now=now, backfill=True)
+        return {"status": "error", "error": str(error)}, 400
+    except Exception as error:
+        influxdb3_local.error(f"[{task_id}] Request failed: {error}")
+        return {"status": "error", "error": str(error)}, 500
     log_summary(influxdb3_local, task_id, results)
     return {"status": "completed", "providers": results}

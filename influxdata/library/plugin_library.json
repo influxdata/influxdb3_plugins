@@ -176,6 +176,17 @@
                 "trigger_types_supported": ["http"]
             },
             {
+                "name": "LLM Usage Collector",
+                "path": "influxdata/llm_usage_collector/llm_usage_collector.py",
+                "description": "[BETA] Requires InfluxDB 3.8.2+. Collects organization-wide LLM usage and cost from Anthropic, OpenAI, AWS Bedrock, Azure OpenAI / Microsoft Foundry and Google Vertex AI / Gemini API into InfluxDB 3 Core/Enterprise",
+                "author": "InfluxData",
+                "docs_file_link": "https://github.com/influxdata/influxdb3_plugins/blob/main/influxdata/llm_usage_collector/README.md",
+                "required_plugins": [],
+                "required_libraries": ["influxdata-plugin-utils>=0.5.0", "requests", "boto3", "google-auth"],
+                "last_update": "2026-11-24",
+                "trigger_types_supported": ["scheduler", "http"]
+            },
+            {
                 "name": "Schema Validator",
                 "path": "influxdata/schema_validator/schema_validator.py",
                 "description": "[BETA] Requires InfluxDB 3.8.2+. Validates incoming line protocol data against a JSON schema.",
